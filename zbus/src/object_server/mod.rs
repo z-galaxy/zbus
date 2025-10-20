@@ -191,24 +191,46 @@ impl ObjectServer {
         let path = path.try_into().map_err(Into::into)?;
         let mut root = self.root.write().await;
         let (node, manager_path) = root.get_child_mut(&path, false);
+        let manager_path = manager_path.map(|p| p.to_owned());
         let node = node.ok_or(Error::InterfaceNotFound)?;
         if !node.remove_interface(I::name()) {
             return Err(Error::InterfaceNotFound);
         }
-        if let Some(manager_path) = manager_path {
+        if let Some(manager_path) = manager_path.clone() {
             let ctxt = SignalEmitter::new(&self.connection(), manager_path.clone())?;
             ObjectManager::interfaces_removed(&ctxt, path.clone(), (&[I::name()]).into()).await?;
         }
         if node.is_empty() {
-            let mut path_parts = path.rsplit('/').filter(|i| !i.is_empty());
-            let last_part = path_parts.next().unwrap();
-            let ppath = ObjectPath::from_string_unchecked(
-                path_parts.fold(String::new(), |a, p| format!("/{p}{a}")),
-            );
-            root.get_child_mut(&ppath, false)
-                .0
-                .unwrap()
-                .remove_node(last_part);
+            fn gen_paths(paths: &mut Vec<(ObjectPath<'_>, String)>, path: ObjectPath<'_>) {
+                if path.is_empty() {
+                    return;
+                }
+                let mut path_parts = path.rsplit('/').filter(|i| !i.is_empty());
+                let last_part = path_parts.next().unwrap();
+                let ppath = ObjectPath::from_string_unchecked(
+                    path_parts.fold(String::new(), |a, p| format!("/{p}{a}")),
+                );
+                paths.push((ppath.clone(), last_part.to_owned()));
+                gen_paths(paths, ppath);
+            }
+            let mut paths = Vec::new();
+            gen_paths(&mut paths, path);
+            for (ppath, last_part) in paths {
+                let path = ObjectPath::from_string_unchecked(format!("{ppath}/{last_part}"));
+                let node = root.get_child_mut(&path, false).0.unwrap();
+                if !node.is_empty() {
+                    break;
+                }
+                let interfaces = node.interfaces().cloned().collect::<Vec<_>>();
+                if let Some(manager_path) = manager_path.clone() {
+                    let ctxt = SignalEmitter::new(&self.connection(), manager_path.clone())?;
+                    ObjectManager::interfaces_removed(&ctxt, path, interfaces.into()).await?;
+                }
+                root.get_child_mut(&ppath, false)
+                    .0
+                    .unwrap()
+                    .remove_node(&last_part);
+            }
             return Ok(true);
         }
         Ok(false)
