@@ -16,7 +16,7 @@ use std::{
 use tracing::{debug, info_span, instrument, trace, Instrument};
 
 use zbus_names::{BusName, InterfaceName, MemberName, UniqueName};
-use zvariant::{ObjectPath, OwnedValue, Str, Value};
+use zvariant::{DynamicTuple, ObjectPath, OwnedValue, Str, Value};
 
 use crate::{
     fdo::{self, IntrospectableProxy, NameOwnerChanged, PropertiesChangedStream, PropertiesProxy},
@@ -166,9 +166,24 @@ impl<T> PropertyChanged<'_, T> {
 
         // The property was invalidated, so we need to fetch the new value.
         let properties_proxy = self.proxy.properties_proxy();
+        /*
         let value = properties_proxy
             .get(self.proxy.inner.interface.clone(), self.name)
             .await
+            .map_err(crate::Error::from)?;
+        */
+        // Use `call_method` to also get `Sequence` of message
+        let reply = properties_proxy
+            .inner()
+            .call_method::<_, _>(
+                "Get",
+                &DynamicTuple((self.proxy.inner.interface.clone(), self.name)),
+            )
+            .await
+            .map_err(crate::Error::from)?;
+        let value = reply
+            .body()
+            .deserialize::<OwnedValue>()
             .map_err(crate::Error::from)?;
 
         // Save the new value
@@ -179,6 +194,12 @@ impl<T> PropertyChanged<'_, T> {
                 .get_mut(self.name)
                 .expect("PropertyStream with no corresponding property")
                 .value = Some(value);
+            // XXX update sequence
+            // No way to get message from get call?
+            values
+                .get_mut(self.name)
+                .expect("PropertyStream with no corresponding property")
+                .sequence = Some(reply.recv_position());
         }
 
         Ok(Wrapper {
@@ -246,6 +267,56 @@ where
             proxy: m.proxy.clone(),
             phantom: std::marker::PhantomData,
         }))
+    }
+}
+
+impl<'a, T> OrderedStream for PropertyStream<'a, T>
+where
+    T: Unpin,
+{
+    type Ordering = Sequence;
+    type Data = PropertyChanged<'a, T>;
+
+    fn poll_next_before(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        before: Option<&Self::Ordering>,
+    ) -> Poll<PollResult<Self::Ordering, Self::Data>> {
+        let m = self.get_mut();
+        let properties = match m.proxy.get_property_cache() {
+            Some(properties) => properties.clone(),
+            // With no cache, we will get no updates; return immediately
+            None => return Poll::Ready(PollResult::Terminated),
+        };
+        ready!(Pin::new(&mut m.changed_listener).poll(cx));
+
+        let values = properties.values.read().expect("lock poisoned");
+        let property = values
+            .get(m.name)
+            .expect("PropertyStream with no corresponding property");
+
+        m.changed_listener = property.event.listen();
+
+        // XXX
+        let sequence = property.sequence.unwrap();
+
+        if let Some(before) = before {
+            if sequence > *before {
+                return Poll::Ready(PollResult::NoneBefore);
+            }
+        }
+
+        drop(values);
+
+        Poll::Ready(PollResult::Item {
+            ordering: sequence,
+            data: PropertyChanged {
+                name: m.name,
+                properties,
+                proxy: m.proxy.clone(),
+                phantom: std::marker::PhantomData,
+            },
+        })
     }
 }
 
@@ -356,8 +427,15 @@ impl PropertiesCache {
                     // discard updates prior to the initial population
                 }
                 Some(Either::Right(populate)) => {
-                    populate?.body().deserialize().map(|values| {
-                        self.update_cache(&uncached_properties, &values, &[], &interface);
+                    let populate = populate?;
+                    populate.body().deserialize().map(|values| {
+                        self.update_cache(
+                            &uncached_properties,
+                            &values,
+                            &[],
+                            &interface,
+                            populate.recv_position(),
+                        );
                     })?;
                     break;
                 }
@@ -374,6 +452,7 @@ impl PropertiesCache {
                         &args.changed_properties,
                         &args.invalidated_properties,
                         &interface,
+                        update.message().recv_position(),
                     );
                 }
             }
@@ -405,6 +484,7 @@ impl PropertiesCache {
                         &args.changed_properties,
                         &args.invalidated_properties,
                         &interface,
+                        update.message().recv_position(),
                     );
                 }
             }
@@ -419,6 +499,7 @@ impl PropertiesCache {
         changed: &HashMap<&str, Value<'_>>,
         invalidated: &[&str],
         interface: &InterfaceName<'_>,
+        sequence: Sequence,
     ) {
         let mut values = self.values.write().expect("lock poisoned");
 
@@ -434,6 +515,8 @@ impl PropertiesCache {
 
             if let Some(entry) = values.get_mut(*inval) {
                 entry.value = None;
+                // XXX update sequence?
+                entry.sequence = None;
                 entry.event.notify(usize::MAX);
             }
         }
@@ -460,6 +543,8 @@ impl PropertiesCache {
                 }
             };
             entry.value = Some(value);
+            // XXX update sequence
+            entry.sequence = Some(sequence);
             entry.event.notify(usize::MAX);
         }
     }
@@ -1025,6 +1110,8 @@ impl<'a> Proxy<'a> {
 #[derive(Debug, Default)]
 struct PropertyValue {
     value: Option<OwnedValue>,
+    // Sequence of last message received with a new property value
+    sequence: Option<Sequence>,
     event: Event,
 }
 
