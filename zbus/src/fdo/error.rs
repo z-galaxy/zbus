@@ -2,7 +2,11 @@ use crate::DBusError;
 
 /// Errors from <https://gitlab.freedesktop.org/dbus/dbus/-/blob/master/dbus/dbus-protocol.h>
 #[derive(Clone, Debug, DBusError, PartialEq)]
-#[zbus(prefix = "org.freedesktop.DBus.Error", impl_display = true)]
+#[zbus(
+    prefix = "org.freedesktop.DBus.Error",
+    impl_display = true,
+    zbus_internal_is_fdo_err = true
+)]
 #[allow(clippy::upper_case_acronyms)]
 pub enum Error {
     /// Unknown or fall-through zbus error.
