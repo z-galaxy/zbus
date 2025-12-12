@@ -52,7 +52,7 @@ fn basic_connection() {
         "Hello",
         &(),
     ) {
-        Err(zbus::Error::MethodError(_, _, _)) => (),
+        Err(zbus::Error::FDO(_)) => (),
         Err(e) => panic!("{}", e),
 
         _ => panic!(),
@@ -78,7 +78,7 @@ async fn test_basic_connection() -> Result<()> {
         )
         .await
     {
-        Err(zbus::Error::MethodError(_, _, _)) => (),
+        Err(zbus::Error::FDO(_)) => (),
         Err(e) => panic!("{}", e),
 
         _ => panic!(),

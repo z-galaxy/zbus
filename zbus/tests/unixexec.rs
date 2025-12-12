@@ -26,7 +26,7 @@ async fn test_unixexec_connection() -> Result<()> {
         )
         .await
     {
-        Err(zbus::Error::MethodError(_, _, _)) => (),
+        Err(zbus::Error::FDO(_)) => (),
         Err(e) => panic!("{}", e),
 
         _ => panic!(),

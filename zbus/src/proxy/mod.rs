@@ -355,6 +355,14 @@ impl PropertiesCache {
                 Some(Either::Left(_update)) => {
                     // discard updates prior to the initial population
                 }
+                // FIXME: Use deref pattern when stable
+                // https://github.com/rust-lang/rust/issues/87121
+                Some(Either::Right(Err(Error::FDO(fdo))))
+                    if matches!(*fdo, fdo::Error::ServiceUnknown(_)) =>
+                {
+                    // DBus service doesn't exist. But may appear later on the bus.
+                    break;
+                }
                 Some(Either::Right(populate)) => {
                     populate?.body().deserialize().map(|values| {
                         self.update_cache(&uncached_properties, &values, &[], &interface);

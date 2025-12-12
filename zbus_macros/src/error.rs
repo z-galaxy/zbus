@@ -8,7 +8,8 @@ def_attrs! {
 
     pub StructAttributes("struct") {
         prefix str,
-        impl_display bool
+        impl_display bool,
+        zbus_internal_is_fdo_err bool
     };
 
     pub VariantAttributes("enum variant") {
@@ -23,6 +24,7 @@ pub fn expand_derive(input: DeriveInput) -> Result<TokenStream, Error> {
     let StructAttributes {
         prefix,
         impl_display,
+        zbus_internal_is_fdo_err,
     } = StructAttributes::parse(&input.attrs)?;
     let prefix = prefix.unwrap_or_else(|| "org.freedesktop.DBus".to_string());
     let generate_display = impl_display.unwrap_or(true);
@@ -140,9 +142,21 @@ pub fn expand_derive(input: DeriveInput) -> Result<TokenStream, Error> {
 
     let from_zbus_error_impl = zbus_error_variant
         .map(|ident| {
+            // Specific case: when implementing traits for `zbus::fdo::Error`,
+            // add a special case to unpack `zbus::Error::FDO(_)` variant.
+            let fdo_conversion = if zbus_internal_is_fdo_err == Some(true) {
+                quote! {
+                    if let #zbus::Error::FDO(err) = value {
+                         return *err;
+                    }
+                }
+            } else {
+                quote!()
+            };
             quote! {
                 impl ::std::convert::From<#zbus::Error> for #name {
                     fn from(value: #zbus::Error) -> #name {
+                        #fdo_conversion
                         if let #zbus::Error::MethodError(name, desc, _) = &value {
                             match name.as_str() {
                                 #error_converts
