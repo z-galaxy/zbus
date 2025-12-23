@@ -1,6 +1,9 @@
-use crate::{Error, Result, utils::define_name_type_impls};
+use crate::{Error, InvalidNameReason, NameType, Result, utils::define_name_type_impls};
 use serde::Serialize;
 use zvariant::{OwnedValue, Str, Type, Value};
+
+/// The maximum length of a D-Bus name in bytes.
+const MAX_NAME_LENGTH: usize = 255;
 
 /// String that identifies a [unique bus name][ubn].
 ///
@@ -41,39 +44,126 @@ define_name_type_impls! {
 }
 
 fn validate(name: &str) -> Result<()> {
-    validate_bytes(name.as_bytes()).map_err(|_| {
-        Error::InvalidName(
-            "Invalid unique name. \
-            See https://dbus.freedesktop.org/doc/dbus-specification.html#message-protocol-names-bus"
-        )
-    })
+    validate_detailed(name.as_bytes(), NameType::Unique)
 }
 
-pub(crate) fn validate_bytes(bytes: &[u8]) -> std::result::Result<(), ()> {
-    use winnow::{
-        Parser,
-        combinator::{alt, separated},
-        stream::AsChar,
-        token::take_while,
-    };
-    // Rules
-    //
-    // * Only ASCII alphanumeric, `_` or '-'
-    // * Must begin with a `:`.
-    // * Must contain at least one `.`.
-    // * Each element must be 1 character (so name must be minimum 4 characters long).
-    // * <= 255 characters.
-    let element = take_while::<_, _, ()>(1.., (AsChar::is_alphanum, b'_', b'-'));
-    let peer_name = (b':', (separated(2.., element, b'.'))).map(|_: (_, ())| ());
-    let bus_name = b"org.freedesktop.DBus".map(|_| ());
-    let mut unique_name = alt((bus_name, peer_name));
+/// Validate a unique bus name with detailed error reporting.
+///
+/// Rules:
+/// * Only ASCII alphanumeric, `_` or `-`
+/// * Must begin with a `:`
+/// * Must contain at least one `.`
+/// * Each element must be at least 1 character (so name must be minimum 4 characters long)
+/// * <= 255 characters
+///
+/// Note: "org.freedesktop.DBus" is also accepted as a special case.
+pub(crate) fn validate_detailed(bytes: &[u8], name_type: NameType) -> Result<()> {
+    // Early exit: Check for empty name first
+    if bytes.is_empty() {
+        return Err(Error::InvalidNameDetail {
+            name_type,
+            reason: InvalidNameReason::Empty,
+        });
+    }
 
-    unique_name.parse(bytes).map_err(|_| ()).and_then(|_: ()| {
-        // Least likely scenario so we check this last.
-        if bytes.len() > 255 {
-            return Err(());
+    // Early exit: Check length before parsing (cheap check for invalid long names)
+    if bytes.len() > MAX_NAME_LENGTH {
+        return Err(Error::InvalidNameDetail {
+            name_type,
+            reason: InvalidNameReason::TooLong {
+                actual: bytes.len(),
+                max: MAX_NAME_LENGTH,
+            },
+        });
+    }
+
+    // Special case: "org.freedesktop.DBus" is always valid as a unique name
+    if bytes == b"org.freedesktop.DBus" {
+        return Ok(());
+    }
+
+    // Early exit: Unique names must start with ':'
+    if bytes[0] != b':' {
+        return Err(Error::InvalidNameDetail {
+            name_type,
+            reason: InvalidNameReason::MissingColonPrefix,
+        });
+    }
+
+    // Validate the rest of the name (after the colon)
+    let rest = &bytes[1..];
+
+    if rest.is_empty() {
+        return Err(Error::InvalidNameDetail {
+            name_type,
+            reason: InvalidNameReason::Empty,
+        });
+    }
+
+    // Check for leading dot after colon
+    if rest[0] == b'.' {
+        return Err(Error::InvalidNameDetail {
+            name_type,
+            reason: InvalidNameReason::StartsWithDot,
+        });
+    }
+
+    let mut has_dot = false;
+    let mut at_element_start = true;
+
+    for (pos, &byte) in rest.iter().enumerate() {
+        if byte == b'.' {
+            // Check for consecutive dots (empty element)
+            if at_element_start {
+                return Err(Error::InvalidNameDetail {
+                    name_type,
+                    reason: InvalidNameReason::EmptyElement,
+                });
+            }
+            has_dot = true;
+            at_element_start = true;
+        } else if at_element_start {
+            // First character of an element: alphanumeric, underscore, or hyphen
+            // Note: Unlike well-known names, unique names CAN start elements with digits
+            if !byte.is_ascii_alphanumeric() && byte != b'_' && byte != b'-' {
+                return Err(Error::InvalidNameDetail {
+                    name_type,
+                    reason: InvalidNameReason::InvalidCharacter {
+                        character: byte as char,
+                        position: pos + 1, // For the leading colon
+                    },
+                });
+            }
+            at_element_start = false;
+        } else {
+            // Subsequent characters: alphanumeric, underscore, or hyphen
+            if !byte.is_ascii_alphanumeric() && byte != b'_' && byte != b'-' {
+                return Err(Error::InvalidNameDetail {
+                    name_type,
+                    reason: InvalidNameReason::InvalidCharacter {
+                        character: byte as char,
+                        position: pos + 1, // For the leading colon
+                    },
+                });
+            }
         }
+    }
 
-        Ok(())
-    })
+    // Check trailing dot (empty final element)
+    if at_element_start {
+        return Err(Error::InvalidNameDetail {
+            name_type,
+            reason: InvalidNameReason::EmptyElement,
+        });
+    }
+
+    // Must have at least one dot (two elements)
+    if !has_dot {
+        return Err(Error::InvalidNameDetail {
+            name_type,
+            reason: InvalidNameReason::MissingDotSeparator,
+        });
+    }
+
+    Ok(())
 }

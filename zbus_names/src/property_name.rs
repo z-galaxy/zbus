@@ -1,6 +1,9 @@
-use crate::{Error, Result, utils::define_name_type_impls};
+use crate::{Error, InvalidNameReason, NameType, Result, utils::define_name_type_impls};
 use serde::Serialize;
 use zvariant::{OwnedValue, Str, Type, Value};
+
+/// The maximum length of a D-Bus name in bytes.
+const MAX_NAME_LENGTH: usize = 255;
 
 /// String that identifies a [property][pn] name on the bus.
 ///
@@ -37,14 +40,23 @@ define_name_type_impls! {
 }
 
 fn ensure_correct_property_name(name: &str) -> Result<()> {
+    let name_type = NameType::Property;
+
     if name.is_empty() {
-        return Err(Error::InvalidName(
-            "Invalid property name. It has to be at least 1 character long.",
-        ));
-    } else if name.len() > 255 {
-        return Err(Error::InvalidName(
-            "Invalid property name. It can not be longer than 255 characters.",
-        ));
+        return Err(Error::InvalidNameDetail {
+            name_type,
+            reason: InvalidNameReason::Empty,
+        });
+    }
+
+    if name.len() > MAX_NAME_LENGTH {
+        return Err(Error::InvalidNameDetail {
+            name_type,
+            reason: InvalidNameReason::TooLong {
+                actual: name.len(),
+                max: MAX_NAME_LENGTH,
+            },
+        });
     }
 
     Ok(())

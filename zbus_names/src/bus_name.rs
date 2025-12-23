@@ -6,8 +6,8 @@ use core::{
 use std::{borrow::Cow, sync::Arc};
 
 use crate::{
-    Error, OwnedUniqueName, OwnedWellKnownName, Result, UniqueName, WellKnownName, unique_name,
-    utils::impl_str_basic, well_known_name,
+    Error, NameType, OwnedUniqueName, OwnedWellKnownName, Result, UniqueName, WellKnownName,
+    utils::impl_str_basic,
 };
 use serde::{Deserialize, Serialize, de};
 use zvariant::{NoneValue, OwnedValue, Str, Type, Value};
@@ -211,12 +211,24 @@ impl<'s> TryFrom<Str<'s>> for BusName<'s> {
     type Error = Error;
 
     fn try_from(value: Str<'s>) -> Result<Self> {
-        if unique_name::validate_bytes(value.as_bytes()).is_ok() {
+        let bytes = value.as_bytes();
+
+        // Special case: "org.freedesktop.DBus" is treated as a unique name
+        // (it's the well-known name of the bus daemon but handled specially)
+        if bytes == b"org.freedesktop.DBus" {
+            return Ok(BusName::Unique(UniqueName(value)));
+        }
+
+        // Early optimization: check first character to determine which type to try
+        // Unique names start with ':', well-known names don't
+        if bytes.first() == Some(&b':') {
+            // Try as unique name
+            crate::unique_name::validate_detailed(bytes, NameType::Unique)?;
             Ok(BusName::Unique(UniqueName(value)))
-        } else if well_known_name::validate_bytes(value.as_bytes()).is_ok() {
-            Ok(BusName::WellKnown(WellKnownName(value)))
         } else {
-            Err(Error::InvalidName(INVALID_BUS_NAME_ERROR))
+            // Try as well-known name
+            crate::well_known_name::validate_detailed(bytes, NameType::WellKnown)?;
+            Ok(BusName::WellKnown(WellKnownName(value)))
         }
     }
 }
@@ -544,6 +556,3 @@ impl NoneValue for OwnedBusName {
         BusName::null_value()
     }
 }
-
-const INVALID_BUS_NAME_ERROR: &str = "Invalid bus name. \
-    See https://dbus.freedesktop.org/doc/dbus-specification.html#message-protocol-names-bus";
