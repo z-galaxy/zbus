@@ -43,10 +43,18 @@ impl Parse for SignatureInput {
 /// Converts a parsed `Signature` to compile-time token representation.
 ///
 /// This function generates the Rust tokens that will construct the signature
-/// at compile time. Used by both the signature! macro and the Type derive macro.
+/// at compile time, using the default `::zvariant` path. Used by the signature! macro.
 pub fn signature_to_tokens(signature: &Signature) -> TokenStream {
     let zv = quote! { ::zvariant };
+    signature_to_tokens_with_path(signature, &zv)
+}
 
+/// Converts a parsed `Signature` to compile-time token representation with a custom path.
+///
+/// This function generates the Rust tokens that will construct the signature
+/// at compile time. Used by the Type derive macro to support crates that access
+/// zvariant through zbus re-export (e.g., `::zbus::zvariant`).
+pub fn signature_to_tokens_with_path(signature: &Signature, zv: &TokenStream) -> TokenStream {
     match signature {
         Signature::Unit => quote! { #zv::Signature::Unit },
         Signature::Bool => quote! { #zv::Signature::Bool },
@@ -65,7 +73,7 @@ pub fn signature_to_tokens(signature: &Signature) -> TokenStream {
         #[cfg(unix)]
         Signature::Fd => quote! { #zv::Signature::Fd },
         Signature::Array(child) => {
-            let signature = signature_to_tokens(child.signature());
+            let signature = signature_to_tokens_with_path(child.signature(), zv);
             quote! {
                 #zv::Signature::Array(#zv::signature::Child::Static {
                     child: &#signature,
@@ -73,8 +81,8 @@ pub fn signature_to_tokens(signature: &Signature) -> TokenStream {
             }
         }
         Signature::Dict { key, value } => {
-            let key_sig = signature_to_tokens(key.signature());
-            let value_sig = signature_to_tokens(value.signature());
+            let key_sig = signature_to_tokens_with_path(key.signature(), zv);
+            let value_sig = signature_to_tokens_with_path(value.signature(), zv);
             quote! {
                 #zv::Signature::Dict {
                     key: #zv::signature::Child::Static {
@@ -87,7 +95,9 @@ pub fn signature_to_tokens(signature: &Signature) -> TokenStream {
             }
         }
         Signature::Structure(fields) => {
-            let fields = fields.iter().map(signature_to_tokens);
+            let fields = fields
+                .iter()
+                .map(|sig| signature_to_tokens_with_path(sig, zv));
             quote! {
                 #zv::Signature::Structure(#zv::signature::Fields::Static {
                     fields: &[#(&#fields),*],
@@ -96,12 +106,57 @@ pub fn signature_to_tokens(signature: &Signature) -> TokenStream {
         }
         #[cfg(feature = "gvariant")]
         Signature::Maybe(child) => {
-            let signature = signature_to_tokens(child.signature());
+            let signature = signature_to_tokens_with_path(child.signature(), zv);
             quote! {
                 #zv::Signature::Maybe(#zv::signature::Child::Static {
                     child: &#signature,
                 })
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn signature_to_tokens_with_path_uses_custom_path() {
+        let custom_path = quote! { ::zbus::zvariant };
+        let sig = Signature::Str;
+
+        let tokens = signature_to_tokens_with_path(&sig, &custom_path).to_string();
+
+        assert!(
+            tokens.contains("zbus"),
+            "Expected custom path in output: {}",
+            tokens
+        );
+    }
+
+    #[test]
+    fn signature_to_tokens_with_path_uses_custom_path_for_complex_types() {
+        let custom_path = quote! { ::zbus::zvariant };
+
+        // Dict signature - has multiple path references
+        let dict_sig = Signature::from_str("a{sv}").unwrap();
+        let tokens = signature_to_tokens_with_path(&dict_sig, &custom_path).to_string();
+
+        // All occurrences should use the custom path
+        assert!(
+            !tokens.contains(":: zvariant ::") || tokens.contains(":: zbus :: zvariant"),
+            "Found bare ::zvariant without ::zbus prefix: {}",
+            tokens
+        );
+
+        // Structure signature
+        let struct_sig = Signature::from_str("(su)").unwrap();
+        let tokens = signature_to_tokens_with_path(&struct_sig, &custom_path).to_string();
+        assert!(
+            tokens.contains("zbus"),
+            "Expected custom path in struct output: {}",
+            tokens
+        );
     }
 }

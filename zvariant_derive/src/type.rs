@@ -7,7 +7,7 @@ use syn::{
 };
 use zvariant_utils::signature::Signature;
 
-use crate::{signature::signature_to_tokens, utils::*};
+use crate::{signature::signature_to_tokens_with_path, utils::*};
 
 pub fn expand_derive(ast: DeriveInput) -> Result<TokenStream, Error> {
     let StructAttributes {
@@ -25,7 +25,7 @@ pub fn expand_derive(ast: DeriveInput) -> Result<TokenStream, Error> {
             "dict" => Signature::dict(Signature::Str, Signature::Variant),
             s => Signature::from_str(s).map_err(|e| Error::new(ast.span(), e))?,
         };
-        let signature_tokens = signature_to_tokens(&signature);
+        let signature_tokens = signature_to_tokens_with_path(&signature, &zv);
 
         let name = ast.ident;
         let (impl_generics, ty_generics, where_clause) = ast.generics.split_for_impl();
