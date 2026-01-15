@@ -52,6 +52,12 @@
      <signal name="SignalDictStringToValue">
        <arg type="a{sv}" name="dict"/>
      </signal>
+     <!-- Signal `StateChanged` should override `State`'s implicit `receive_state_changed` method -->
+     <signal name="StateChanged">
+       <arg name="state" type="u"/>
+       <arg name="something_else" type="u"/>
+     </signal>
+     <property name="State" type="u" access="read"/>
      <property name="Bar" type="y" access="readwrite"/>
      <property name="Foo-Bar" type="y" access="readwrite"/>
      <property name="Matryoshkas" type="a(oiasta{sv})" access="read"/>
