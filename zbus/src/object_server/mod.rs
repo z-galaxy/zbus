@@ -313,10 +313,7 @@ impl ObjectServer {
                 )));
             }
             DispatchResult::Async(f) => {
-                return f.await.map_err(|e| match e {
-                    Error::FDO(e) => *e,
-                    e => fdo::Error::Failed(format!("{e}")),
-                });
+                return f.await.map_err(|e| fdo::Error::ZBus(e).flatten());
             }
             DispatchResult::RequiresMut => {}
         }
@@ -328,10 +325,7 @@ impl ObjectServer {
             DispatchResult::NotFound => {}
             DispatchResult::RequiresMut => {}
             DispatchResult::Async(f) => {
-                return f.await.map_err(|e| match e {
-                    Error::FDO(e) => *e,
-                    e => fdo::Error::Failed(format!("{e}")),
-                });
+                return f.await.map_err(|e| fdo::Error::ZBus(e).flatten());
             }
         }
         drop(write_lock);

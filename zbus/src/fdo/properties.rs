@@ -4,6 +4,7 @@
 //! be useful across various D-Bus applications. This module provides their proxy.
 
 use std::{borrow::Cow, collections::HashMap};
+use zbus::fdo;
 use zbus_names::InterfaceName;
 use zvariant::{OwnedValue, Value};
 
@@ -64,7 +65,7 @@ impl Properties {
         #[zbus(connection)] connection: &Connection,
         #[zbus(header)] header: Header<'_>,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
-    ) -> Result<()> {
+    ) -> fdo::Result<()> {
         let path = header.path().ok_or(crate::Error::MissingField)?;
         let root = server.root().read().await;
         let iface = root
@@ -89,7 +90,7 @@ impl Properties {
                 )));
             }
             zbus::object_server::DispatchResult::Async(f) => {
-                return f.await.map_err(Into::into);
+                return f.await.map_err(|e| fdo::Error::ZBus(e).flatten());
             }
         }
         let res = iface
