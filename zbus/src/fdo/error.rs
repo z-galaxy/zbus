@@ -169,6 +169,21 @@ pub enum Error {
     NotContainer(String),
 }
 
+impl Error {
+    /// Collapse redundant nesting of errors.
+    ///
+    /// Collapses a nested data structure like `zbus::fdo::Error::ZBus(zbus::Error::FDO(_))`
+    /// into a `zbus::fdo::Error`. `zbus::fdo::Error::ZBus(zbus::error::Failure(s))` will
+    /// also be converted to `zbus::fdo::Error::Failed(s)`.
+    pub fn flatten(self) -> Self {
+        match self {
+            Error::ZBus(zbus::Error::FDO(e)) => *e,
+            Error::ZBus(zbus::Error::Failure(s)) => Error::Failed(s),
+            e => e,
+        }
+    }
+}
+
 /// Alias for a `Result` with the error type [`zbus::fdo::Error`].
 ///
 /// [`zbus::fdo::Error`]: enum.Error.html
