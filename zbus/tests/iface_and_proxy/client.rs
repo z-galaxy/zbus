@@ -3,7 +3,7 @@ use futures_util::{StreamExt, TryStreamExt};
 use std::convert::TryInto;
 use tracing::{debug, instrument};
 use zbus::{
-    Connection, Error, Message, MessageStream,
+    Connection, DBusError, Error, Message, MessageStream,
     fdo::{ObjectManagerProxy, PropertiesProxy},
     message,
     proxy::CacheProperties,
@@ -108,6 +108,14 @@ pub async fn my_iface_test(conn: Connection, event: Event) -> zbus::Result<u32> 
             .await
             .is_err()
     );
+
+    proxy.set_fallible_setter_prop(60).await?;
+    if let Err(e) = proxy.set_fallible_setter_prop(61).await {
+        assert_eq!(
+            zbus::fdo::Error::from(e).name(),
+            "org.freedesktop.DBus.Error.Failed"
+        )
+    }
 
     let props_proxy = PropertiesProxy::builder(&conn)
         .destination("org.freedesktop.MyService")?

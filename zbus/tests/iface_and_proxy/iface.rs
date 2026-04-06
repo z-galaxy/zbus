@@ -1,4 +1,7 @@
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    sync::atomic::{AtomicU32, Ordering},
+};
 use tokio::sync::mpsc::Sender;
 use tracing::{debug, instrument};
 use zbus::{
@@ -21,6 +24,7 @@ pub struct MyIface {
     emits_changed_const: u32,
     emits_changed_false: u32,
     r#let: u32,
+    fallible_setter_prop: AtomicU32,
 }
 
 impl MyIface {
@@ -34,6 +38,7 @@ impl MyIface {
             emits_changed_const: 0,
             emits_changed_false: 0,
             r#let: 0,
+            fallible_setter_prop: AtomicU32::new(0),
         }
     }
 }
@@ -482,6 +487,26 @@ impl MyIface {
     fn set_let(&mut self, val: u32) -> zbus::fdo::Result<()> {
         debug!("`Let` setter called.");
         self.r#let = val;
+        Ok(())
+    }
+
+    #[instrument]
+    #[zbus(property)]
+    fn fallible_setter_prop(&self) -> u32 {
+        debug!("`fallible_setter_prop` getter called.");
+        self.fallible_setter_prop.load(Ordering::SeqCst)
+    }
+
+    #[instrument]
+    #[zbus(property)]
+    async fn set_fallible_setter_prop(&self, val: u32) -> zbus::Result<()> {
+        debug!("`fallible_setter_prop` setter called.");
+        if val > 60 {
+            return Err(zbus::Error::Failure(format!(
+                "Provided value is {val}; values above 60 not accepted"
+            )));
+        }
+        self.fallible_setter_prop.store(val, Ordering::SeqCst);
         Ok(())
     }
 
