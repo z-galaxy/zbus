@@ -2172,9 +2172,9 @@ dependencies = [
 
 [[package]]
 name = "winnow"
-version = "1.0.1"
+version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09dac053f1cd375980747450bfc7250c264eaae0583872e845c0c7cd578872b5"
+checksum = "2ee1708bef14716a11bae175f579062d4554d95be2c6829f518df847b7b3fdd0"
 dependencies = [
  "memchr",
 ]
@@ -2345,7 +2345,7 @@ dependencies = [
  "uuid",
  "vsock",
  "windows-sys 0.61.2",
- "winnow 1.0.1",
+ "winnow 1.0.2",
  "zbus_macros",
  "zbus_names",
  "zbus_xml",
@@ -2375,7 +2375,7 @@ version = "4.3.1"
 dependencies = [
  "codspeed-criterion-compat",
  "serde",
- "winnow 1.0.1",
+ "winnow 1.0.2",
  "zvariant",
 ]
 
@@ -2500,7 +2500,7 @@ dependencies = [
  "time",
  "url",
  "uuid",
- "winnow 1.0.1",
+ "winnow 1.0.2",
  "zvariant_derive",
  "zvariant_utils",
 ]
@@ -2528,6 +2528,6 @@ dependencies = [
  "quote",
  "serde",
  "syn 2.0.117",
- "winnow 1.0.1",
+ "winnow 1.0.2",
  "zvariant",
 ]
