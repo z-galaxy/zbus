@@ -40,13 +40,18 @@ impl Server {
         guid: OwnedGuid,
         #[cfg(unix)] client_uid: Option<u32>,
         #[cfg(windows)] client_sid: Option<String>,
-        mechanism: Option<AuthMechanism>,
+        mechanisms: Option<Vec<AuthMechanism>>,
         unique_name: Option<OwnedUniqueName>,
     ) -> Result<Self> {
-        let mechanism = mechanism.unwrap_or_else(|| socket.read().auth_mechanism());
+        let mechanisms = mechanisms.unwrap_or_else(|| vec![socket.read().auth_mechanism()]);
+        if mechanisms.is_empty() {
+            return Err(Error::Handshake(
+                "No authentication mechanisms provided".into(),
+            ));
+        }
 
         Ok(Server {
-            common: Common::new(socket, mechanism),
+            common: Common::new(socket, mechanisms),
             step: ServerHandshakeStep::WaitingForAuth,
             #[cfg(unix)]
             client_uid,
@@ -102,7 +107,14 @@ impl Server {
 
     #[instrument(skip(self))]
     async fn rejected_error(&mut self) -> Result<()> {
-        let cmd = Command::Rejected(self.common.mechanism().as_str().into());
+        let mechs = self
+            .common
+            .mechanisms()
+            .iter()
+            .map(|m| m.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let cmd = Command::Rejected(mechs.into());
         trace!("Sending authentication error");
         self.common.write_command(cmd).await?;
         self.step = ServerHandshakeStep::WaitingForAuth;
@@ -132,12 +144,12 @@ impl Server {
         let reply = self.common.read_command().await?;
         match reply {
             Command::Auth(requested_mech, resp) => {
-                let mech = self.common.mechanism();
-                if requested_mech != Some(mech) {
+                let mech = requested_mech.filter(|m| self.common.mechanisms().contains(m));
+                let Some(mech) = mech else {
                     self.rejected_error().await?;
 
                     return Ok(());
-                }
+                };
 
                 match &resp {
                     None => {

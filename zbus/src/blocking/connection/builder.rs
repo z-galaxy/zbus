@@ -126,6 +126,13 @@ impl<'a> Builder<'a> {
         Self(self.0.auth_mechanism(auth_mechanism))
     }
 
+    /// Specify multiple mechanisms to accept during authentication.
+    ///
+    /// See [`crate::connection::Builder::auth_mechanisms`] for details.
+    pub fn auth_mechanisms(self, auth_mechanisms: impl Into<Vec<AuthMechanism>>) -> Self {
+        Self(self.0.auth_mechanisms(auth_mechanisms))
+    }
+
     /// Specify the user id during authentication.
     ///
     /// This can be useful when using [`AuthMechanism::External`] with `socat`

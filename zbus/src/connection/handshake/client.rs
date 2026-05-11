@@ -32,7 +32,7 @@ impl Client {
         let mechanism = mechanism.unwrap_or_else(|| socket.read().auth_mechanism());
 
         Client {
-            common: Common::new(socket, mechanism),
+            common: Common::new(socket, vec![mechanism]),
             server_guid,
             bus,
             user_id: match user_id {

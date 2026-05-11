@@ -69,7 +69,7 @@ impl Authenticated {
         guid: OwnedGuid,
         #[cfg(unix)] client_uid: Option<u32>,
         #[cfg(windows)] client_sid: Option<String>,
-        auth_mechanism: Option<AuthMechanism>,
+        auth_mechanisms: Option<Vec<AuthMechanism>>,
         unique_name: Option<OwnedUniqueName>,
     ) -> Result<Self> {
         Server::new(
@@ -79,7 +79,7 @@ impl Authenticated {
             client_uid,
             #[cfg(windows)]
             client_sid,
-            auth_mechanism,
+            auth_mechanisms,
             unique_name,
         )?
         .perform()
@@ -250,7 +250,7 @@ mod tests {
             p1.into(),
             Guid::generate().into(),
             Some(geteuid().as_raw()),
-            Some(AuthMechanism::Anonymous),
+            Some(vec![AuthMechanism::Anonymous]),
             None,
         )
         .unwrap();
@@ -267,13 +267,75 @@ mod tests {
             p1.into(),
             Guid::generate().into(),
             Some(geteuid().as_raw()),
-            Some(AuthMechanism::Anonymous),
+            Some(vec![AuthMechanism::Anonymous]),
             None,
         )
         .unwrap();
 
         crate::utils::block_on(p0.write_all(b"\0AUTH ANONYMOUS\r\nDATA abcd\r\nBEGIN\r\n"))
             .unwrap();
+        crate::utils::block_on(server.perform()).unwrap();
+    }
+
+    #[test]
+    #[timeout(15000)]
+    fn multi_mechanism_anonymous() {
+        let (mut p0, p1) = create_async_socket_pair();
+        let server = Server::new(
+            p1.into(),
+            Guid::generate().into(),
+            Some(geteuid().as_raw()),
+            Some(vec![AuthMechanism::External, AuthMechanism::Anonymous]),
+            None,
+        )
+        .unwrap();
+
+        crate::utils::block_on(p0.write_all(b"\0AUTH ANONYMOUS abcd\r\nBEGIN\r\n")).unwrap();
+        crate::utils::block_on(server.perform()).unwrap();
+    }
+
+    #[test]
+    #[timeout(15000)]
+    fn multi_mechanism_external() {
+        let (p0, p1) = create_async_socket_pair();
+
+        let guid = OwnedGuid::from(Guid::generate());
+        let client = Client::new(p0.into(), None, Some(guid.clone()), false, None);
+        let server = Server::new(
+            p1.into(),
+            guid,
+            Some(geteuid().as_raw()),
+            Some(vec![AuthMechanism::External, AuthMechanism::Anonymous]),
+            None,
+        )
+        .unwrap();
+
+        let (client, server) = crate::utils::block_on(join(
+            async move { client.perform().await.unwrap() },
+            async move { server.perform().await.unwrap() },
+        ));
+
+        assert_eq!(client.server_guid, server.server_guid);
+    }
+
+    #[test]
+    #[timeout(15000)]
+    fn multi_mechanism_rejected_then_retry() {
+        let (mut p0, p1) = create_async_socket_pair();
+        let server = Server::new(
+            p1.into(),
+            Guid::generate().into(),
+            Some(geteuid().as_raw()),
+            Some(vec![AuthMechanism::Anonymous]),
+            None,
+        )
+        .unwrap();
+
+        // Client tries EXTERNAL (unsupported), gets REJECTED, then retries with ANONYMOUS.
+        crate::utils::block_on(
+            p0.write_all(b"\0AUTH EXTERNAL 30\r\nAUTH ANONYMOUS abcd\r\nBEGIN\r\n"),
+        )
+        .unwrap();
         crate::utils::block_on(server.perform()).unwrap();
     }
 }

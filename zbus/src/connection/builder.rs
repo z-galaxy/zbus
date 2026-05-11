@@ -83,7 +83,7 @@ pub struct Builder<'a> {
     internal_executor: bool,
     interfaces: Interfaces<'a>,
     names: HashSet<WellKnownName<'a>>,
-    auth_mechanism: Option<AuthMechanism>,
+    auth_mechanisms: Option<Vec<AuthMechanism>>,
     #[cfg(feature = "bus-impl")]
     unique_name: Option<crate::names::UniqueName<'a>>,
     request_name_flags: BitFlags<RequestNameFlags>,
@@ -247,7 +247,23 @@ impl<'a> Builder<'a> {
 
     /// Specify the mechanism to use during authentication.
     pub fn auth_mechanism(mut self, auth_mechanism: AuthMechanism) -> Self {
-        self.auth_mechanism = Some(auth_mechanism);
+        self.auth_mechanisms = Some(vec![auth_mechanism]);
+
+        self
+    }
+
+    /// Specify multiple mechanisms to accept during authentication.
+    ///
+    /// This is particularly useful on the server side, where you may want to accept more than one
+    /// authentication mechanism. The server will accept whichever mechanism the client offers, as
+    /// long as it is in this list. If the client's mechanism is not supported, the server responds
+    /// with a `REJECTED` message listing all supported mechanisms, allowing the client to retry.
+    ///
+    /// This is fully compliant with the [D-Bus specification].
+    ///
+    /// [D-Bus specification]: https://dbus.freedesktop.org/doc/dbus-specification.html#auth-mechanisms
+    pub fn auth_mechanisms(mut self, auth_mechanisms: impl Into<Vec<AuthMechanism>>) -> Self {
+        self.auth_mechanisms = Some(auth_mechanisms.into());
 
         self
     }
@@ -595,7 +611,7 @@ impl<'a> Builder<'a> {
             internal_executor: true,
             interfaces: HashMap::new(),
             names: HashSet::new(),
-            auth_mechanism: None,
+            auth_mechanisms: None,
             #[cfg(feature = "bus-impl")]
             unique_name: None,
             request_name_flags: BitFlags::default(),
@@ -634,7 +650,7 @@ impl<'a> Builder<'a> {
                     Authenticated::client(
                         stream,
                         server_guid,
-                        self.auth_mechanism,
+                        self.auth_mechanisms.as_ref().map(|m| m[0]),
                         is_bus_conn,
                         self.user_id,
                     )
@@ -658,7 +674,7 @@ impl<'a> Builder<'a> {
                         client_uid,
                         #[cfg(windows)]
                         client_sid,
-                        self.auth_mechanism,
+                        self.auth_mechanisms.take(),
                         unique_name,
                     )
                     .await
@@ -669,7 +685,7 @@ impl<'a> Builder<'a> {
             Authenticated::client(
                 stream,
                 server_guid,
-                self.auth_mechanism,
+                self.auth_mechanisms.as_ref().map(|m| m[0]),
                 is_bus_conn,
                 self.user_id,
             )

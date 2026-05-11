@@ -11,20 +11,22 @@ pub(super) struct Common {
     #[cfg(unix)]
     received_fds: Vec<std::os::fd::OwnedFd>,
     cap_unix_fd: bool,
-    mechanism: AuthMechanism,
+    mechanisms: Vec<AuthMechanism>,
     first_command: bool,
 }
 
 impl Common {
     /// Start a handshake on this client socket
-    pub fn new(socket: BoxedSplit, mechanism: AuthMechanism) -> Self {
+    pub fn new(socket: BoxedSplit, mechanisms: impl Into<Vec<AuthMechanism>>) -> Self {
+        let mechanisms = mechanisms.into();
+        debug_assert!(!mechanisms.is_empty());
         Self {
             socket,
             recv_buffer: Vec::new(),
             #[cfg(unix)]
             received_fds: Vec::new(),
             cap_unix_fd: false,
-            mechanism,
+            mechanisms,
             first_command: true,
         }
     }
@@ -43,7 +45,12 @@ impl Common {
     }
 
     pub fn mechanism(&self) -> AuthMechanism {
-        self.mechanism
+        self.mechanisms[0]
+    }
+
+    #[cfg(feature = "p2p")]
+    pub fn mechanisms(&self) -> &[AuthMechanism] {
+        &self.mechanisms
     }
 
     pub fn into_components(self) -> IntoComponentsReturn {
@@ -53,7 +60,7 @@ impl Common {
             #[cfg(unix)]
             self.received_fds,
             self.cap_unix_fd,
-            self.mechanism,
+            self.mechanisms,
         )
     }
 
@@ -180,7 +187,7 @@ type IntoComponentsReturn = (
     Vec<u8>,
     Vec<std::os::fd::OwnedFd>,
     bool,
-    AuthMechanism,
+    Vec<AuthMechanism>,
 );
 #[cfg(not(unix))]
-type IntoComponentsReturn = (BoxedSplit, Vec<u8>, bool, AuthMechanism);
+type IntoComponentsReturn = (BoxedSplit, Vec<u8>, bool, Vec<AuthMechanism>);
