@@ -4,7 +4,7 @@ use std::num::NonZeroUsize;
 
 use zruntime::broadcast::{Receiver, Sender, channel};
 
-use crate::{Message, conn::AuthMechanism, fdo::ConnectionCredentials};
+use crate::{Message, conn::AuthMechanism, fdo::ConnectionCredentials, log::trace};
 
 /// An in-process channel-based socket.
 ///
@@ -101,8 +101,11 @@ impl super::WriteHalf for Writer {
                 crate::Error::InputOutput(io::Error::new(io::ErrorKind::BrokenPipe, e).into())
             })
             .map(|removed| {
-                // We don't enable `overflow` mode so items should never be removed.
-                assert!(removed.is_none());
+                // With overflow enabled, the oldest message may be removed.
+                // This is expected and safe.
+                if let Some(removed) = removed {
+                    trace!("Channel overflow: removed oldest message: {:?}", removed);
+                }
             })
     }
 

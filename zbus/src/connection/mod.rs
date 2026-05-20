@@ -73,6 +73,7 @@ pub(crate) struct ConnectionInner {
     pub(crate) msg_receiver: InactiveReceiver<Result<Message>>,
     msg_senders: Arc<Mutex<HashMap<Option<OwnedMatchRule>, MsgBroadcaster>>>,
     pending_method_calls: PendingMethodCalls,
+    overflow: AtomicBool,
 
     subscriptions: Mutex<Subscriptions>,
 
@@ -926,6 +927,28 @@ impl Connection {
         self.inner.msg_receiver.clone().set_capacity(max);
     }
 
+    /// Whether overflow mode is enabled on the broadcast channels.
+    ///
+    /// See [`Builder::overflow`] for details.
+    ///
+    /// [`Builder::overflow`]: connection::Builder::overflow
+    pub fn overflow(&self) -> bool {
+        self.inner.overflow.load(Ordering::Relaxed)
+    }
+
+    /// Enable or disable overflow mode on the broadcast channels.
+    ///
+    /// When enabled and a channel is full, the oldest message is dropped to make room for the
+    /// newest one. This ensures the socket reader task is never blocked by a full channel.
+    ///
+    /// See [`Builder::overflow`] for an example.
+    ///
+    /// [`Builder::overflow`]: connection::Builder::overflow
+    pub fn set_overflow(&mut self, overflow: bool) {
+        self.inner.overflow.store(overflow, Ordering::Relaxed);
+        self.inner.msg_receiver.clone().set_overflow(overflow);
+    }
+
     /// The server's GUID.
     pub fn server_guid(&self) -> &OwnedGuid {
         &self.inner.server_guid
@@ -1091,8 +1114,11 @@ impl Connection {
         match subscriptions.entry(rule.clone()) {
             Entry::Vacant(e) => {
                 let max_queued = max_queued.unwrap_or(DEFAULT_MAX_QUEUED);
-                let (sender, mut receiver) = channel(max_queued);
+                let (mut sender, mut receiver) = channel(max_queued);
                 receiver.set_await_active(false);
+                let overflow = self.inner.overflow.load(Ordering::Relaxed);
+                sender.set_overflow(overflow);
+                receiver.set_overflow(overflow);
                 if self.is_bus() && msg_type == Type::Signal {
                     self.call_method(
                         Some("org.freedesktop.DBus"),
@@ -1226,6 +1252,7 @@ impl Connection {
                 msg_senders,
                 pending_method_calls,
                 msg_receiver,
+                overflow: AtomicBool::new(false),
                 registered_names: Mutex::new(HashMap::new()),
                 runtime,
                 drop_event: Event::new(),
