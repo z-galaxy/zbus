@@ -115,7 +115,7 @@ impl Transport {
                         SocketAddr::from_abstract_name(name.as_encoded_bytes())?
                     }
                     UnixSocket::Dir(_) | UnixSocket::TmpDir(_) => {
-                        // you can't connect to a unix:dir
+                        // You can't connect to a unix:dir.
                         return Err(Error::Unsupported);
                     }
                 };
