@@ -110,13 +110,26 @@ async fn test_proxy_created_before_server_property() -> Result<()> {
     #[cfg(not(feature = "tokio"))]
     async_io::Timer::after(Duration::from_millis(100)).await;
 
-    // Try to read the property again. The interface IS now registered and a fresh
-    // Get call would work. But the proxy's cache.ready() still returns the
-    // original error, so this always fails — demonstrating the bug.
+    // Try to read the property again. The interface IS now registered, so a
+    // direct Get call should succeed even though the cache was poisoned.
     let second_result = proxy.value().await;
+    assert_eq!(
+        second_result.expect("property read should succeed after interface is registered"),
+        42,
+    );
 
-    // BUG: This assertion documents the broken behavior. Once the bug is fixed this should not panic.
-    let _ = second_result.expect("Should return the value after the interface is published");
+    // Give the cache retry task a moment to repopulate.
+    #[cfg(feature = "tokio")]
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    #[cfg(not(feature = "tokio"))]
+    async_io::Timer::after(Duration::from_millis(100)).await;
+
+    // Subsequent reads should now come from the repopulated cache.
+    let third_result = proxy.value().await;
+    assert_eq!(
+        third_result.expect("property read should use repopulated cache"),
+        42,
+    );
 
     Ok(())
 }

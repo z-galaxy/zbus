@@ -276,8 +276,23 @@ impl PropertiesCache {
             }),
         });
 
-        let cache_clone = cache.clone();
         let task_name = format!("{interface} proxy caching");
+        let task =
+            cache.spawn_populate(proxy, interface, executor, uncached_properties, &task_name);
+
+        (cache, task)
+    }
+
+    /// Spawn the cache population task. This calls `init` then `keep_updated`.
+    fn spawn_populate(
+        self: &Arc<Self>,
+        proxy: PropertiesProxy<'static>,
+        interface: InterfaceName<'static>,
+        executor: &Executor<'_>,
+        uncached_properties: HashSet<zvariant::Str<'static>>,
+        task_name: &str,
+    ) -> Task<()> {
+        let cache_clone = self.clone();
         let proxy_caching = async move {
             let result = cache_clone
                 .init(proxy, interface, uncached_properties)
@@ -286,9 +301,8 @@ impl PropertiesCache {
                 let mut caching_result = cache_clone.caching_result.write().expect("lock poisoned");
                 let ready = match &*caching_result {
                     CachingResult::Caching { ready } => ready,
-                    // SAFETY: This is the only part of the code that changes this state and it's
-                    // only run once.
-                    _ => unreachable!(),
+                    // Another concurrent populate beat us; nothing to do.
+                    CachingResult::Cached { .. } => return,
                 };
                 match result {
                     Ok((prop_changes, interface, uncached_properties)) => {
@@ -318,9 +332,7 @@ impl PropertiesCache {
             }
         }
         .instrument(info_span!("{}", task_name));
-        let task = executor.spawn(proxy_caching, &task_name);
-
-        (cache, task)
+        executor.spawn(proxy_caching, task_name)
     }
 
     /// new() runs this in a task it spawns for initialization of properties cache.
@@ -483,6 +495,35 @@ impl PropertiesCache {
             CachingResult::Caching { .. } => unreachable!(),
             CachingResult::Cached { result } => result.clone(),
         }
+    }
+
+    /// Re-attempt cache population after a prior failure.
+    ///
+    /// Resets the caching state to `Caching` and spawns a new initialization task. If the cache
+    /// is not in a failed state, this is a no-op.
+    fn retry(
+        self: &Arc<Self>,
+        proxy: PropertiesProxy<'static>,
+        interface: InterfaceName<'static>,
+        executor: &Executor<'_>,
+        uncached_properties: HashSet<zvariant::Str<'static>>,
+    ) {
+        {
+            let mut caching_result = self.caching_result.write().expect("lock poisoned");
+            match &*caching_result {
+                CachingResult::Cached { result: Err(_) } => {
+                    // Reset to Caching so that `ready()` will wait for the new attempt.
+                    *caching_result = CachingResult::Caching {
+                        ready: Event::new(),
+                    };
+                }
+                _ => return,
+            }
+        }
+
+        let task_name = format!("{interface} proxy caching (retry)");
+        self.spawn_populate(proxy, interface, executor, uncached_properties, &task_name)
+            .detach();
     }
 }
 
@@ -788,14 +829,37 @@ impl<'a> Proxy<'a> {
         T: TryFrom<OwnedValue>,
         T::Error: Into<Error>,
     {
+        let mut should_retry_cache = true;
         if let Some(cache) = self.get_property_cache() {
-            cache.ready().await?;
-        }
-        if let Some(value) = self.cached_property(property_name)? {
-            return Ok(value);
+            // If the cache failed to populate (e.g. the interface wasn't registered yet when the
+            // proxy was created), don't fail permanently — fall through to a direct `Get` call.
+            if cache.ready().await.is_ok() {
+                should_retry_cache = false;
+                if let Some(value) = self.cached_property(property_name)? {
+                    return Ok(value);
+                }
+            }
         }
 
         let value = self.get_proxy_property(property_name).await?;
+
+        // The direct Get succeeded, so the interface is now available. If the cache previously
+        // failed to populate, kick off a retry so subsequent calls can use the cache.
+        if should_retry_cache {
+            if let Some(cache) = self.get_property_cache() {
+                let proxy = self.owned_properties_proxy();
+                let interface = self.inner.interface.to_owned();
+                let uncached_properties: HashSet<zvariant::Str<'static>> = self
+                    .inner
+                    .uncached_properties
+                    .iter()
+                    .map(|s| s.to_owned())
+                    .collect();
+                let executor = self.connection().executor();
+                cache.retry(proxy, interface, executor, uncached_properties);
+            }
+        }
+
         value.try_into().map_err(Into::into)
     }
 
