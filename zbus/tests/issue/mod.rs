@@ -22,3 +22,5 @@ mod issue_356;
 
 #[cfg(all(unix, feature = "p2p"))]
 mod issue_813;
+
+mod issue_proxy_before_server;
