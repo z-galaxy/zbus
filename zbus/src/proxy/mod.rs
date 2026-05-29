@@ -253,6 +253,9 @@ where
 pub(crate) struct PropertiesCache {
     values: RwLock<HashMap<String, PropertyValue>>,
     caching_result: RwLock<CachingResult>,
+    /// Notified to wake the background populate task and request another `init` attempt
+    /// after a prior failure (e.g. when a direct `Get` succeeded out-of-band).
+    retry_kick: Event,
 }
 
 #[derive(Debug)]
@@ -274,6 +277,7 @@ impl PropertiesCache {
             caching_result: RwLock::new(CachingResult::Caching {
                 ready: Event::new(),
             }),
+            retry_kick: Event::new(),
         });
 
         let task_name = format!("{interface} proxy caching");
@@ -283,7 +287,15 @@ impl PropertiesCache {
         (cache, task)
     }
 
-    /// Spawn the cache population task. This calls `init` then `keep_updated`.
+    /// Spawn the cache population task.
+    ///
+    /// This task tries `init`; on success it proceeds to `keep_updated`. On failure it marks the
+    /// cache as failed (so callers fall back to direct `Get` calls) and waits for a signal
+    /// indicating the service / interface may now be available — currently
+    /// `org.freedesktop.DBus.NameOwnerChanged` (when the destination is a well-known name) and
+    /// `org.freedesktop.DBus.ObjectManager.InterfacesAdded` (when the service exposes an
+    /// ObjectManager) — or for an explicit kick via [`Self::kick_retry`] (used when a direct `Get`
+    /// succeeds while the cache is in a failed state). When woken, it re-attempts `init`.
     fn spawn_populate(
         self: &Arc<Self>,
         proxy: PropertiesProxy<'static>,
@@ -292,47 +304,109 @@ impl PropertiesCache {
         uncached_properties: HashSet<zvariant::Str<'static>>,
         task_name: &str,
     ) -> Task<()> {
-        let cache_clone = self.clone();
-        let proxy_caching = async move {
-            let result = cache_clone
-                .init(proxy, interface, uncached_properties)
+        let cache = self.clone();
+        let proxy_caching = cache
+            .populate_loop(proxy, interface, uncached_properties)
+            .instrument(info_span!("{}", task_name));
+        executor.spawn(proxy_caching, task_name)
+    }
+
+    async fn populate_loop(
+        self: Arc<Self>,
+        proxy: PropertiesProxy<'static>,
+        interface: InterfaceName<'static>,
+        uncached_properties: HashSet<zvariant::Str<'static>>,
+    ) {
+        use futures_lite::FutureExt as _;
+        use futures_lite::StreamExt as _;
+
+        // Best-effort subscriptions used to wake the task on relevant bus activity.
+        let (mut owner_changed, mut interfaces_added) = build_appearance_streams(
+            proxy.inner().connection(),
+            proxy.inner().destination(),
+            proxy.inner().path(),
+        )
+        .await;
+
+        let mut first_attempt = true;
+        loop {
+            let result = self
+                .init(proxy.clone(), interface.clone(), uncached_properties.clone())
                 .await;
-            let (prop_changes, interface, uncached_properties) = {
-                let mut caching_result = cache_clone.caching_result.write().expect("lock poisoned");
-                let ready = match &*caching_result {
-                    CachingResult::Caching { ready } => ready,
-                    // Another concurrent populate beat us; nothing to do.
-                    CachingResult::Cached { .. } => return,
-                };
+
+            let next = {
+                let mut caching_result = self.caching_result.write().expect("lock poisoned");
                 match result {
                     Ok((prop_changes, interface, uncached_properties)) => {
-                        ready.notify(usize::MAX);
+                        if let CachingResult::Caching { ready } = &*caching_result {
+                            ready.notify(usize::MAX);
+                        }
                         *caching_result = CachingResult::Cached { result: Ok(()) };
-
-                        (prop_changes, interface, uncached_properties)
+                        Some((prop_changes, interface, uncached_properties))
                     }
                     Err(e) => {
-                        warn!(
-                            "Failed to populate properties cache via GetAll: {e}. \
-                             Property change streams will not produce values."
-                        );
-                        ready.notify(usize::MAX);
+                        if first_attempt {
+                            warn!(
+                                "Failed to populate properties cache via GetAll: {e}. \
+                                 Will retry when the service / interface appears."
+                            );
+                            if let CachingResult::Caching { ready } = &*caching_result {
+                                ready.notify(usize::MAX);
+                            }
+                        } else {
+                            debug!("Retry to populate properties cache failed: {e}");
+                        }
                         *caching_result = CachingResult::Cached { result: Err(e) };
-
-                        return;
+                        None
                     }
                 }
             };
 
-            if let Err(e) = cache_clone
-                .keep_updated(prop_changes, interface, uncached_properties)
-                .await
-            {
-                debug!("Error keeping properties cache updated: {e}");
+            first_attempt = false;
+
+            match next {
+                Some((prop_changes, interface, uncached_properties)) => {
+                    if let Err(e) = self
+                        .keep_updated(prop_changes, interface, uncached_properties)
+                        .await
+                    {
+                        debug!("Error keeping properties cache updated: {e}");
+                    }
+                    return;
+                }
+                None => {
+                    // Wait for any signal that suggests the interface may now be available, or
+                    // for an explicit kick from a successful out-of-band `Get`.
+                    let kick = self.retry_kick.listen();
+                    let wait_kick = async move {
+                        kick.await;
+                    };
+                    let wait_owner = async {
+                        if let Some(s) = owner_changed.as_mut() {
+                            let _ = s.next().await;
+                        } else {
+                            std::future::pending::<()>().await;
+                        }
+                    };
+                    let wait_ifaces = async {
+                        if let Some(s) = interfaces_added.as_mut() {
+                            let _ = s.next().await;
+                        } else {
+                            std::future::pending::<()>().await;
+                        }
+                    };
+                    wait_kick.or(wait_owner).or(wait_ifaces).await;
+                }
             }
         }
-        .instrument(info_span!("{}", task_name));
-        executor.spawn(proxy_caching, task_name)
+    }
+
+    /// Kick the background populate task to retry `init` immediately.
+    ///
+    /// Used when a direct `Get` succeeded while the cache was in a failed state, indicating
+    /// the interface is now available even if no relevant bus signal was emitted.
+    pub(crate) fn kick_retry(&self) {
+        self.retry_kick.notify(usize::MAX);
     }
 
     /// new() runs this in a task it spawns for initialization of properties cache.
@@ -496,35 +570,6 @@ impl PropertiesCache {
             CachingResult::Cached { result } => result.clone(),
         }
     }
-
-    /// Re-attempt cache population after a prior failure.
-    ///
-    /// Resets the caching state to `Caching` and spawns a new initialization task. If the cache
-    /// is not in a failed state, this is a no-op.
-    fn retry(
-        self: &Arc<Self>,
-        proxy: PropertiesProxy<'static>,
-        interface: InterfaceName<'static>,
-        executor: &Executor<'_>,
-        uncached_properties: HashSet<zvariant::Str<'static>>,
-    ) {
-        {
-            let mut caching_result = self.caching_result.write().expect("lock poisoned");
-            match &*caching_result {
-                CachingResult::Cached { result: Err(_) } => {
-                    // Reset to Caching so that `ready()` will wait for the new attempt.
-                    *caching_result = CachingResult::Caching {
-                        ready: Event::new(),
-                    };
-                }
-                _ => return,
-            }
-        }
-
-        let task_name = format!("{interface} proxy caching (retry)");
-        self.spawn_populate(proxy, interface, executor, uncached_properties, &task_name)
-            .detach();
-    }
 }
 
 impl<'a> ProxyInner<'a> {
@@ -610,6 +655,61 @@ impl<'a> ProxyInner<'a> {
 }
 
 const MAX_NAME_OWNER_CHANGED_SIGNALS_QUEUED: usize = 8;
+
+/// Build best-effort `MessageStream` subscriptions used to wake the populate task when the
+/// destination service / interface may have appeared on the bus.
+///
+/// - `NameOwnerChanged` (filtered by the destination name) covers the case where the proxy is
+///   created before the service connects to the bus.
+/// - `InterfacesAdded` (filtered by `arg_path` matching the proxy's path) covers services that
+///   expose an `org.freedesktop.DBus.ObjectManager` and register interfaces dynamically.
+///
+/// Returns `None` slots when the corresponding subscription is not applicable or could not be
+/// installed; failures are non-fatal — the [`PropertiesCache::kick_retry`] mechanism provides a
+/// fallback for services that emit neither signal.
+async fn build_appearance_streams(
+    conn: &Connection,
+    destination: &BusName<'_>,
+    path: &ObjectPath<'_>,
+) -> (Option<MessageStream>, Option<MessageStream>) {
+    let owner_changed = match destination {
+        BusName::WellKnown(name) => MatchRule::builder()
+            .msg_type(Type::Signal)
+            .sender("org.freedesktop.DBus")
+            .ok()
+            .and_then(|b| b.path("/org/freedesktop/DBus").ok())
+            .and_then(|b| b.interface("org.freedesktop.DBus").ok())
+            .and_then(|b| b.member("NameOwnerChanged").ok())
+            .and_then(|b| b.add_arg(name.as_str()).ok())
+            .map(|b| b.build().to_owned())
+            .map(|rule| {
+                MessageStream::for_match_rule(
+                    rule,
+                    conn,
+                    Some(MAX_NAME_OWNER_CHANGED_SIGNALS_QUEUED),
+                )
+            }),
+        BusName::Unique(_) => None,
+    };
+    let owner_changed = match owner_changed {
+        Some(fut) => fut.await.ok(),
+        None => None,
+    };
+
+    let interfaces_added = MatchRule::builder()
+        .msg_type(Type::Signal)
+        .interface("org.freedesktop.DBus.ObjectManager")
+        .ok()
+        .and_then(|b| b.member("InterfacesAdded").ok())
+        .and_then(|b| b.arg_path(0, path.clone()).ok())
+        .map(|b| b.build().to_owned());
+    let interfaces_added = match interfaces_added {
+        Some(rule) => MessageStream::for_match_rule(rule, conn, Some(1)).await.ok(),
+        None => None,
+    };
+
+    (owner_changed, interfaces_added)
+}
 
 impl<'a> Proxy<'a> {
     /// Create a new `Proxy` for the given destination/path/interface.
@@ -829,34 +929,27 @@ impl<'a> Proxy<'a> {
         T: TryFrom<OwnedValue>,
         T::Error: Into<Error>,
     {
-        let mut should_retry_cache = true;
-        if let Some(cache) = self.get_property_cache() {
+        let cache = self.get_property_cache();
+        let cache_ok = match &cache {
             // If the cache failed to populate (e.g. the interface wasn't registered yet when the
             // proxy was created), don't fail permanently — fall through to a direct `Get` call.
-            if cache.ready().await.is_ok() {
-                should_retry_cache = false;
-                if let Some(value) = self.cached_property(property_name)? {
-                    return Ok(value);
-                }
+            Some(cache) => cache.ready().await.is_ok(),
+            None => false,
+        };
+        if cache_ok {
+            if let Some(value) = self.cached_property(property_name)? {
+                return Ok(value);
             }
         }
 
         let value = self.get_proxy_property(property_name).await?;
 
-        // The direct Get succeeded, so the interface is now available. If the cache previously
-        // failed to populate, kick off a retry so subsequent calls can use the cache.
-        if should_retry_cache {
-            if let Some(cache) = self.get_property_cache() {
-                let proxy = self.owned_properties_proxy();
-                let interface = self.inner.interface.to_owned();
-                let uncached_properties: HashSet<zvariant::Str<'static>> = self
-                    .inner
-                    .uncached_properties
-                    .iter()
-                    .map(|s| s.to_owned())
-                    .collect();
-                let executor = self.connection().executor();
-                cache.retry(proxy, interface, executor, uncached_properties);
+        // The direct Get succeeded. If the cache is in a failed state, kick the background
+        // populate task to retry now — covers services that emit neither `NameOwnerChanged`
+        // (already on the bus) nor `InterfacesAdded` (no `ObjectManager` exposed).
+        if !cache_ok {
+            if let Some(cache) = cache {
+                cache.kick_retry();
             }
         }
 
