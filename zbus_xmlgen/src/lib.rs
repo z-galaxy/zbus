@@ -1,5 +1,6 @@
 use snakecase::ascii::to_snakecase;
 use std::{
+    collections::HashMap,
     error::Error,
     fmt::{Display, Formatter, Write},
     process::{Command, Stdio},
@@ -185,6 +186,11 @@ impl GenTrait<'_> {
 
         let mut signals = iface.signals().to_vec();
         signals.sort_by(|a, b| a.name().partial_cmp(&b.name()).unwrap());
+
+        // collect signal method names for collision detection with implicit property change
+        // receivers
+        let mut changed_suffix_signals = HashMap::new();
+
         for signal in &signals {
             let args = parse_signal_args(signal.args());
             let name = to_identifier(&to_snakecase(signal.name().as_str()));
@@ -196,20 +202,41 @@ impl GenTrait<'_> {
                 writeln!(w, "    #[zbus(signal)]")?;
             }
             writeln!(w, "    fn {name}({args}) -> zbus::Result<()>;",)?;
+
+            if name.ends_with("_changed") {
+                changed_suffix_signals.insert(name, signal.name());
+            }
         }
 
         let mut props = iface.properties().to_vec();
         props.sort_by(|a, b| a.name().partial_cmp(&b.name()).unwrap());
         for p in props {
             let name = to_identifier(&to_snakecase(p.name().as_str()));
-            let fn_attribute = if pascal_case(&name) != p.name().as_str() {
-                format!("    #[zbus(property, name = \"{}\")]", p.name())
+
+            let prop_change_receiver_name = format!("{name}_changed");
+            let signal_collision = changed_suffix_signals.get(&prop_change_receiver_name);
+
+            let (property_args, comment) = if let Some(signal_collision) = signal_collision {
+                (
+                    "(emits_changed_signal = \"false\")",
+                    format!(
+                        "    // Note: change signal is shadowed by `{}` signal.\n",
+                        signal_collision.as_str()
+                    ),
+                )
             } else {
-                "    #[zbus(property)]".to_string()
+                ("", "".to_string())
             };
+            let name_arg = if pascal_case(&name) != p.name().as_str() {
+                format!(", name = \"{}\"", p.name())
+            } else {
+                "".to_string()
+            };
+            let fn_attribute = format!("    #[zbus(property{property_args}{name_arg})]");
 
             writeln!(w)?;
             writeln!(w, "    /// {} property", p.name())?;
+            write!(w, "{comment}")?;
             if p.access().read() {
                 writeln!(w, "{fn_attribute}")?;
                 let output = to_rust_type(p.ty(), false, false);
