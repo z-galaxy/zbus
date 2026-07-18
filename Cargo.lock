@@ -1533,6 +1533,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "syn"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f2fac314a64dc9a36e61a9eb4261a5e9bbfbc922b27e518af97bc32b926cf967"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "unicode-ident",
+]
+
+[[package]]
 name = "synstructure"
 version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2192,7 +2203,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "serde",
- "syn 2.0.119",
+ "syn 3.0.0",
  "zbus",
  "zbus_names",
  "zvariant",
@@ -2348,7 +2359,7 @@ dependencies = [
  "quote",
  "serde",
  "serde_repr",
- "syn 2.0.119",
+ "syn 3.0.0",
  "zvariant",
  "zvariant_utils",
 ]
@@ -2360,7 +2371,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "serde",
- "syn 2.0.119",
+ "syn 3.0.0",
  "winnow 1.0.4",
  "zvariant",
 ]

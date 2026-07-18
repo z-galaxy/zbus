@@ -90,7 +90,7 @@ criterion = { version = "5.0.0", package = "codspeed-criterion-compat" }
 doc-comment = "0.3.3"
 proc-macro2 = "1.0.81"
 proc-macro-crate = "3.2.0"
-syn = { version = "2.0.64", features = ["extra-traits", "full"] }
+syn = { version = "3.0.0", features = ["extra-traits", "full"] }
 quote = "1.0.36"
 static_assertions = "1.1.0"
 async-recursion = "1.1.1"
