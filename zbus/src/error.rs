@@ -5,6 +5,7 @@ use zvariant::{Error as VariantError, ObjectPath};
 use crate::{
     Address, fdo,
     message::{Message, Type},
+    Address,
 };
 
 /// The error type for `zbus`.
@@ -20,6 +21,8 @@ pub enum Error {
     Address(String),
     /// An I/O error.
     InputOutput(Arc<io::Error>),
+    /// An I/O error with the related URI.
+    InputOutputAddress(Arc<io::Error>, Address),
     /// Invalid message field.
     InvalidField,
     /// Data too large.
@@ -99,6 +102,7 @@ impl error::Error for Error {
             Error::InterfaceNotFound => None,
             Error::Address(_) => None,
             Error::InputOutput(e) => Some(e),
+            Error::InputOutputAddress(e, _) => Some(e),
             Error::ExcessData => None,
             Error::Handshake(_) => None,
             Error::IncorrectEndian => None,
@@ -129,6 +133,7 @@ impl fmt::Display for Error {
             Error::Address(e) => write!(f, "address error: {e}"),
             Error::ExcessData => write!(f, "excess data"),
             Error::InputOutput(e) => write!(f, "I/O error: {e}"),
+            Error::InputOutputAddress(e, address) => write!(f, "I/O error: {e} for {address}"),
             Error::Handshake(e) => write!(f, "D-Bus handshake failed: {e}"),
             Error::IncorrectEndian => write!(f, "incorrect endian"),
             Error::InvalidField => write!(f, "invalid message field"),
@@ -199,6 +204,9 @@ impl Clone for Error {
             Error::Address(e) => Error::Address(e.clone()),
             Error::ExcessData => Error::ExcessData,
             Error::InputOutput(e) => Error::InputOutput(e.clone()),
+            Error::InputOutputAddress(e, address) => {
+                Error::InputOutputAddress(e.clone(), address.clone())
+            }
             Error::Handshake(e) => Error::Handshake(e.clone()),
             Error::IncorrectEndian => Error::IncorrectEndian,
             Error::InvalidField => Error::InvalidField,
