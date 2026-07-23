@@ -98,12 +98,16 @@ impl Node {
     }
 
     pub(super) fn is_empty(&self) -> bool {
-        !self.interfaces.keys().any(|k| {
+        (!self.interfaces.keys().any(|k| {
             *k != Peer::name()
                 && *k != Introspectable::name()
                 && *k != Properties::name()
                 && *k != ObjectManager::name()
-        })
+        })) && self.children.is_empty()
+    }
+
+    pub(super) fn interfaces(&self) -> impl Iterator<Item = &InterfaceName<'static>> {
+        self.interfaces.keys()
     }
 
     pub(super) fn remove_node(&mut self, node: &str) -> bool {
