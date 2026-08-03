@@ -48,7 +48,8 @@ impl FramingOffsetSize {
     }
 
     pub fn read_last_offset_from_buffer(self, buffer: &[u8]) -> usize {
-        if buffer.is_empty() {
+        // The buffer must be able to hold a whole offset, otherwise `end - N` below underflows.
+        if buffer.len() < self as usize {
             return 0;
         }
 
@@ -89,6 +90,28 @@ impl FramingOffsetSize {
 #[cfg(test)]
 mod tests {
     use crate::framing_offset_size::FramingOffsetSize;
+
+    #[test]
+    fn read_last_offset_from_short_buffer() {
+        // A buffer too short to hold a whole offset must not panic.
+        let sizes = [
+            FramingOffsetSize::U8,
+            FramingOffsetSize::U16,
+            FramingOffsetSize::U32,
+            #[cfg(not(target_pointer_width = "32"))]
+            FramingOffsetSize::U64,
+        ];
+        for size in sizes {
+            for len in 0..(size as usize) {
+                assert_eq!(size.read_last_offset_from_buffer(&vec![0xff; len]), 0);
+            }
+            // One full offset is still read as before.
+            assert_eq!(
+                size.read_last_offset_from_buffer(&vec![0xff; size as usize]),
+                ((1u128 << (8 * size as u32)) - 1) as usize,
+            );
+        }
+    }
 
     #[test]
     fn framing_offset_size_bump() {

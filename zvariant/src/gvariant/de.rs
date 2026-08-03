@@ -734,20 +734,21 @@ impl<'d, 'de, 'sig, 'f, #[cfg(unix)] F: AsFd, #[cfg(not(unix))] F> SeqAccess<'de
         let element_end = if !field_signature.is_fixed_sized() {
             if self.field_idx == self.num_fields {
                 // This is the last item then and in GVariant format, we don't have offset for it
-                // even if it's non-fixed-sized.
-                self.end
+                // even if it's non-fixed-sized. The framing offsets can overlap the content, in
+                // which case there is nothing left for this item and it takes its default value.
+                self.end.max(self.de.0.pos)
+            } else if self.end < self.start + self.offset_size as usize {
+                // Not enough space left for this field's framing offset. Per §2.7.4 of the
+                // GVariant specification, an item whose framing offset is unavailable takes
+                // its default value, and an empty slice deserializes to the default of any
+                // non-fixed-sized type.
+                self.de.0.pos
             } else {
                 let end = self
                     .offset_size
                     .read_last_offset_from_buffer(subslice(self.de.0.bytes, self.start..self.end)?)
                     + self.start;
                 let offset_size = self.offset_size as usize;
-                if offset_size > self.end {
-                    return Err(serde::de::Error::invalid_length(
-                        offset_size,
-                        &format!("< {}", self.end).as_str(),
-                    ));
-                }
 
                 self.end -= offset_size;
                 self.offsets_len += offset_size;
@@ -911,5 +912,51 @@ impl<'de, 'd, 'sig, 'f, #[cfg(unix)] F: AsFd, #[cfg(not(unix))] F> EnumAccess<'d
         V: DeserializeSeed<'de>,
     {
         seed.deserialize(&mut *self.de).map(|v| (v, self))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        LE, Value,
+        serialized::{Context, Data},
+    };
+
+    // §2.7.4 of the GVariant specification, "Insufficient Space for Structure Framing
+    // Offsets", with the example given there.
+    #[test]
+    fn missing_framing_offsets_yield_default_values() {
+        let ctxt = Context::new_gvariant(LE, 0);
+        let bytes = [0x03u8, 0x02, 0x01];
+        let data = Data::new(&bytes[..], ctxt);
+        let (decoded, _) = data
+            .deserialize::<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)>()
+            .unwrap();
+
+        assert_eq!(decoded, (vec![3], vec![2], vec![1], vec![], vec![]));
+    }
+
+    // A struct with enough offset-less fields used to shrink the buffer below one offset
+    // and panic. Empty byte arrays cost no data bytes, so they get there quickest.
+    #[test]
+    fn struct_with_more_fields_than_offsets() {
+        let mut signature = String::from("(");
+        for _ in 0..130 {
+            signature.push_str("ay");
+        }
+        signature.push(')');
+
+        // 257 bytes of container, so framing offsets are two bytes wide.
+        let mut bytes = vec![0u8; 257];
+        bytes.push(0);
+        bytes.extend_from_slice(signature.as_bytes());
+
+        let ctxt = Context::new_gvariant(LE, 0);
+        let data = Data::new(&bytes[..], ctxt);
+        let (decoded, _) = data.deserialize::<Value<'_>>().unwrap();
+        let Value::Structure(s) = decoded else {
+            panic!("expected a structure");
+        };
+        assert_eq!(s.fields().len(), 130);
     }
 }
