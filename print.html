@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "rust";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-79031b0a.js";
+            window.path_to_searchindex_js = "searchindex-f65ac939.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-a3902f6a.js"></script>
@@ -299,12 +299,9 @@ once the connection is established (both ends are equal, and can send any messag
 <p>For example to create a bus-less peer-to-peer connection on Unix, you can do:</p>
 <pre><code class="language-rust noplayground"><span class="boring">#[tokio::main]
 </span><span class="boring">async fn main() -&gt; zbus::Result&lt;()&gt; {
-</span><span class="boring">#[cfg(unix)]
+</span><span class="boring">#[cfg(all(unix, feature = "async-io"))]
 </span><span class="boring">{
-</span>#[cfg(not(feature = "tokio"))]
-use std::os::unix::net::UnixStream;
-#[cfg(feature = "tokio")]
-use tokio::net::UnixStream;
+</span>use std::os::unix::net::UnixStream;
 use zbus::{connection::Builder, Guid};
 
 let guid = Guid::generate();
@@ -312,14 +309,16 @@ let (p0, p1) = UnixStream::pair().unwrap();
 <span class="boring">#[allow(unused)]
 </span>let (client_conn, server_conn) = futures_util::try_join!(
     // Client
-    Builder::unix_stream(p0).p2p().build(),
+    Builder::async_io_unix_stream(p0).p2p().build(),
     // Server
-    Builder::unix_stream(p1).server(guid)?.p2p().build(),
+    Builder::async_io_unix_stream(p1).server(guid)?.p2p().build(),
 )?;
 <span class="boring">}
 </span><span class="boring">
 </span><span class="boring">Ok(())
 </span><span class="boring">}</span></code></pre>
+<p><code>async_io_unix_stream</code> (and <code>async_io_tcp_stream</code>) take a <a href="https://doc.rust-lang.org/std/os/unix/net/struct.UnixStream.html"><code>std::os::unix::net::UnixStream</code></a>. With <code>tokio</code>
+enabled you can instead pass a <a href="https://docs.rs/tokio/latest/tokio/net/struct.UnixStream.html"><code>tokio::net::UnixStream</code></a> to <code>unix_stream</code>.</p>
 <p><strong>Note:</strong> the <code>p2p</code> and <code>server</code> methods of <code>connection::Builder</code> are only available when <code>p2p</code>
 cargo feature of <code>zbus</code> is enabled.</p>
 <hr>
@@ -1647,6 +1646,13 @@ feature:</p>
 # Also disable the default `async-io` feature to avoid unused dependencies.
 zbus = { version = "5", default-features = false, features = ["tokio"] }
 </code></pre>
+<p>Disabling <code>async-io</code> is recommended but not required. When both features are enabled, zbus picks the
+runtime at run time: it uses tokio when a tokio runtime is driving the current thread, and falls back
+to <code>async-io</code> otherwise. This keeps the features additive, so an <code>async-io</code>-based application keeps
+working even when another crate in the workspace enables zbus’s <code>tokio</code> feature.</p>
+<p>This run-time selection applies to the async API. The blocking API (<code>zbus::blocking</code>) drives its
+connections through its own <code>block_on</code>, which uses tokio whenever the <code>tokio</code> feature is enabled, so
+those connections always run on tokio when that feature is on.</p>
 <p><strong>Note</strong>: On Windows, the <code>async-io</code> feature is currently required for UNIX domain socket support,
 see <a href="https://github.com/tokio-rs/tokio/issues/2201">the corresponding tokio issue on GitHub</a>.</p>
 <h2 id="im-experiencing-hangs-what-could-be-wrong"><a class="header" href="#im-experiencing-hangs-what-could-be-wrong">I’m experiencing hangs, what could be wrong?</a></h2>
