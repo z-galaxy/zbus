@@ -71,3 +71,12 @@ targets = [
 
 [lints]
 workspace = true
+
+# `Str` is a cross-crate re-export (of `zcheapstr::CheapStr`), which
+# cargo-semver-checks cannot resolve, making it incorrectly flag the struct as
+# removed and `release-plz update` in turn bump the major version.
+# FIXME: Drop this after the first post-split zvariant release, or once
+# cargo-semver-checks handles cross-crate items:
+# https://github.com/obi1kenobi/cargo-semver-checks/issues/638
+[package.metadata.cargo-semver-checks.lints]
+struct_missing = "warn"
