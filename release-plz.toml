@@ -53,11 +53,16 @@ commit_preprocessors = [
     # Matches: "Fixes #123", "Closes issue #123", "Resolves bug #123", etc.
     # Appends issue ref with "||" delimiter so template can insert period before it.
     { pattern = ".*", replace_command = "sh -c 'title=$(cat); ref=$(git log -1 --format=%b $COMMIT_SHA 2>/dev/null | grep -oE \"(Fixes|Closes|Resolves).*#[0-9]+\" | grep -oE \"#[0-9]+\" | head -1); if [ -n \"$ref\" ]; then printf \"%s||%s\\n\" \"$title\" \"$ref\"; else printf \"%s\\n\" \"$title\"; fi'" },
+    # Replace the message of commits carrying a "Changelog: skip" git trailer with a sentinel
+    # that the first commit parser below drops (e.g. AI-workflow design docs and plans).
+    { pattern = ".*", replace_command = "sh -c 'title=$(cat); if git log -1 --format=\"%(trailers:key=Changelog,valueonly)\" $COMMIT_SHA 2>/dev/null | grep -qix skip; then echo changelog-skip; else printf \"%s\\n\" \"$title\"; fi'" },
 ]
 
 # Categorize commits based on gimoji emojis.
 # See: https://zeenix.github.io/gimoji/
 commit_parsers = [
+    # Skip commits carrying a "Changelog: skip" trailer (see the preprocessor above).
+    { message = "^changelog-skip$", skip = true },
     # Skip merge commits, release commits, and empty commits (just emojis).
     { message = "^[Mm]erge", skip = true },
     { message = "^🔖", skip = true },
