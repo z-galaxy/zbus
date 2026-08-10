@@ -157,20 +157,16 @@ impl<'de, #[cfg(unix)] F: AsFd, #[cfg(not(unix))] F> de::Deserializer<'de>
     deserialize_method!(deserialize_byte_buf());
     deserialize_method!(deserialize_option());
     deserialize_method!(deserialize_unit());
-    deserialize_method!(deserialize_unit_struct(n: &'static str));
-    deserialize_method!(deserialize_newtype_struct(n: &'static str));
+    // Brace-delimited invocations: the args are `name: type` pairs, which recent nightly rustfmt
+    // mis-parses as parenthesized generic arguments (dropping the names) in `!(...)` form.
+    deserialize_method! { deserialize_unit_struct(n: &'static str) }
+    deserialize_method! { deserialize_newtype_struct(n: &'static str) }
     deserialize_method!(deserialize_seq());
     deserialize_method!(deserialize_map());
-    deserialize_method!(deserialize_tuple(n: usize));
-    deserialize_method!(deserialize_tuple_struct(n: &'static str, l: usize));
-    deserialize_method!(deserialize_struct(
-        n: &'static str,
-        f: &'static [&'static str]
-    ));
-    deserialize_method!(deserialize_enum(
-        n: &'static str,
-        f: &'static [&'static str]
-    ));
+    deserialize_method! { deserialize_tuple(n: usize) }
+    deserialize_method! { deserialize_tuple_struct(n: &'static str, l: usize) }
+    deserialize_method! { deserialize_struct(n: &'static str, f: &'static [&'static str]) }
+    deserialize_method! { deserialize_enum(n: &'static str, f: &'static [&'static str]) }
     deserialize_method!(deserialize_identifier());
     deserialize_method!(deserialize_ignored_any());
 
