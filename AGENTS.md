@@ -117,6 +117,9 @@ zbus/src/
 - **Changelog**: `CHANGELOG.md` files are managed by [release-plz] — do **not** hand-edit
   them. Write a good commit message (conventional-commits-ish) and release-plz will
   generate the entry at release time.
+- **Changelog-skip trailer**: end a commit message with a `Changelog: skip` git trailer to
+  keep it out of the user-facing changelog (use for AI-workflow artifacts such as design docs
+  and implementation plans).
 - **Testing**: Integration tests require D-Bus session bus
 - **Cross-platform**: Validate changes work on Linux, Windows, macOS
 - **Dependencies**: Check compatibility with async runtimes and optional features
