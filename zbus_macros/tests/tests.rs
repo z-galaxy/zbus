@@ -122,6 +122,7 @@ fn test_derive_error() {
         LetItBe {
             desc: String,
         },
+        Timeout(String, u64),
     }
 }
 

@@ -1,6 +1,6 @@
 use proc_macro2::TokenStream;
-use quote::{ToTokens, quote};
-use syn::{Data, DeriveInput, Error, Fields, Ident, Variant, spanned::Spanned};
+use quote::{quote, ToTokens};
+use syn::{Data, DeriveInput, Error, Fields, Ident, Type, Variant, spanned::Spanned};
 use zvariant_utils::def_attrs;
 
 def_attrs! {
@@ -79,31 +79,41 @@ pub fn expand_derive(input: DeriveInput) -> Result<TokenStream, Error> {
             zbus_error_variant = Some(quote! { #ident });
         }
 
-        // FIXME: this will error if the first field is not a string as per the dbus spec, but we
-        // may support other cases?
         let e = match &variant.fields {
             Fields::Unit => quote! {
                 Self::#ident => None,
             },
-            Fields::Unnamed(_) => {
+            Fields::Unnamed(fields) => {
                 if error {
                     quote! {
                         Self::#ident(e) => e.description(),
                     }
+                } else if let Some(first_field) = fields.unnamed.first()
+                    && let Type::Path(type_path) = &first_field.ty
+                    && type_path.path.is_ident("String")
+                {
+                    quote! {
+                        Self::#ident(desc, ..) => Some(desc),
+                    }
                 } else {
                     quote! {
-                        Self::#ident(desc, ..) => Some(&desc),
+                        Self::#ident(..) => None,
                     }
                 }
             }
             Fields::Named(n) => {
-                let f = &n
-                    .named
-                    .first()
-                    .ok_or_else(|| Error::new(n.span(), "expected at least one field"))?
-                    .ident;
-                quote! {
-                    Self::#ident { #f, } => Some(#f),
+                if let Some(first_field) = n.named.first()
+                    && let Type::Path(type_path) = &first_field.ty
+                    && type_path.path.is_ident("String")
+                {
+                    let f = &first_field.ident;
+                    quote! {
+                        Self::#ident { #f, } => Some(#f),
+                    }
+                } else {
+                    quote! {
+                        Self::#ident { .. } => None,
+                    }
                 }
             }
         };
