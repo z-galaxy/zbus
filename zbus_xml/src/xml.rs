@@ -249,40 +249,37 @@ fn interface<'i>(
     self_closing: bool,
 ) -> PResult<Interface<'static>> {
     let name = attrs.name(|n| InterfaceName::try_from(n).map_err(Error::Zbus))?;
-    let mut methods = Vec::new();
-    let mut properties = Vec::new();
-    let mut signals = Vec::new();
-    let mut annotations = Vec::new();
-    let mut docstring = None;
-    let mut telepathy_types = Vec::new();
+    let mut interface_children = Vec::<crate::Child<'static>>::new();
     children(
         input,
         tag,
         self_closing,
         |input, child, attrs, sc| match child {
             "method" => {
-                methods.push(method(input, child, attrs, sc)?);
+                interface_children.push(method(input, child, attrs, sc)?.into());
                 Ok(true)
             }
             "property" => {
-                properties.push(property(input, child, attrs, sc)?);
+                interface_children.push(property(input, child, attrs, sc)?.into());
                 Ok(true)
             }
             "signal" => {
-                signals.push(signal(input, child, attrs, sc)?);
+                interface_children.push(signal(input, child, attrs, sc)?.into());
                 Ok(true)
             }
             "annotation" => {
-                annotations.push(annotation(input, child, attrs, sc)?);
+                interface_children.push(annotation(input, child, attrs, sc)?.into());
                 Ok(true)
             }
             other if is_docstring(other) => {
-                docstring = capture_docstring(input, other, sc)?.or(docstring.take());
+                if let Some(docstring) = capture_docstring(input, other, sc)? {
+                    interface_children.push(docstring.into());
+                }
                 Ok(true)
             }
             other => {
                 if let Some(def) = telepathy_type_def(input, other, &attrs, sc)? {
-                    telepathy_types.push(def);
+                    interface_children.push(def.into());
                 }
                 Ok(true)
             }
@@ -291,12 +288,7 @@ fn interface<'i>(
 
     Ok(Interface {
         name,
-        methods,
-        properties,
-        signals,
-        annotations,
-        docstring,
-        telepathy_types,
+        children: interface_children,
     })
 }
 

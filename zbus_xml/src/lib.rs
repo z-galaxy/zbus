@@ -436,18 +436,8 @@ pub struct Interface<'a> {
     #[serde(rename = "@name", borrow)]
     name: InterfaceName<'a>,
 
-    #[serde(rename = "method", default)]
-    methods: Vec<Method<'a>>,
-    #[serde(rename = "property", default)]
-    properties: Vec<Property<'a>>,
-    #[serde(rename = "signal", default)]
-    signals: Vec<Signal<'a>>,
-    #[serde(rename = "annotation", default)]
-    annotations: Vec<Annotation>,
-    #[serde(skip)]
-    docstring: Option<String>,
-    #[serde(skip)]
-    telepathy_types: Vec<telepathy::TypeDef>,
+    #[serde(default)]
+    children: Vec<Child<'a>>,
 }
 
 impl<'a> Interface<'a> {
@@ -458,22 +448,46 @@ impl<'a> Interface<'a> {
 
     /// Returns the interface methods.
     pub fn methods(&self) -> impl Iterator<Item = &Method<'a>> {
-        self.methods.iter()
+        self.children.iter().filter_map(|child| {
+            if let Child::Method(m) = child {
+                Some(m)
+            } else {
+                None
+            }
+        })
     }
 
     /// Returns the interface signals.
     pub fn signals(&self) -> impl Iterator<Item = &Signal<'a>> {
-        self.signals.iter()
+        self.children.iter().filter_map(|child| {
+            if let Child::Signal(s) = child {
+                Some(s)
+            } else {
+                None
+            }
+        })
     }
 
     /// Returns the interface properties.
     pub fn properties(&self) -> impl Iterator<Item = &Property<'a>> {
-        self.properties.iter()
+        self.children.iter().filter_map(|child| {
+            if let Child::Property(p) = child {
+                Some(p)
+            } else {
+                None
+            }
+        })
     }
 
     /// Return the associated annotations.
     pub fn annotations(&self) -> impl Iterator<Item = &Annotation> {
-        self.annotations.iter()
+        self.children.iter().filter_map(|child| {
+            if let Child::Annotation(a) = child {
+                Some(a)
+            } else {
+                None
+            }
+        })
     }
 
     /// Return the content of the Telepathy `tp:docstring` extension element, if any.
@@ -482,37 +496,107 @@ impl<'a> Interface<'a> {
     /// surrounding whitespace trimmed. Note that docstrings are only captured when parsing;
     /// the writer does not emit them.
     pub fn docstring(&self) -> Option<&str> {
-        self.docstring.as_deref()
+        self.children
+            .iter()
+            .filter_map(|child| {
+                if let Child::Docstring(s) = child {
+                    Some(s.as_ref())
+                } else {
+                    None
+                }
+            })
+            .next()
     }
 
     /// Return the Telepathy type definitions on this interface.
     pub fn telepathy_types(&self) -> impl Iterator<Item = &telepathy::TypeDef> {
-        self.telepathy_types.iter()
+        self.children.iter().filter_map(|child| {
+            if let Child::TelepathyTypeDef(t) = child {
+                Some(t)
+            } else {
+                None
+            }
+        })
     }
 
     fn write_xml<W: Write>(&self, w: &mut W) -> std::io::Result<()> {
         write!(w, "<interface name=\"{}\"", escape(self.name.as_str()))?;
-        if self.methods.is_empty()
-            && self.properties.is_empty()
-            && self.signals.is_empty()
-            && self.annotations.is_empty()
-        {
+        if !self.children.iter().any(|child| {
+            matches!(
+                child,
+                Child::Method(_) | Child::Signal(_) | Child::Property(_) | Child::Annotation(_)
+            )
+        }) {
             return write!(w, "/>");
         }
         write!(w, ">")?;
-        for method in &self.methods {
-            method.write_xml(w)?;
-        }
-        for property in &self.properties {
-            property.write_xml(w)?;
-        }
-        for signal in &self.signals {
-            signal.write_xml(w)?;
-        }
-        for annotation in &self.annotations {
-            annotation.write_xml(w)?;
+        for child in &self.children {
+            child.write_xml(w)?;
         }
         write!(w, "</interface>")
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub enum Child<'a> {
+    #[serde(borrow)]
+    Method(Method<'a>),
+    #[serde(borrow)]
+    Property(Property<'a>),
+    #[serde(borrow)]
+    Signal(Signal<'a>),
+    Annotation(Annotation),
+    Docstring(String),
+    #[serde(skip)]
+    TelepathyTypeDef(telepathy::TypeDef),
+}
+
+impl<'a> From<Method<'a>> for Child<'a> {
+    fn from(method: Method<'a>) -> Self {
+        Self::Method(method)
+    }
+}
+
+impl<'a> From<Property<'a>> for Child<'a> {
+    fn from(property: Property<'a>) -> Self {
+        Self::Property(property)
+    }
+}
+
+impl<'a> From<Signal<'a>> for Child<'a> {
+    fn from(signal: Signal<'a>) -> Self {
+        Self::Signal(signal)
+    }
+}
+
+impl<'a> From<Annotation> for Child<'a> {
+    fn from(annotation: Annotation) -> Self {
+        Self::Annotation(annotation)
+    }
+}
+
+impl<'a> From<String> for Child<'a> {
+    fn from(docstring: String) -> Self {
+        Self::Docstring(docstring)
+    }
+}
+
+impl<'a> From<telepathy::TypeDef> for Child<'a> {
+    fn from(type_def: telepathy::TypeDef) -> Self {
+        Self::TelepathyTypeDef(type_def)
+    }
+}
+
+impl<'a> Child<'a> {
+    fn write_xml<W: Write>(&'a self, w: &mut W) -> std::io::Result<()> {
+        match self {
+            Self::Method(m) => m.write_xml(w),
+            Self::Property(p) => p.write_xml(w),
+            Self::Signal(s) => s.write_xml(w),
+            Self::Annotation(a) => a.write_xml(w),
+            Self::Docstring(_) => Ok(()),
+            Self::TelepathyTypeDef(_) => Ok(()),
+        }
     }
 }
 
