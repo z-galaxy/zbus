@@ -106,16 +106,6 @@ pub trait Playlists {
     /// * `playlist_id` - The id of the playlist to activate.
     fn activate_playlist(&self, playlist_id: &PlaylistId) -> zbus::Result<()>;
 
-    /// GetMetadata method
-    ///
-    /// Gets the metadata of a playlist.
-    ///
-    /// # Arguments
-    ///
-    /// * `mismatch` - A tp:type not matching the signature falls back to the plain type.
-    /// * `metadata` - The metadata of the playlist.
-    fn get_metadata(&self, mismatch: &str) -> zbus::Result<MetadataMap>;
-
     /// GetPlaylists method
     ///
     /// Gets a set of playlists.
@@ -135,6 +125,16 @@ pub trait Playlists {
         reverse_order: bool,
     ) -> zbus::Result<Vec<Playlist>>;
 
+    /// GetMetadata method
+    ///
+    /// Gets the metadata of a playlist.
+    ///
+    /// # Arguments
+    ///
+    /// * `mismatch` - A tp:type not matching the signature falls back to the plain type.
+    /// * `metadata` - The metadata of the playlist.
+    fn get_metadata(&self, mismatch: &str) -> zbus::Result<MetadataMap>;
+
     /// PlaylistChanged signal
     ///
     /// Indicates that either the Name or Icon attribute of a playlist has changed.
@@ -148,6 +148,14 @@ pub trait Playlists {
     /// * `playlist` - The playlist which details have changed.
     #[zbus(signal)]
     fn playlist_changed(&self, playlist: Playlist) -> zbus::Result<()>;
+
+    /// Orderings property
+    ///
+    /// The available orderings. At least one must be offered.
+    ///
+    /// Media players may not have access to all the data required for some orderings.
+    #[zbus(property)]
+    fn orderings(&self) -> zbus::Result<Vec<PlaylistOrdering>>;
 
     /// ActivePlaylist property
     ///
@@ -164,14 +172,6 @@ pub trait Playlists {
     fn loop_status(&self) -> zbus::Result<LoopStatus>;
     #[zbus(property)]
     fn set_loop_status(&self, value: LoopStatus) -> zbus::Result<()>;
-
-    /// Orderings property
-    ///
-    /// The available orderings. At least one must be offered.
-    ///
-    /// Media players may not have access to all the data required for some orderings.
-    #[zbus(property)]
-    fn orderings(&self) -> zbus::Result<Vec<PlaylistOrdering>>;
 
     /// PlaylistCount property
     ///
