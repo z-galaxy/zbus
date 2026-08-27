@@ -253,7 +253,7 @@ impl<'i> CodeGenerator<'i> {
         writeln!(w, ")]")?;
         writeln!(w, "pub trait {name} {{")?;
 
-        let mut methods = iface.methods().to_vec();
+        let mut methods = iface.methods().collect::<Vec<_>>();
         methods.sort_by(|a, b| a.name().partial_cmp(&b.name()).unwrap());
         for m in &methods {
             let (inputs, output) = inputs_output_from_args(m.args(), &types);
@@ -268,7 +268,7 @@ impl<'i> CodeGenerator<'i> {
             writeln!(w, "    fn {name}({inputs}){output};")?;
         }
 
-        let mut signals = iface.signals().to_vec();
+        let mut signals = iface.signals().collect::<Vec<_>>();
         signals.sort_by(|a, b| a.name().partial_cmp(&b.name()).unwrap());
         for signal in &signals {
             let args = parse_signal_args(signal.args(), &types);
@@ -284,7 +284,7 @@ impl<'i> CodeGenerator<'i> {
             writeln!(w, "    fn {name}({args}) -> zbus::Result<()>;",)?;
         }
 
-        let mut props = iface.properties().to_vec();
+        let mut props = iface.properties().collect::<Vec<_>>();
         props.sort_by(|a, b| a.name().partial_cmp(&b.name()).unwrap());
         for p in props {
             let name = to_identifier(&to_snakecase(p.name().as_str()));
@@ -533,11 +533,10 @@ impl<'i> Types<'i> {
         let mut referenced = HashSet::new();
         let mut pending: Vec<&str> = interface
             .methods()
-            .iter()
             .flat_map(|m| m.args())
-            .chain(interface.signals().iter().flat_map(|s| s.args()))
+            .chain(interface.signals().flat_map(|s| s.args()))
             .filter_map(Arg::tp_type)
-            .chain(interface.properties().iter().filter_map(Property::tp_type))
+            .chain(interface.properties().filter_map(Property::tp_type))
             .collect();
         for def in interface.telepathy_types() {
             member_references(def, &mut pending);
@@ -563,7 +562,7 @@ impl<'i> Types<'i> {
         let mut taken: HashSet<String> = ["Proxy", "ProxyBlocking"]
             .iter()
             .map(|suffix| format!("{trait_name}{suffix}"))
-            .chain(interface.signals().iter().flat_map(|signal| {
+            .chain(interface.signals().flat_map(|signal| {
                 let signal = pascal_case(signal.name().as_str());
                 [
                     signal.clone(),
@@ -578,7 +577,7 @@ impl<'i> Types<'i> {
         let node_defs = node_types
             .iter()
             .filter(|def| referenced.contains(def.name()));
-        for def in interface.telepathy_types().iter().chain(node_defs) {
+        for def in interface.telepathy_types().chain(node_defs) {
             if generatable(def)
                 && !generated.contains_key(def.name())
                 && taken.insert(type_name(def.name()))
