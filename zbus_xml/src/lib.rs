@@ -446,6 +446,11 @@ impl<'a> Interface<'a> {
         self.name.as_ref()
     }
 
+    /// Returns the child elements.
+    pub fn children(&self) -> impl Iterator<Item = &Child<'a>> {
+        self.children.iter()
+    }
+
     /// Returns the interface methods.
     pub fn methods(&self) -> impl Iterator<Item = &Method<'a>> {
         self.children.iter().filter_map(|child| {
