@@ -6,7 +6,7 @@ mod interface_deref;
 pub use interface_deref::*;
 
 use std::{
-    any::{Any, TypeId},
+    any::Any,
     collections::HashMap,
     fmt::{self, Write},
     sync::Arc,
@@ -165,34 +165,5 @@ impl fmt::Debug for ArcInterface {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Arc<RwLock<dyn Interface>>")
             .finish_non_exhaustive()
-    }
-}
-
-// Note: while it is possible to implement this without `unsafe`, it currently requires a helper
-// trait with a blanket impl that creates `dyn Any` refs.  It's simpler (and more performant) to
-// just check the type ID and do the downcast ourself.
-//
-// See https://github.com/rust-lang/rust/issues/65991 for a rustc feature that will make it
-// possible to get a `dyn Any` ref directly from a `dyn Interface` ref; once that is stable, we can
-// remove this unsafe code.
-impl dyn Interface {
-    /// Return Any of self
-    pub(crate) fn downcast_ref<T: Any>(&self) -> Option<&T> {
-        if <dyn Interface as Any>::type_id(self) == TypeId::of::<T>() {
-            // SAFETY: If type ID matches, it means object is of type T
-            Some(unsafe { &*(self as *const dyn Interface as *const T) })
-        } else {
-            None
-        }
-    }
-
-    /// Return Any of self
-    pub(crate) fn downcast_mut<T: Any>(&mut self) -> Option<&mut T> {
-        if <dyn Interface as Any>::type_id(self) == TypeId::of::<T>() {
-            // SAFETY: If type ID matches, it means object is of type T
-            Some(unsafe { &mut *(self as *mut dyn Interface as *mut T) })
-        } else {
-            None
-        }
     }
 }

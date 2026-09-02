@@ -25,10 +25,6 @@ where
     pub async fn get(&self) -> InterfaceDeref<'_, I> {
         let iface = self.lock.read().await;
 
-        iface
-            .downcast_ref::<I>()
-            .expect("Unexpected interface type");
-
         InterfaceDeref {
             iface,
             phantom: PhantomData,
@@ -80,14 +76,7 @@ where
     /// # Ok::<_, Box<dyn Error + Send + Sync>>(())
     /// ```
     pub async fn get_mut(&self) -> InterfaceDerefMut<'_, I> {
-        let mut iface = self.lock.write().await;
-
-        iface
-            .downcast_ref::<I>()
-            .expect("Unexpected interface type");
-        iface
-            .downcast_mut::<I>()
-            .expect("Unexpected interface type");
+        let iface = self.lock.write().await;
 
         InterfaceDerefMut {
             iface,

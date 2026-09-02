@@ -1,6 +1,6 @@
 //! The object server API.
 
-use std::{collections::HashMap, marker::PhantomData, sync::Arc};
+use std::{any::Any, collections::HashMap, marker::PhantomData, sync::Arc};
 use tracing::{Instrument, debug, instrument, trace, trace_span};
 
 use crate::{
@@ -298,11 +298,11 @@ impl ObjectServer {
             .ok_or(Error::InterfaceNotFound)?
             .instance;
 
-        // Ensure what we return can later be dowcasted safely.
-        lock.read()
-            .await
-            .downcast_ref::<I>()
-            .ok_or(Error::InterfaceNotFound)?;
+        {
+            // Ensure what we return can later be downcasted safely.
+            let iface: &dyn Any = &*lock.read().await;
+            iface.downcast_ref::<I>().ok_or(Error::InterfaceNotFound)?;
+        }
 
         let conn = self.connection();
         // SAFETY: We know that there is a valid path on the node as we already converted w/o error.

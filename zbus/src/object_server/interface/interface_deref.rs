@@ -20,7 +20,10 @@ where
     type Target = I;
 
     fn deref(&self) -> &I {
-        self.iface.downcast_ref::<I>().unwrap()
+        let any_ref: &dyn std::any::Any = &*self.iface;
+        any_ref
+            .downcast_ref::<I>()
+            .expect("Unexpected interface type")
     }
 }
 
@@ -37,7 +40,10 @@ where
     type Target = I;
 
     fn deref(&self) -> &I {
-        self.iface.downcast_ref::<I>().unwrap()
+        let any_ref: &dyn std::any::Any = &*self.iface;
+        any_ref
+            .downcast_ref::<I>()
+            .expect("Unexpected interface type")
     }
 }
 
@@ -46,6 +52,9 @@ where
     I: Interface,
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.iface.downcast_mut::<I>().unwrap()
+        let any_ref: &mut dyn std::any::Any = &mut *self.iface;
+        any_ref
+            .downcast_mut::<I>()
+            .expect("Unexpected interface type")
     }
 }
