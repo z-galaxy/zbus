@@ -2,10 +2,10 @@ use event_listener::Event;
 use futures_util::{StreamExt, TryStreamExt};
 use std::convert::TryInto;
 use tracing::{debug, instrument};
+#[cfg(feature = "object-manager")]
+use zbus::fdo::ObjectManagerProxy;
 use zbus::{
-    Connection, DBusError, Error, Message, MessageStream, Value,
-    fdo::{ObjectManagerProxy, PropertiesProxy},
-    message,
+    Connection, DBusError, Error, Message, MessageStream, Value, fdo::PropertiesProxy, message,
     proxy::CacheProperties,
 };
 
@@ -268,28 +268,36 @@ pub async fn my_iface_test(conn: Connection, event: Event) -> zbus::Result<u32> 
 
     let val = proxy.ping().await?;
 
+    #[cfg(feature = "object-manager")]
     let obj_manager_proxy = ObjectManagerProxy::builder(&conn)
         .destination("org.freedesktop.MyService")?
         .path("/zbus/test")?
         .build()
         .await?;
-    debug!("Created: {:?}", obj_manager_proxy);
-    let mut ifaces_added_stream = obj_manager_proxy.receive_interfaces_added().await?;
-    debug!("Created: {:?}", ifaces_added_stream);
+    #[cfg(feature = "object-manager")]
+    let ifaces_added = {
+        debug!("Created: {:?}", obj_manager_proxy);
+        let mut ifaces_added_stream = obj_manager_proxy.receive_interfaces_added().await?;
+        debug!("Created: {:?}", ifaces_added_stream);
 
-    // Must process in parallel, so the stream listener does not block receiving
-    // the method return message.
-    let (ifaces_added, _) = futures_util::future::join(
-        async {
-            let ret = ifaces_added_stream.next().await.unwrap();
-            drop(ifaces_added_stream);
-            ret
-        },
-        async {
-            proxy.create_obj("MyObj").await.unwrap();
-        },
-    )
-    .await;
+        // Must process in parallel, so the stream listener does not block receiving
+        // the method return message.
+        let (ifaces_added, _) = futures_util::future::join(
+            async {
+                let ret = ifaces_added_stream.next().await.unwrap();
+                drop(ifaces_added_stream);
+                ret
+            },
+            async {
+                proxy.create_obj("MyObj").await.unwrap();
+            },
+        )
+        .await;
+
+        ifaces_added
+    };
+    #[cfg(not(feature = "object-manager"))]
+    proxy.create_obj("MyObj").await.unwrap();
 
     #[cfg(feature = "option-as-array")]
     {
@@ -300,11 +308,14 @@ pub async fn my_iface_test(conn: Connection, event: Event) -> zbus::Result<u32> 
         );
     }
 
-    assert_eq!(ifaces_added.args()?.object_path(), "/zbus/test/MyObj");
-    let args = ifaces_added.args()?;
-    let ifaces = args.interfaces_and_properties();
-    let _ = ifaces.get("org.freedesktop.MyIface").unwrap();
-    // TODO: Check if the properties are correct.
+    #[cfg(feature = "object-manager")]
+    {
+        assert_eq!(ifaces_added.args()?.object_path(), "/zbus/test/MyObj");
+        let args = ifaces_added.args()?;
+        let ifaces = args.interfaces_and_properties();
+        let _ = ifaces.get("org.freedesktop.MyIface").unwrap();
+        // TODO: Check if the properties are correct.
+    }
 
     // issue#207: interface panics on incorrect number of args.
     assert!(proxy.inner().call_method("CreateObj", &()).await.is_err());
@@ -337,25 +348,30 @@ pub async fn my_iface_test(conn: Connection, event: Event) -> zbus::Result<u32> 
         assert_eq!(test_case, value);
     }
 
-    let mut ifaces_removed_stream = obj_manager_proxy.receive_interfaces_removed().await?;
-    debug!("Created: {:?}", ifaces_removed_stream);
-    // Must process in parallel, so the stream listener does not block receiving
-    // the method return message.
-    let (ifaces_removed, _) = futures_util::future::join(
-        async {
-            let ret = ifaces_removed_stream.next().await.unwrap();
-            drop(ifaces_removed_stream);
-            ret
-        },
-        async {
-            proxy.destroy_obj("MyObj").await.unwrap();
-        },
-    )
-    .await;
+    #[cfg(feature = "object-manager")]
+    {
+        let mut ifaces_removed_stream = obj_manager_proxy.receive_interfaces_removed().await?;
+        debug!("Created: {:?}", ifaces_removed_stream);
+        // Must process in parallel, so the stream listener does not block receiving
+        // the method return message.
+        let (ifaces_removed, _) = futures_util::future::join(
+            async {
+                let ret = ifaces_removed_stream.next().await.unwrap();
+                drop(ifaces_removed_stream);
+                ret
+            },
+            async {
+                proxy.destroy_obj("MyObj").await.unwrap();
+            },
+        )
+        .await;
 
-    let args = ifaces_removed.args()?;
-    assert_eq!(args.object_path(), "/zbus/test/MyObj");
-    assert_eq!(args.interfaces().as_ref(), &["org.freedesktop.MyIface"]);
+        let args = ifaces_removed.args()?;
+        assert_eq!(args.object_path(), "/zbus/test/MyObj");
+        assert_eq!(args.interfaces().as_ref(), &["org.freedesktop.MyIface"]);
+    }
+    #[cfg(not(feature = "object-manager"))]
+    proxy.destroy_obj("MyObj").await.unwrap();
 
     assert!(my_obj_proxy.inner().introspect().await.is_err());
     assert!(my_obj_proxy.ping().await.is_err());

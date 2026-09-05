@@ -487,6 +487,25 @@ zbus = { version = "6", default-features = false, features = ["tokio", "proxy", 
 `connection::Builder::ibus` exist only with their feature, and `Address::from_str` rejects the
 address of a transport that was left out.
 
+### The service-side `ObjectManager` is a feature
+
+The object server emits `InterfacesAdded` and `InterfacesRemoved` on behalf of any
+[`fdo::ObjectManager`] registered above an object, which links that interface, its signal
+emission and the property gathering behind it into every service. That is behind the new
+`object-manager` feature, a default feature which implies `service`, so a plain `zbus = "6"`
+dependency keeps it. A `default-features = false` build that registers an `ObjectManager` has to
+name it:
+
+```toml
+[dependencies]
+zbus = { version = "6", default-features = false, features = ["tokio", "object-manager"] }
+```
+
+`fdo::ObjectManager` exists only with the feature. The `ObjectManagerProxy` and its signal
+streams only need `proxy`, as before.
+
+[`fdo::ObjectManager`]: https://docs.rs/zbus/6/zbus/fdo/struct.ObjectManager.html
+
 ### A proxy without properties has no properties cache
 
 `proxy::Defaults` has a new constant, `HAS_PROPERTIES`, which `#[proxy]` sets from the trait,

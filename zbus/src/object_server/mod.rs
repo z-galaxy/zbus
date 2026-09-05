@@ -1,17 +1,20 @@
 //! The object server API.
 
-use std::{collections::HashMap, marker::PhantomData, sync::Arc};
+#[cfg(feature = "object-manager")]
+use std::collections::HashMap;
+use std::{marker::PhantomData, sync::Arc};
 use tracing::{Instrument, debug, instrument, trace, trace_span};
 
 use crate::{
-    Connection, Error, ObjectPath, Result, Value,
+    Connection, Error, ObjectPath, Result,
     async_lock::RwLock,
     connection::WeakConnection,
     fdo,
-    fdo::ObjectManager,
     message::{Header, Message},
     names::InterfaceName,
 };
+#[cfg(feature = "object-manager")]
+use crate::{Value, fdo::ObjectManager};
 
 mod interface;
 pub(crate) use interface::ArcInterface;
@@ -119,7 +122,7 @@ impl ObjectServer {
     ///
     /// It is fine to call this method from within an interface method (e.g. to register a child or
     /// sibling object on demand), including from a `&mut self` method. There is however one
-    /// exception: registering an [`ObjectManager`] at an ancestor of the currently-executing
+    /// exception: registering an `fdo::ObjectManager` at an ancestor of the currently-executing
     /// interface from within one of its `&mut self` methods will **deadlock**.
     ///
     /// This is because adding an `ObjectManager` reads the properties of every object under it (to
@@ -158,37 +161,8 @@ impl ObjectServer {
             root.remove_node(&path);
             return Ok(false);
         }
-        if name == ObjectManager::name() {
-            // Just added an object manager. Need to signal all managed objects under it.
-            let emitter = SignalEmitter::new(&self.connection(), path)?;
-            let objects = node.get_managed_objects(self, &self.connection()).await?;
-            for (path, owned_interfaces) in objects {
-                let interfaces = owned_interfaces
-                    .iter()
-                    .map(|(i, props)| {
-                        let props = props
-                            .iter()
-                            .map(|(k, v)| Ok((k.as_str(), Value::try_from(v)?)))
-                            .collect::<Result<_>>();
-                        Ok((i.into(), props?))
-                    })
-                    .collect::<Result<_>>()?;
-                ObjectManager::interfaces_added(&emitter, path.into(), interfaces).await?;
-            }
-        } else if let Some(manager_path) = manager_path {
-            let emitter = SignalEmitter::new(&self.connection(), manager_path)?;
-            let mut interfaces = HashMap::new();
-            let owned_props = node
-                .get_properties(self, &self.connection(), name.clone())
-                .await?;
-            let props = owned_props
-                .iter()
-                .map(|(k, v)| Ok((k.as_str(), Value::try_from(v)?)))
-                .collect::<Result<_>>()?;
-            interfaces.insert(name, props);
-
-            ObjectManager::interfaces_added(&emitter, path, interfaces).await?;
-        }
+        self.interfaces_added(node, name, path, manager_path)
+            .await?;
 
         Ok(true)
     }
@@ -234,12 +208,96 @@ impl ObjectServer {
         // Prune before emitting the (fallible) signal, so that an emission failure can't leave
         // empty nodes behind.
         let destroyed = root.remove_node(&path);
+        self.interfaces_removed(path, interface_name, manager_path)
+            .await?;
+
+        Ok(destroyed)
+    }
+
+    /// Emit `InterfacesAdded` for the interface `name` just registered at `path`.
+    ///
+    /// When the interface is itself an `ObjectManager`, every object under `path` is announced
+    /// instead. Otherwise the signal goes out from `manager_path`, the closest ancestor serving an
+    /// `ObjectManager`, if there is one.
+    #[cfg(feature = "object-manager")]
+    async fn interfaces_added(
+        &self,
+        node: &Node,
+        name: InterfaceName<'static>,
+        path: ObjectPath<'_>,
+        manager_path: Option<ObjectPath<'_>>,
+    ) -> Result<()> {
+        if name == ObjectManager::name() {
+            // Just added an object manager. Need to signal all managed objects under it.
+            let emitter = SignalEmitter::new(&self.connection(), path)?;
+            let objects = node.get_managed_objects(self, &self.connection()).await?;
+            for (path, owned_interfaces) in objects {
+                let interfaces = owned_interfaces
+                    .iter()
+                    .map(|(i, props)| {
+                        let props = props
+                            .iter()
+                            .map(|(k, v)| Ok((k.as_str(), Value::try_from(v)?)))
+                            .collect::<Result<_>>();
+                        Ok((i.into(), props?))
+                    })
+                    .collect::<Result<_>>()?;
+                ObjectManager::interfaces_added(&emitter, path.into(), interfaces).await?;
+            }
+        } else if let Some(manager_path) = manager_path {
+            let emitter = SignalEmitter::new(&self.connection(), manager_path)?;
+            let mut interfaces = HashMap::new();
+            let owned_props = node
+                .get_properties(self, &self.connection(), name.clone())
+                .await?;
+            let props = owned_props
+                .iter()
+                .map(|(k, v)| Ok((k.as_str(), Value::try_from(v)?)))
+                .collect::<Result<_>>()?;
+            interfaces.insert(name, props);
+
+            ObjectManager::interfaces_added(&emitter, path, interfaces).await?;
+        }
+
+        Ok(())
+    }
+
+    #[cfg(not(feature = "object-manager"))]
+    async fn interfaces_added(
+        &self,
+        _node: &Node,
+        _name: InterfaceName<'static>,
+        _path: ObjectPath<'_>,
+        _manager_path: Option<ObjectPath<'_>>,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    /// Emit `InterfacesRemoved` for `interface_name`, unregistered from `path`, from
+    /// `manager_path`, the closest ancestor serving an `ObjectManager`, if there is one.
+    #[cfg(feature = "object-manager")]
+    async fn interfaces_removed(
+        &self,
+        path: ObjectPath<'_>,
+        interface_name: InterfaceName<'static>,
+        manager_path: Option<ObjectPath<'static>>,
+    ) -> Result<()> {
         if let Some(manager_path) = manager_path {
             let ctxt = SignalEmitter::new(&self.connection(), manager_path)?;
-            ObjectManager::interfaces_removed(&ctxt, path.clone(), (&[interface_name]).into())
-                .await?;
+            ObjectManager::interfaces_removed(&ctxt, path, (&[interface_name]).into()).await?;
         }
-        Ok(destroyed)
+
+        Ok(())
+    }
+
+    #[cfg(not(feature = "object-manager"))]
+    async fn interfaces_removed(
+        &self,
+        _path: ObjectPath<'_>,
+        _interface_name: InterfaceName<'static>,
+        _manager_path: Option<ObjectPath<'static>>,
+    ) -> Result<()> {
+        Ok(())
     }
 
     /// Get the interface at the given path.
