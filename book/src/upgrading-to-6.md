@@ -471,6 +471,14 @@ Leaving out the half you don't use keeps its code out of your binary, which even
 not do before. Everything else in the D-Bus API (`Connection`, `Message`, `MessageStream`,
 `MatchRule`, the plain `fdo` types and errors, `Connection::request_name`) needs neither.
 
+### A proxy without properties has no properties cache
+
+`proxy::Defaults` has a new constant, `HAS_PROPERTIES`, which `#[proxy]` sets from the trait,
+and `proxy::Builder::build` requires the trait. A proxy whose interface has no properties never
+sets up the properties cache, whatever the `CacheProperties` setting, so a program whose proxies
+have none carries no cache code at all. A hand-written `Defaults` implementation can leave the
+constant at its default of `true`.
+
 ## A stale zvariant in the dependency graph
 
 If another crate in your tree still depends on zvariant 5, your build contains two unrelated

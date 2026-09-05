@@ -124,9 +124,11 @@ impl<'a, T> Builder<'a, T> {
     /// [`Error::MissingParameter`] is returned.
     pub async fn build(self) -> Result<T>
     where
-        T: From<Proxy<'a>>,
+        T: From<Proxy<'a>> + super::Defaults,
     {
-        let cache_upfront = self.cache == CacheProperties::Yes;
+        // The constant lets the whole properties cache be dropped from a program whose proxies
+        // have no properties.
+        let cache_upfront = T::HAS_PROPERTIES && self.cache == CacheProperties::Yes;
         let proxy = self.build_internal()?;
 
         if cache_upfront {
