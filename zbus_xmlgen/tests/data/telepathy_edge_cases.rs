@@ -67,17 +67,17 @@ pub trait EdgeCases {
         dropped_enum: u32,
     ) -> zbus::Result<StatusMap>;
 
-    /// Changed signal
-    #[zbus(signal)]
-    fn changed(&self, status: Status) -> zbus::Result<()>;
-
-    /// NamedKeys property
-    #[zbus(property)]
-    fn named_keys(&self) -> zbus::Result<NamedKeyMap>;
-
     /// OddValues property
     #[zbus(property)]
     fn odd_values(&self) -> zbus::Result<OddValues>;
     #[zbus(property)]
     fn set_odd_values(&self, value: OddValues) -> zbus::Result<()>;
+
+    /// NamedKeys property
+    #[zbus(property)]
+    fn named_keys(&self) -> zbus::Result<NamedKeyMap>;
+
+    /// Changed signal
+    #[zbus(signal)]
+    fn changed(&self, status: Status) -> zbus::Result<()>;
 }

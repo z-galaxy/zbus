@@ -253,71 +253,68 @@ impl<'i> CodeGenerator<'i> {
         writeln!(w, ")]")?;
         writeln!(w, "pub trait {name} {{")?;
 
-        let mut methods = iface.methods().to_vec();
-        methods.sort_by(|a, b| a.name().partial_cmp(&b.name()).unwrap());
-        for m in &methods {
-            let (inputs, output) = inputs_output_from_args(m.args(), &types);
-            let name = to_identifier(&to_snakecase(m.name().as_str()));
-            writeln!(w)?;
-            writeln!(w, "    /// {} method", m.name())?;
-            write_member_docs(w, m.docstring(), m.args())?;
-            if pascal_case(&name) != m.name().as_str() {
-                writeln!(w, "    #[zbus(name = \"{}\")]", m.name())?;
-            }
-            hide_clippy_lints(w, m, &types)?;
-            writeln!(w, "    fn {name}({inputs}){output};")?;
-        }
-
-        let mut signals = iface.signals().to_vec();
-        signals.sort_by(|a, b| a.name().partial_cmp(&b.name()).unwrap());
-        for signal in &signals {
-            let args = parse_signal_args(signal.args(), &types);
-            let name = to_identifier(&to_snakecase(signal.name().as_str()));
-            writeln!(w)?;
-            writeln!(w, "    /// {} signal", signal.name())?;
-            write_member_docs(w, signal.docstring(), signal.args())?;
-            if pascal_case(&name) != signal.name().as_str() {
-                writeln!(w, "    #[zbus(signal, name = \"{}\")]", signal.name())?;
-            } else {
-                writeln!(w, "    #[zbus(signal)]")?;
-            }
-            writeln!(w, "    fn {name}({args}) -> zbus::Result<()>;",)?;
-        }
-
-        let mut props = iface.properties().to_vec();
-        props.sort_by(|a, b| a.name().partial_cmp(&b.name()).unwrap());
-        for p in props {
-            let name = to_identifier(&to_snakecase(p.name().as_str()));
-            let fn_attribute = if pascal_case(&name) != p.name().as_str() {
-                format!("    #[zbus(property, name = \"{}\")]", p.name())
-            } else {
-                "    #[zbus(property)]".to_string()
-            };
-
-            writeln!(w)?;
-            writeln!(w, "    /// {} property", p.name())?;
-            write_member_docs(w, p.docstring(), &[])?;
-            // Named types satisfy both directions of the property value conversions, owned.
-            let named = types.resolve(p.tp_type(), p.ty(), false);
-            if p.access().read() {
-                writeln!(w, "{fn_attribute}")?;
-                let output = match &named {
-                    Some(named) => named.clone(),
-                    None => {
-                        hide_clippy_type_complexity_lint(w, p.ty())?;
-                        to_rust_type(p.ty(), false, false)
+        for child in iface.children() {
+            match child {
+                zbus_xml::Child::Method(m) => {
+                    let (inputs, output) = inputs_output_from_args(m.args(), &types);
+                    let name = to_identifier(&to_snakecase(m.name().as_str()));
+                    writeln!(w)?;
+                    writeln!(w, "    /// {} method", m.name())?;
+                    write_member_docs(w, m.docstring(), m.args())?;
+                    if pascal_case(&name) != m.name().as_str() {
+                        writeln!(w, "    #[zbus(name = \"{}\")]", m.name())?;
                     }
-                };
-                writeln!(w, "    fn {name}(&self) -> zbus::Result<{output}>;",)?;
-            }
+                    hide_clippy_lints(w, m, &types)?;
+                    writeln!(w, "    fn {name}({inputs}){output};")?;
+                }
+                zbus_xml::Child::Signal(signal) => {
+                    let args = parse_signal_args(signal.args(), &types);
+                    let name = to_identifier(&to_snakecase(signal.name().as_str()));
+                    writeln!(w)?;
+                    writeln!(w, "    /// {} signal", signal.name())?;
+                    write_member_docs(w, signal.docstring(), signal.args())?;
+                    if pascal_case(&name) != signal.name().as_str() {
+                        writeln!(w, "    #[zbus(signal, name = \"{}\")]", signal.name())?;
+                    } else {
+                        writeln!(w, "    #[zbus(signal)]")?;
+                    }
+                    writeln!(w, "    fn {name}({args}) -> zbus::Result<()>;",)?;
+                }
+                zbus_xml::Child::Property(p) => {
+                    let name = to_identifier(&to_snakecase(p.name().as_str()));
+                    let fn_attribute = if pascal_case(&name) != p.name().as_str() {
+                        format!("    #[zbus(property, name = \"{}\")]", p.name())
+                    } else {
+                        "    #[zbus(property)]".to_string()
+                    };
 
-            if p.access().write() {
-                writeln!(w, "{fn_attribute}")?;
-                let input = named.unwrap_or_else(|| to_property_setter_type(p.ty()));
-                writeln!(
-                    w,
-                    "    fn set_{name}(&self, value: {input}) -> zbus::Result<()>;",
-                )?;
+                    writeln!(w)?;
+                    writeln!(w, "    /// {} property", p.name())?;
+                    write_member_docs(w, p.docstring(), &[])?;
+                    // Named types satisfy both directions of the property value conversions, owned.
+                    let named = types.resolve(p.tp_type(), p.ty(), false);
+                    if p.access().read() {
+                        writeln!(w, "{fn_attribute}")?;
+                        let output = match &named {
+                            Some(named) => named.clone(),
+                            None => {
+                                hide_clippy_type_complexity_lint(w, p.ty())?;
+                                to_rust_type(p.ty(), false, false)
+                            }
+                        };
+                        writeln!(w, "    fn {name}(&self) -> zbus::Result<{output}>;",)?;
+                    }
+
+                    if p.access().write() {
+                        writeln!(w, "{fn_attribute}")?;
+                        let input = named.unwrap_or_else(|| to_property_setter_type(p.ty()));
+                        writeln!(
+                            w,
+                            "    fn set_{name}(&self, value: {input}) -> zbus::Result<()>;",
+                        )?;
+                    }
+                }
+                _ => (),
             }
         }
         writeln!(w, "}}")
@@ -533,11 +530,10 @@ impl<'i> Types<'i> {
         let mut referenced = HashSet::new();
         let mut pending: Vec<&str> = interface
             .methods()
-            .iter()
             .flat_map(|m| m.args())
-            .chain(interface.signals().iter().flat_map(|s| s.args()))
+            .chain(interface.signals().flat_map(|s| s.args()))
             .filter_map(Arg::tp_type)
-            .chain(interface.properties().iter().filter_map(Property::tp_type))
+            .chain(interface.properties().filter_map(Property::tp_type))
             .collect();
         for def in interface.telepathy_types() {
             member_references(def, &mut pending);
@@ -563,7 +559,7 @@ impl<'i> Types<'i> {
         let mut taken: HashSet<String> = ["Proxy", "ProxyBlocking"]
             .iter()
             .map(|suffix| format!("{trait_name}{suffix}"))
-            .chain(interface.signals().iter().flat_map(|signal| {
+            .chain(interface.signals().flat_map(|signal| {
                 let signal = pascal_case(signal.name().as_str());
                 [
                     signal.clone(),
@@ -578,7 +574,7 @@ impl<'i> Types<'i> {
         let node_defs = node_types
             .iter()
             .filter(|def| referenced.contains(def.name()));
-        for def in interface.telepathy_types().iter().chain(node_defs) {
+        for def in interface.telepathy_types().chain(node_defs) {
             if generatable(def)
                 && !generated.contains_key(def.name())
                 && taken.insert(type_name(def.name()))
