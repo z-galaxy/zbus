@@ -54,9 +54,9 @@ where
                     // deserialized as a single-field struct. No need to be super strict here.
                 }
                 _ => {
-                    return Err(crate::Error::SignatureMismatch(
-                        signature.clone(),
-                        format!("`{expected}`"),
+                    return Err(crate::Error::signature_mismatch(
+                        signature,
+                        &format!("`{expected}`"),
                     ));
                 }
             }

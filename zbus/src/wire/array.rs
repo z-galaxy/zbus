@@ -53,9 +53,9 @@ impl<'a> Array<'a> {
     pub fn append<'e: 'a>(&mut self, element: Value<'e>) -> Result<()> {
         match &self.signature {
             Signature::Array(child) if element.value_signature() != child.signature() => {
-                return Err(Error::SignatureMismatch(
-                    element.value_signature().clone(),
-                    child.signature().clone().to_string(),
+                return Err(Error::signature_mismatch(
+                    element.value_signature(),
+                    &child.signature().to_string(),
                 ));
             }
             Signature::Array(_) => (),
@@ -230,9 +230,9 @@ impl<'a> DynamicDeserialize<'a> for Array<'a> {
 
     fn deserializer_for_signature(signature: &Signature) -> crate::Result<Self::Deserializer> {
         if !matches!(signature, Signature::Array(_)) {
-            return Err(crate::Error::SignatureMismatch(
-                signature.clone(),
-                "an array signature".to_owned(),
+            return Err(crate::Error::signature_mismatch(
+                signature,
+                "an array signature",
             ));
         };
 

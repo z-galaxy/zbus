@@ -45,9 +45,9 @@ impl<'de, 'sig> ValueDeserializer<'de, 'sig> {
         {
             Ok(value)
         } else {
-            Err(crate::Error::SignatureMismatch(
-                value.value_signature().clone(),
-                self.expected.to_string(),
+            Err(crate::Error::signature_mismatch(
+                value.value_signature(),
+                &self.expected.to_string(),
             ))
         }
     }
@@ -71,10 +71,7 @@ impl<'de, 'sig> ValueDeserializer<'de, 'sig> {
     }
 
     fn mismatch(&self, expected: &'static str) -> crate::Error {
-        crate::Error::SignatureMismatch(
-            self.actual().value_signature().clone(),
-            expected.to_owned(),
-        )
+        crate::Error::signature_mismatch(self.actual().value_signature(), expected)
     }
 
     fn bytes(&self) -> crate::Result<Vec<u8>> {
@@ -669,9 +666,9 @@ impl<'de> ValueEnumAccess<'de> {
 
     fn structure(value: &'de [Value<'de>], expected: &Signature) -> crate::Result<Self> {
         let Signature::Structure(signatures) = expected else {
-            return Err(crate::Error::SignatureMismatch(
-                expected.clone(),
-                "an enum structure".to_owned(),
+            return Err(crate::Error::signature_mismatch(
+                expected,
+                "an enum structure",
             ));
         };
         let Some(discriminant) = value.first() else {

@@ -215,9 +215,9 @@ where
         // explicitly here without breaking the common case where it doesn't exist at all.
         // Fall back to a wildcard instead.
         #[allow(unreachable_patterns)]
-        _ => Err(Error::SignatureMismatch(
-            signature.clone(),
-            "GVariant `Maybe` support has moved to the `zgvariant` crate".to_string(),
+        _ => Err(Error::signature_mismatch(
+            signature,
+            "GVariant `Maybe` support has moved to the `zgvariant` crate",
         )),
     }
 }
