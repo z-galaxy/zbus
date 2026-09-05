@@ -15,6 +15,8 @@ use crate::{
 
 mod interface;
 pub(crate) use interface::ArcInterface;
+#[doc(hidden)]
+pub use interface::introspect_doc_comment;
 pub use interface::{DispatchResult2, Interface, InterfaceDeref, InterfaceDerefMut, InterfaceRef};
 
 mod signal_emitter;

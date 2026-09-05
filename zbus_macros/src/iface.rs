@@ -172,7 +172,7 @@ impl MethodInfo {
                     }
                 })
                 .collect();
-            to_xml_docs(docs)
+            to_xml_docs(docs, zbus)
         } else {
             quote!()
         };
@@ -1420,9 +1420,11 @@ fn introspect_properties(
     Ok(())
 }
 
-pub fn to_xml_docs(lines: Vec<String>) -> TokenStream {
-    let mut docs = quote!();
-
+/// The code writing `lines` as an XML comment in the introspection data.
+///
+/// The lines are joined into one literal and written by a runtime helper, rather than a `writeln!`
+/// per line, to keep the generated code small.
+pub fn to_xml_docs(lines: Vec<String>, zbus: &TokenStream) -> TokenStream {
     let mut lines: Vec<&str> = lines
         .iter()
         .skip_while(|s| is_blank(s))
@@ -1434,22 +1436,12 @@ pub fn to_xml_docs(lines: Vec<String>) -> TokenStream {
     }
 
     if lines.is_empty() {
-        return docs;
+        return quote!();
     }
 
-    docs.extend(quote!(::std::writeln!(writer, "{:indent$}<!--", "", indent = level).unwrap();));
-    for line in lines {
-        if !line.is_empty() {
-            docs.extend(
-                quote!(::std::writeln!(writer, "{:indent$}{}", "", #line, indent = level).unwrap();),
-            );
-        } else {
-            docs.extend(quote!(::std::writeln!(writer, "").unwrap();));
-        }
-    }
-    docs.extend(quote!(::std::writeln!(writer, "{:indent$} -->", "", indent = level).unwrap();));
+    let lines = lines.join("\n");
 
-    docs
+    quote!(#zbus::object_server::introspect_doc_comment(writer, level, #lines);)
 }
 
 // Like ImplItemFn, but with a semicolon at the end instead of a body block
