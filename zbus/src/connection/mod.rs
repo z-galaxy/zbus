@@ -422,16 +422,39 @@ impl Connection {
     {
         let _permit = acquire_serial_num_semaphore().await;
 
-        let mut b = Message::signal(path, interface, signal_name)?;
-        if let Some(sender) = self.unique_name() {
-            b = b.sender(sender)?;
-        }
-        if let Some(destination) = destination {
-            b = b.destination(destination)?;
-        }
-        let m = b.build(body)?;
+        let destination = destination
+            .map(TryInto::try_into)
+            .transpose()
+            .map_err(Into::into)?;
+        let path = path.try_into().map_err(Into::into)?;
+        let interface = interface.try_into().map_err(Into::into)?;
+        let signal_name = signal_name.try_into().map_err(Into::into)?;
+        let m = self
+            .signal_builder(destination, path, interface, signal_name)?
+            .build(body)?;
 
         self.send(&m).await
+    }
+
+    /// The builder for a signal message from this connection.
+    ///
+    /// Kept non-generic so that it is compiled once; see [`Self::method_call_builder`].
+    fn signal_builder<'b>(
+        &'b self,
+        destination: Option<BusName<'b>>,
+        path: ObjectPath<'b>,
+        interface: InterfaceName<'b>,
+        signal_name: MemberName<'b>,
+    ) -> Result<message::Builder<'b>> {
+        let mut builder = Message::signal(path, interface, signal_name)?;
+        if let Some(sender) = self.unique_name() {
+            builder = builder.sender(sender)?;
+        }
+        if let Some(destination) = destination {
+            builder = builder.destination(destination)?;
+        }
+
+        Ok(builder)
     }
 
     /// Reply to a message.
