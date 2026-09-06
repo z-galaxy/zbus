@@ -12,9 +12,9 @@ use std::os::unix::net::{SocketAddr, UnixStream};
 use std::{collections::HashMap, sync::Arc};
 #[cfg(windows)]
 use uds_windows::UnixStream;
-#[cfg(unix)]
+#[cfg(all(unix, feature = "unixexec"))]
 mod unixexec;
-#[cfg(unix)]
+#[cfg(all(unix, feature = "unixexec"))]
 pub use unixexec::Unixexec;
 
 use std::{
@@ -75,7 +75,7 @@ pub enum Transport {
     /// `tokio_vsock::VsockStream` with the `tokio-vsock` feature.
     Vsock(Vsock),
     /// A `unixexec` address.
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "unixexec"))]
     Unixexec(Unixexec),
 }
 
@@ -135,7 +135,7 @@ impl Transport {
                     Err(Error::Unsupported)
                 }
             }
-            #[cfg(unix)]
+            #[cfg(all(unix, feature = "unixexec"))]
             Transport::Unixexec(unixexec) => unixexec
                 .connect(&address)
                 .await
@@ -234,7 +234,7 @@ impl Transport {
     pub(super) fn from_options(transport: &str, options: HashMap<&str, &str>) -> Result<Self> {
         match transport {
             "unix" => Unix::from_options(options).map(Self::Unix),
-            #[cfg(unix)]
+            #[cfg(all(unix, feature = "unixexec"))]
             "unixexec" => Unixexec::from_options(options).map(Self::Unixexec),
             "tcp" => Tcp::from_options(options, false).map(Self::Tcp),
             "nonce-tcp" => Tcp::from_options(options, true).map(Self::Tcp),
@@ -258,7 +258,7 @@ impl Transport {
 pub(crate) enum Stream {
     #[cfg(any(unix, feature = "async-io"))]
     Unix(BoxedSplit),
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "unixexec"))]
     Unixexec(BoxedSplit),
     Tcp(BoxedSplit),
     #[cfg(any(feature = "vsock", feature = "tokio-vsock"))]
@@ -392,7 +392,7 @@ impl Display for Transport {
         match self {
             Self::Tcp(tcp) => write!(f, "{tcp}")?,
             Self::Unix(unix) => write!(f, "{unix}")?,
-            #[cfg(unix)]
+            #[cfg(all(unix, feature = "unixexec"))]
             Self::Unixexec(unixexec) => write!(f, "{unixexec}")?,
             #[cfg(any(feature = "vsock", feature = "tokio-vsock"))]
             Self::Vsock(vsock) => write!(f, "{}", vsock)?,

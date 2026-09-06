@@ -6,9 +6,9 @@ pub use channel::Channel;
 mod split;
 pub use split::{BoxedSplit, Split};
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "unixexec"))]
 pub(crate) mod command;
-#[cfg(unix)]
+#[cfg(all(unix, feature = "unixexec"))]
 pub(crate) use command::Command;
 mod tcp;
 mod unix;

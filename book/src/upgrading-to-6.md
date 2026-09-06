@@ -471,6 +471,21 @@ Leaving out the half you don't use keeps its code out of your binary, which even
 not do before. Everything else in the D-Bus API (`Connection`, `Message`, `MessageStream`,
 `MatchRule`, the plain `fdo` types and errors, `Connection::request_name`) needs neither.
 
+### The `unixexec` transport is a feature
+
+The `unixexec:` address transport runs a command and talks D-Bus over its standard I/O, which
+pulls the async runtime's process support into every binary. It is behind the `unixexec` feature
+now, a default feature, so a plain `zbus = "6"` dependency keeps it. A `default-features = false`
+build that connects through it has to name it:
+
+```toml
+[dependencies]
+zbus = { version = "6", default-features = false, features = ["tokio", "proxy", "unixexec"] }
+```
+
+`Transport::Unixexec` and `transport::Unixexec` exist only with the feature, and
+`Address::from_str` rejects a `unixexec:` address without it.
+
 ### A proxy without properties has no properties cache
 
 `proxy::Defaults` has a new constant, `HAS_PROPERTIES`, which `#[proxy]` sets from the trait,

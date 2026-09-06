@@ -1,12 +1,14 @@
-#[cfg(feature = "async-io")]
+#[cfg(feature = "unixexec")]
+use crate::address::transport::Unixexec;
+#[cfg(all(feature = "async-io", feature = "unixexec"))]
 use async_process::{Child, unix::CommandExt};
 #[cfg(unix)]
 use std::process::Output;
-use std::{ffi::OsStr, io::Error, process::Stdio};
-#[cfg(all(feature = "tokio", not(feature = "async-io")))]
+#[cfg(feature = "unixexec")]
+use std::process::Stdio;
+use std::{ffi::OsStr, io::Error};
+#[cfg(all(feature = "tokio", not(feature = "async-io"), feature = "unixexec"))]
 use tokio::process::Child;
-
-use crate::address::transport::Unixexec;
 
 /// A wrapper around the command API of the underlying async runtime.
 ///
@@ -32,6 +34,7 @@ impl Command {
     }
 
     /// Constructs a new `Command` from a `unixexec` address.
+    #[cfg(feature = "unixexec")]
     pub fn for_unixexec(unixexec: &Unixexec) -> Self {
         let mut command = Self::new(unixexec.path());
         command.args(unixexec.args());
@@ -47,6 +50,7 @@ impl Command {
     ///
     /// Set the first process argument, `argv[0]`, to something other than the
     /// default executable path.
+    #[cfg(feature = "unixexec")]
     pub fn arg0<S>(&mut self, arg: S) -> &mut Self
     where
         S: AsRef<OsStr>,
@@ -73,24 +77,28 @@ impl Command {
     }
 
     /// Sets configuration for the child process's standard input (stdin) handle.
+    #[cfg(feature = "unixexec")]
     pub fn stdin<T: Into<Stdio>>(&mut self, cfg: T) -> &mut Self {
         self.0.stdin(cfg);
         self
     }
 
     /// Sets configuration for the child process's standard output (stdout) handle.
+    #[cfg(feature = "unixexec")]
     pub fn stdout<T: Into<Stdio>>(&mut self, cfg: T) -> &mut Self {
         self.0.stdout(cfg);
         self
     }
 
     /// Sets configuration for the child process's standard error (stderr) handle.
+    #[cfg(feature = "unixexec")]
     pub fn stderr<T: Into<Stdio>>(&mut self, cfg: T) -> &mut Self {
         self.0.stderr(cfg);
         self
     }
 
     /// Executes the command as a child process, returning a handle to it.
+    #[cfg(feature = "unixexec")]
     pub fn spawn(&mut self) -> Result<Child, Error> {
         self.0.spawn()
     }

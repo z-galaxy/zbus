@@ -197,7 +197,7 @@ mod tests {
     };
     #[cfg(target_os = "macos")]
     use crate::address::transport::Launchd;
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "unixexec"))]
     use crate::address::transport::Unixexec;
     #[cfg(windows)]
     use crate::address::transport::{Autolaunch, AutolaunchScope};
@@ -240,7 +240,7 @@ mod tests {
                 .unwrap(),
             );
         }
-        #[cfg(unix)]
+        #[cfg(all(unix, feature = "unixexec"))]
         assert_eq!(
             Address::from_str("unixexec:path=/tmp/dbus-foo").unwrap(),
             Transport::Unixexec(Unixexec::new("/tmp/dbus-foo".into(), None, Vec::new())).into(),

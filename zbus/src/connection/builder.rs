@@ -763,7 +763,7 @@ impl<'a> Builder<'a> {
                 match address.connect().await? {
                     #[cfg(any(unix, feature = "async-io"))]
                     address::transport::Stream::Unix(split) => split,
-                    #[cfg(unix)]
+                    #[cfg(all(unix, feature = "unixexec"))]
                     address::transport::Stream::Unixexec(split) => split,
                     address::transport::Stream::Tcp(split) => split,
                     #[cfg(any(feature = "vsock", feature = "tokio-vsock"))]

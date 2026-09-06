@@ -1,5 +1,4 @@
-#![cfg(feature = "comms")]
-#![cfg(not(target_os = "windows"))]
+#![cfg(all(feature = "unixexec", not(target_os = "windows")))]
 
 use ntest::timeout;
 use test_log::test;
