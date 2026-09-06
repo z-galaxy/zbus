@@ -13,7 +13,9 @@ use ntest::timeout;
 use test_log::test;
 use tokio::sync::mpsc::channel;
 use tracing::{debug, instrument};
-use zbus::{block_on, connection, fdo::ObjectManager, object_server::InterfaceRef};
+#[cfg(feature = "object-manager")]
+use zbus::fdo::ObjectManager;
+use zbus::{block_on, connection, object_server::InterfaceRef};
 
 use iface_and_proxy::{
     client::my_iface_test,
@@ -134,7 +136,9 @@ async fn iface_and_proxy_(#[allow(unused)] p2p: bool) {
     let iface = MyIface::new(next_tx.clone());
     let service_conn_builder = service_conn_builder
         .serve_at("/org/freedesktop/MyService", iface)
-        .unwrap()
+        .unwrap();
+    #[cfg(feature = "object-manager")]
+    let service_conn_builder = service_conn_builder
         .serve_at("/zbus/test", ObjectManager)
         .unwrap();
     debug!("ObjectServer set-up.");

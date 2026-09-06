@@ -5,11 +5,16 @@ use std::{
     fmt::Write,
 };
 
+#[cfg(feature = "object-manager")]
 use crate::{
-    Connection, ObjectPath, ObjectServer, OwnedObjectPath, OwnedValue,
-    fdo::{self, Introspectable, ManagedObjects, ObjectManager, Peer, Properties},
-    names::InterfaceName,
+    Connection, ObjectServer, OwnedValue,
+    fdo::{self, ManagedObjects, ObjectManager},
     object_server::SignalEmitter,
+};
+use crate::{
+    ObjectPath, OwnedObjectPath,
+    fdo::{Introspectable, Peer, Properties},
+    names::InterfaceName,
 };
 
 use super::{ArcInterface, Interface};
@@ -67,7 +72,7 @@ impl Node {
                 continue;
             }
 
-            if node.interfaces.contains_key(&ObjectManager::name()) {
+            if node.serves_object_manager() {
                 obj_manager_path = Some((*node.path).clone());
             }
 
@@ -255,6 +260,18 @@ impl Node {
         xml
     }
 
+    /// Whether an `ObjectManager` is registered at this node.
+    #[cfg(feature = "object-manager")]
+    fn serves_object_manager(&self) -> bool {
+        self.interfaces.contains_key(&ObjectManager::name())
+    }
+
+    #[cfg(not(feature = "object-manager"))]
+    fn serves_object_manager(&self) -> bool {
+        false
+    }
+
+    #[cfg(feature = "object-manager")]
     pub(crate) async fn get_managed_objects(
         &self,
         object_server: &ObjectServer,
@@ -284,6 +301,7 @@ impl Node {
         Ok(managed_objects)
     }
 
+    #[cfg(feature = "object-manager")]
     pub(super) async fn get_properties(
         &self,
         object_server: &ObjectServer,

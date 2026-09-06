@@ -149,7 +149,7 @@ impl<'a> Builder<'a> {
     /// #
     /// # Ok::<_, Box<dyn Error + Send + Sync>>(())
     /// ```
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "ibus"))]
     pub fn ibus() -> Result<Self> {
         use crate::address::transport::{Ibus, Transport};
         Ok(Self::new(Target::Address(Address::from(Transport::Ibus(
@@ -186,7 +186,7 @@ impl<'a> Builder<'a> {
     ///
     /// **Note:** The IBus address is different for each session. You can find the address for your
     /// current session using `ibus address` command. For a more convenient way to connect to IBus,
-    /// see [`Builder::ibus`].
+    /// see `Builder::ibus`, available with the `ibus` feature.
     ///
     /// [D-Bus bus address]: https://dbus.freedesktop.org/doc/dbus-specification.html#addresses
     pub fn address<A>(address: A) -> Result<Self>
@@ -763,7 +763,7 @@ impl<'a> Builder<'a> {
                 match address.connect().await? {
                     #[cfg(any(unix, feature = "async-io"))]
                     address::transport::Stream::Unix(split) => split,
-                    #[cfg(unix)]
+                    #[cfg(all(unix, feature = "unixexec"))]
                     address::transport::Stream::Unixexec(split) => split,
                     address::transport::Stream::Tcp(split) => split,
                     #[cfg(any(feature = "vsock", feature = "tokio-vsock"))]

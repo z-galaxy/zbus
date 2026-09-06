@@ -23,6 +23,22 @@ use crate::{
     object_server::SignalEmitter,
 };
 
+/// Write `lines` as an XML comment at the given indentation level.
+///
+/// This is what the `#[interface]` macro uses to write doc comments in the introspection data.
+#[doc(hidden)]
+pub fn introspect_doc_comment(writer: &mut dyn Write, level: usize, lines: &str) {
+    writeln!(writer, "{:indent$}<!--", "", indent = level).unwrap();
+    for line in lines.split('\n') {
+        if line.is_empty() {
+            writeln!(writer).unwrap();
+        } else {
+            writeln!(writer, "{:indent$}{line}", "", indent = level).unwrap();
+        }
+    }
+    writeln!(writer, "{:indent$} -->", "", indent = level).unwrap();
+}
+
 /// This trait is used to dispatch messages to an interface instance.
 ///
 /// This trait should be treated as an unstable API and compatibility may break in minor

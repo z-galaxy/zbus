@@ -402,6 +402,7 @@ pub fn create_proxy(
                 &Some(#zbus::names::InterfaceName::from_static_str_unchecked(#iface_name));
             const DESTINATION: &'static Option<#zbus::names::BusName<'static>> = #default_service;
             const PATH: &'static Option<#zbus::ObjectPath<'static>> = #default_path;
+            const HAS_PROPERTIES: bool = #has_properties;
         }
 
         #(#other_attrs)*

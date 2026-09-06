@@ -52,17 +52,17 @@ impl<'k, 'v> Dict<'k, 'v> {
             Signature::Dict { key: key_sig, .. }
                 if key.value_signature() != key_sig.signature() =>
             {
-                return Err(Error::SignatureMismatch(
-                    key.value_signature().clone(),
-                    key_sig.signature().clone().to_string(),
+                return Err(Error::signature_mismatch(
+                    key.value_signature(),
+                    &key_sig.signature().to_string(),
                 ));
             }
             Signature::Dict {
                 value: value_sig, ..
             } if value.value_signature() != value_sig.signature() => {
-                return Err(Error::SignatureMismatch(
-                    value.value_signature().clone(),
-                    value_sig.signature().clone().to_string(),
+                return Err(Error::signature_mismatch(
+                    value.value_signature(),
+                    &value_sig.signature().to_string(),
                 ));
             }
             Signature::Dict { .. } => (),

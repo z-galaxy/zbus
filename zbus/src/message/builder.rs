@@ -1,11 +1,6 @@
 #[cfg(unix)]
 use crate::OwnedFd;
-use std::{
-    borrow::Cow,
-    io::{Cursor, Write},
-    num::NonZeroU32,
-    sync::Arc,
-};
+use std::{borrow::Cow, io::Cursor, num::NonZeroU32, sync::Arc};
 
 use enumflags2::BitFlags;
 
@@ -18,12 +13,6 @@ use crate::{
 };
 
 use crate::message::header::MAX_MESSAGE_SIZE;
-
-#[cfg(unix)]
-type BuildGenericResult = Vec<OwnedFd>;
-
-#[cfg(not(unix))]
-type BuildGenericResult = ();
 
 macro_rules! dbus_context {
     ($self:ident, $n_bytes_before: expr) => {
@@ -171,26 +160,28 @@ impl<'a> Builder<'a> {
         B: serde::ser::Serialize + DynamicType,
     {
         let ctxt = dbus_context!(self, 0);
-
-        // Note: this iterates the body twice, but we prefer efficient handling of large messages
-        // to efficient handling of ones that are complex to serialize.
-        let body_size = crate::wire::serialized_size(ctxt, body)?;
-
         let signature = body.signature();
 
-        self.build_generic(signature, body_size, move |cursor| {
-            // SAFETY: build_generic puts FDs and the body in the same Message.
-            unsafe { crate::wire::to_writer(cursor, ctxt, body) }.map(|s| {
-                #[cfg(unix)]
-                {
-                    s.into_fds()
-                }
-                #[cfg(not(unix))]
-                {
-                    let _ = s;
-                }
-            })
-        })
+        // The header carries the body's length and FD count, so the body is serialized first,
+        // into its own buffer, and copied into place behind the header. One pass over the body
+        // plus a copy of its bytes beats the extra serialization pass that measuring it first
+        // would cost, and keeps this generic function down to the serialization itself.
+        let mut body_bytes = Vec::new();
+        let mut cursor = Cursor::new(&mut body_bytes);
+        // SAFETY: The FDs end up in the same Message as the body.
+        let written =
+            unsafe { crate::wire::to_writer_for_signature(&mut cursor, ctxt, &signature, body) }?;
+        #[cfg(unix)]
+        let fds = written.into_fds();
+        #[cfg(not(unix))]
+        let _ = written;
+
+        self.build_from_bytes(
+            signature,
+            &body_bytes,
+            #[cfg(unix)]
+            fds,
+        )
     }
 
     /// Create a new message from a raw slice of bytes to populate the body with, rather than by
@@ -210,71 +201,52 @@ impl<'a> Builder<'a> {
         S::Error: Into<Error>,
     {
         let signature = signature.try_into().map_err(Into::into)?;
-        let body_size = serialized::Size::new(body_bytes.len(), dbus_context!(self, 0));
-        #[cfg(unix)]
-        let body_size = {
-            let num_fds = fds.len().try_into().map_err(|_| Error::ExcessData)?;
-            body_size.set_num_fds(num_fds)
-        };
 
-        self.build_generic(
+        self.build_from_bytes(
             signature,
-            body_size,
-            move |cursor: &mut Cursor<&mut Vec<u8>>| {
-                cursor.write_all(body_bytes)?;
-
-                #[cfg(unix)]
-                return Ok::<Vec<OwnedFd>, Error>(fds);
-
-                #[cfg(not(unix))]
-                return Ok::<(), Error>(());
-            },
+            body_bytes,
+            #[cfg(unix)]
+            fds,
         )
     }
 
-    fn build_generic<WriteFunc>(
+    /// Build the message around an already serialized body.
+    fn build_from_bytes(
         self,
         signature: Signature,
-        body_size: serialized::Size,
-        write_body: WriteFunc,
-    ) -> Result<Message>
-    where
-        WriteFunc: FnOnce(&mut Cursor<&mut Vec<u8>>) -> Result<BuildGenericResult>,
-    {
+        body: &[u8],
+        #[cfg(unix)] fds: Vec<OwnedFd>,
+    ) -> Result<Message> {
         let ctxt = dbus_context!(self, 0);
         let mut header = self.header;
 
         header.fields_mut().signature = Cow::Owned(signature);
 
-        let body_len_u32 = body_size.size().try_into().map_err(|_| Error::ExcessData)?;
+        let body_len_u32 = body.len().try_into().map_err(|_| Error::ExcessData)?;
         header.primary_mut().set_body_len(body_len_u32);
 
         #[cfg(unix)]
         {
-            let fds_len = body_size.num_fds();
+            let fds_len: u32 = fds.len().try_into().map_err(|_| Error::ExcessData)?;
             if fds_len != 0 {
                 header.fields_mut().unix_fds = Some(fds_len);
             }
         }
 
-        let hdr_len = *crate::wire::serialized_size(ctxt, &header)?;
+        let mut bytes = Vec::new();
+        let mut cursor = Cursor::new(&mut bytes);
+        // SAFETY: There are no FDs involved.
+        unsafe { crate::wire::to_writer(&mut cursor, ctxt, &header) }?;
+        let hdr_len = bytes.len();
         // We need to align the body to 8-byte boundary.
-        let body_padding = padding_for_8_bytes(hdr_len);
-        let body_offset = hdr_len + body_padding;
-        let total_len = body_offset + body_size.size();
+        let body_offset = hdr_len + padding_for_8_bytes(hdr_len);
+        let total_len = body_offset + body.len();
         if total_len > MAX_MESSAGE_SIZE {
             return Err(Error::ExcessData);
         }
-        let mut bytes: Vec<u8> = Vec::with_capacity(total_len);
-        let mut cursor = Cursor::new(&mut bytes);
-
-        // SAFETY: There are no FDs involved.
-        unsafe { crate::wire::to_writer(&mut cursor, ctxt, &header) }?;
-        cursor.write_all(&[0u8; 8][..body_padding])?;
-        #[cfg(unix)]
-        let fds: Vec<_> = write_body(&mut cursor)?.into_iter().collect();
-        #[cfg(not(unix))]
-        write_body(&mut cursor)?;
+        bytes.reserve_exact(total_len - hdr_len);
+        bytes.resize(body_offset, 0);
+        bytes.extend_from_slice(body);
 
         let primary_header = header.into_primary();
         #[cfg(unix)]

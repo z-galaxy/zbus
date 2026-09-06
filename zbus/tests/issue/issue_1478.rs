@@ -3,7 +3,7 @@ use zbus::{Error, connection};
 
 const UNIX_ADDRESS: &str = "unix:path=/this/path/does/not/exist";
 const TCP_ADDRESS: &str = "tcp:host=localhost,port=4142,family=ipv4";
-#[cfg(unix)]
+#[cfg(all(unix, feature = "unixexec"))]
 const UNIXEXEC_ADDRESS: &str = "unixexec:path=/this/path/does/not/exist";
 #[cfg(any(
     all(feature = "vsock", not(feature = "tokio")),
@@ -24,7 +24,7 @@ fn connection_error() {
 async fn connection_error_async() {
     #[allow(unused_mut)]
     let mut addresses = vec![UNIX_ADDRESS, TCP_ADDRESS];
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "unixexec"))]
     addresses.push(UNIXEXEC_ADDRESS);
     #[cfg(any(
         all(feature = "vsock", not(feature = "tokio")),

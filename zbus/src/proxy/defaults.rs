@@ -11,6 +11,13 @@ pub trait Defaults {
     const INTERFACE: &'static Option<InterfaceName<'static>>;
     const DESTINATION: &'static Option<BusName<'static>>;
     const PATH: &'static Option<ObjectPath<'static>>;
+    /// Whether the interface has any properties.
+    ///
+    /// A proxy for an interface without properties never sets up a properties cache, so a build
+    /// with [`CacheProperties::Yes`](super::CacheProperties::Yes) has nothing to populate. The
+    /// `#[proxy]` macro sets this from the trait; a hand-written implementation can leave the
+    /// default.
+    const HAS_PROPERTIES: bool = true;
 }
 
 impl Defaults for super::Proxy<'_> {

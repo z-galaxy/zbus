@@ -25,7 +25,7 @@ pub use monitoring::MonitoringProxy;
 
 pub(crate) mod object_manager;
 pub use object_manager::ManagedObjects;
-#[cfg(feature = "service")]
+#[cfg(feature = "object-manager")]
 pub use object_manager::ObjectManager;
 #[cfg(feature = "proxy")]
 pub use object_manager::{
@@ -153,12 +153,14 @@ mod tests {
             });
     }
 
+    #[cfg(feature = "object-manager")]
     #[test]
     #[timeout(15000)]
     fn no_object_manager_signals_before_hello() {
         crate::block_on(no_object_manager_signals_before_hello_async());
     }
 
+    #[cfg(feature = "object-manager")]
     async fn no_object_manager_signals_before_hello_async() {
         // We were emitting `InterfacesAdded` signals before `Hello` was called, which is wrong and
         // results in us getting disconnected by the bus. This test case ensures we don't do that

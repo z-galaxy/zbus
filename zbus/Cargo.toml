@@ -13,7 +13,15 @@ categories = ["os::unix-apis"]
 readme = "README.md"
 
 [features]
-default = ["async-io", "blocking-api", "proxy", "service"]
+default = [
+    "async-io",
+    "blocking-api",
+    "proxy",
+    "service",
+    "object-manager",
+    "unixexec",
+    "ibus",
+]
 
 # Wire-format optional impls — the former zvariant features, same names.
 arrayvec = ["dep:arrayvec"]
@@ -70,6 +78,15 @@ blocking-api = ["comms"]
 proxy = ["comms", "zbus_macros/proxy"]
 # The service-side (object server) API (default).
 service = ["comms", "zbus_macros/service"]
+# The service-side `ObjectManager` implementation, along with the `InterfacesAdded` and
+# `InterfacesRemoved` signals the object server emits on its behalf (default).
+object-manager = ["service"]
+# The `unixexec:` transport, which runs a command and talks D-Bus over its standard I/O
+# (default).
+unixexec = ["comms"]
+# The `ibus:` transport, which asks the IBus daemon for its bus address by running `ibus address`
+# (default).
+ibus = ["comms"]
 # Enables API that is only needed for peer-to-peer (p2p) connections.
 p2p = ["comms", "uuid?/v4"]
 # Enables API that is only needed for bus implementations (enables `p2p`).
@@ -193,6 +210,9 @@ features = [
     "bus-impl",
     "p2p",
     "tokio",
+    "object-manager",
+    "unixexec",
+    "ibus",
 ]
 targets = [
     "x86_64-unknown-linux-gnu",

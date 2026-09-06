@@ -51,7 +51,7 @@ impl ValueSerializer {
     }
 
     fn mismatch(&self, expected: &str) -> crate::Error {
-        crate::Error::SignatureMismatch(self.signature.clone(), expected.to_owned())
+        crate::Error::signature_mismatch(&self.signature, expected)
     }
 
     fn expect(&self, signature: Signature) -> crate::Result<()> {
@@ -456,9 +456,9 @@ impl StructSerializer {
                 unreachable!()
             };
             let Some(signature) = fields.get(*inner_idx) else {
-                return Err(crate::Error::SignatureMismatch(
-                    inner_signature.clone(),
-                    "an enum variant with the expected number of fields".to_owned(),
+                return Err(crate::Error::signature_mismatch(
+                    inner_signature,
+                    "an enum variant with the expected number of fields",
                 ));
             };
             *inner_idx += 1;
@@ -471,9 +471,9 @@ impl StructSerializer {
             return Err(crate::Error::Unsupported);
         };
         let Some(signature) = fields.get(self.field_idx) else {
-            return Err(crate::Error::SignatureMismatch(
-                self.expected.clone(),
-                "a struct with the expected number of fields".to_owned(),
+            return Err(crate::Error::signature_mismatch(
+                &self.expected,
+                "a struct with the expected number of fields",
             ));
         };
         self.field_idx += 1;
@@ -488,9 +488,9 @@ impl StructSerializer {
                 unreachable!()
             };
             if inner_idx != fields.len() {
-                return Err(crate::Error::SignatureMismatch(
-                    inner_signature,
-                    "an enum variant with the expected number of fields".to_owned(),
+                return Err(crate::Error::signature_mismatch(
+                    &inner_signature,
+                    "an enum variant with the expected number of fields",
                 ));
             }
             let mut builder = Structure::builder();
@@ -512,9 +512,9 @@ impl StructSerializer {
 
         if let Signature::Structure(fields) = &self.expected {
             if self.fields.len() != fields.len() {
-                return Err(crate::Error::SignatureMismatch(
-                    self.expected,
-                    "a struct with the expected number of fields".to_owned(),
+                return Err(crate::Error::signature_mismatch(
+                    &self.expected,
+                    "a struct with the expected number of fields",
                 ));
             }
         }
@@ -581,9 +581,9 @@ impl VariantSerializer {
             ));
         };
         if value.value_signature() != &signature {
-            return Err(crate::Error::SignatureMismatch(
-                value.value_signature().clone(),
-                format!("`{signature}`"),
+            return Err(crate::Error::signature_mismatch(
+                value.value_signature(),
+                &format!("`{signature}`"),
             ));
         }
         Ok(Value::Value(Box::new(value)))

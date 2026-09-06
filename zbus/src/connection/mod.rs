@@ -4,7 +4,6 @@ use enumflags2::BitFlags;
 use event_listener::{Event, EventListener};
 use std::{
     collections::HashMap,
-    future::Future,
     io,
     sync::{
         Arc, OnceLock, Weak,
@@ -17,7 +16,6 @@ use tracing::{Instrument, info_span, trace, trace_span, warn};
 use tracing::{debug, instrument};
 
 use futures_lite::StreamExt;
-use ordered_stream::OrderedFuture;
 
 #[cfg(feature = "service")]
 use crate::ObjectServer;
@@ -26,7 +24,7 @@ use crate::{
     async_lock::{Mutex, Semaphore, SemaphorePermit},
     fdo::{ConnectionCredentials, ReleaseNameReply, RequestNameFlags, RequestNameReply},
     is_flatpak,
-    message::{Flags, Message, Type},
+    message::{self, Flags, Message, Type},
     names::{BusName, ErrorName, InterfaceName, MemberName, OwnedUniqueName, WellKnownName},
     timeout::timeout,
 };
@@ -41,7 +39,7 @@ mod socket_reader;
 use socket_reader::{SocketReader, SocketStatus};
 
 mod pending_method_calls;
-use pending_method_calls::PendingMethodCalls;
+use pending_method_calls::{PendingMethodCall, PendingMethodCalls};
 
 pub(crate) mod handshake;
 pub use handshake::AuthMechanism;
@@ -321,12 +319,7 @@ impl Connection {
         method_name: M,
         flags: BitFlags<Flags>,
         body: &B,
-    ) -> Result<
-        Option<
-            impl Future<Output = Result<Message>>
-            + OrderedFuture<Output = Result<Message>, Ordering = crate::message::Sequence>,
-        >,
-    >
+    ) -> Result<Option<PendingMethodCall>>
     where
         D: TryInto<BusName<'d>>,
         P: TryInto<ObjectPath<'p>>,
@@ -340,6 +333,35 @@ impl Connection {
     {
         let _permit = acquire_serial_num_semaphore().await;
 
+        let destination = destination
+            .map(TryInto::try_into)
+            .transpose()
+            .map_err(Into::into)?;
+        let path = path.try_into().map_err(Into::into)?;
+        let interface = interface
+            .map(TryInto::try_into)
+            .transpose()
+            .map_err(Into::into)?;
+        let method_name = method_name.try_into().map_err(Into::into)?;
+        let msg = self
+            .method_call_builder(destination, path, interface, method_name, flags)?
+            .build(body)?;
+
+        self.send_method_call(msg, flags).await
+    }
+
+    /// The builder for a method call message from this connection.
+    ///
+    /// The generic entry points convert their arguments and serialize the body; everything else
+    /// about sending a method call lives here and in [`Self::send_method_call`], compiled once.
+    fn method_call_builder<'b>(
+        &'b self,
+        destination: Option<BusName<'b>>,
+        path: ObjectPath<'b>,
+        interface: Option<InterfaceName<'b>>,
+        method_name: MemberName<'b>,
+        flags: BitFlags<Flags>,
+    ) -> Result<message::Builder<'b>> {
         let mut builder = Message::method_call(path, method_name)?;
         if let Some(sender) = self.unique_name() {
             builder = builder.sender(sender)?
@@ -353,8 +375,16 @@ impl Connection {
         for flag in flags {
             builder = builder.with_flags(flag)?;
         }
-        let msg = builder.build(body)?;
 
+        Ok(builder)
+    }
+
+    /// Send a method call message and register for its reply, unless none is expected.
+    async fn send_method_call(
+        &self,
+        msg: Message,
+        flags: BitFlags<Flags>,
+    ) -> Result<Option<PendingMethodCall>> {
         let serial = msg.primary_header().serial_num();
         if flags.contains(Flags::NoReplyExpected) {
             self.send(&msg).await?;
@@ -392,16 +422,39 @@ impl Connection {
     {
         let _permit = acquire_serial_num_semaphore().await;
 
-        let mut b = Message::signal(path, interface, signal_name)?;
-        if let Some(sender) = self.unique_name() {
-            b = b.sender(sender)?;
-        }
-        if let Some(destination) = destination {
-            b = b.destination(destination)?;
-        }
-        let m = b.build(body)?;
+        let destination = destination
+            .map(TryInto::try_into)
+            .transpose()
+            .map_err(Into::into)?;
+        let path = path.try_into().map_err(Into::into)?;
+        let interface = interface.try_into().map_err(Into::into)?;
+        let signal_name = signal_name.try_into().map_err(Into::into)?;
+        let m = self
+            .signal_builder(destination, path, interface, signal_name)?
+            .build(body)?;
 
         self.send(&m).await
+    }
+
+    /// The builder for a signal message from this connection.
+    ///
+    /// Kept non-generic so that it is compiled once; see [`Self::method_call_builder`].
+    fn signal_builder<'b>(
+        &'b self,
+        destination: Option<BusName<'b>>,
+        path: ObjectPath<'b>,
+        interface: InterfaceName<'b>,
+        signal_name: MemberName<'b>,
+    ) -> Result<message::Builder<'b>> {
+        let mut builder = Message::signal(path, interface, signal_name)?;
+        if let Some(sender) = self.unique_name() {
+            builder = builder.sender(sender)?;
+        }
+        if let Some(destination) = destination {
+            builder = builder.destination(destination)?;
+        }
+
+        Ok(builder)
     }
 
     /// Reply to a message.
@@ -414,11 +467,7 @@ impl Connection {
     {
         let _permit = acquire_serial_num_semaphore().await;
 
-        let mut b = Message::method_return(call)?;
-        if let Some(sender) = self.unique_name() {
-            b = b.sender(sender)?;
-        }
-        let m = b.build(body)?;
+        let m = self.reply_message(Message::method_return(call), &mut |b| b.build(body))?;
         self.send(&m).await
     }
 
@@ -439,12 +488,24 @@ impl Connection {
     {
         let _permit = acquire_serial_num_semaphore().await;
 
-        let mut b = Message::error(call, error_name)?;
-        if let Some(sender) = self.unique_name() {
-            b = b.sender(sender)?;
-        }
-        let m = b.build(body)?;
+        let m = self.reply_message(Message::error(call, error_name), &mut |b| b.build(body))?;
         self.send(&m).await
+    }
+
+    /// Build a reply from `builder`, with this connection's unique name as the sender.
+    ///
+    /// The body is written through a trait object so that this is compiled once rather than once
+    /// per body type.
+    fn reply_message(
+        &self,
+        builder: Result<message::Builder<'_>>,
+        build: &mut dyn FnMut(message::Builder<'_>) -> Result<Message>,
+    ) -> Result<Message> {
+        let mut builder = builder?;
+        if let Some(sender) = self.unique_name() {
+            builder = builder.sender(sender)?;
+        }
+        build(builder)
     }
 
     /// Reply an error to a message.

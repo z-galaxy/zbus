@@ -226,7 +226,7 @@ impl<'de, #[cfg(unix)] F: AsFd, #[cfg(not(unix))] F> de::Deserializer<'de>
                     ObjectPath::SIGNATURE_STR,
                     VARIANT_SIGNATURE_CHAR,
                 );
-                return Err(Error::SignatureMismatch(self.0.signature.clone(), expected));
+                return Err(Error::signature_mismatch(self.0.signature, &expected));
             }
         };
         let slice = self.0.next_slice(len)?;
@@ -325,9 +325,9 @@ impl<'de, #[cfg(unix)] F: AsFd, #[cfg(not(unix))] F> de::Deserializer<'de>
                     num_fields: 0,
                 })
             }
-            _ => Err(Error::SignatureMismatch(
-                self.0.signature.clone(),
-                "a variant, array, dict, structure or u8".to_string(),
+            _ => Err(Error::signature_mismatch(
+                self.0.signature,
+                "a variant, array, dict, structure or u8",
             )),
         }
     }
@@ -363,26 +363,26 @@ impl<'de, #[cfg(unix)] F: AsFd, #[cfg(not(unix))] F> de::Deserializer<'de>
             Signature::Structure(fields) => {
                 let mut fields = fields.iter();
                 let index_signature = fields.next().ok_or_else(|| {
-                    Error::SignatureMismatch(
-                        self.0.signature.clone(),
-                        "a structure with 2 fields and u32 as its first field".to_string(),
+                    Error::signature_mismatch(
+                        self.0.signature,
+                        "a structure with 2 fields and u32 as its first field",
                     )
                 })?;
                 self.0.signature = index_signature;
                 let v = self.deserialize_u32(visitor);
 
                 self.0.signature = fields.next().ok_or_else(|| {
-                    Error::SignatureMismatch(
-                        self.0.signature.clone(),
-                        "a structure with 2 fields and u32 as its first field".to_string(),
+                    Error::signature_mismatch(
+                        self.0.signature,
+                        "a structure with 2 fields and u32 as its first field",
                     )
                 })?;
 
                 v
             }
-            _ => Err(Error::SignatureMismatch(
-                self.0.signature.clone(),
-                "a string, object path or signature".to_string(),
+            _ => Err(Error::signature_mismatch(
+                self.0.signature,
+                "a string, object path or signature",
             )),
         }
     }
@@ -416,9 +416,9 @@ impl<'d, 'de, 'sig, 'f, #[cfg(unix)] F: AsFd, #[cfg(not(unix))] F>
             Signature::Array(child) => (child.alignment_dbus(), child.signature()),
             Signature::Dict { key, .. } => (DICT_ENTRY_ALIGNMENT_DBUS, key.signature()),
             _ => {
-                return Err(Error::SignatureMismatch(
-                    de.0.signature.clone(),
-                    "an array or dict".to_string(),
+                return Err(Error::signature_mismatch(
+                    de.0.signature,
+                    "an array or dict",
                 ));
             }
         };
@@ -523,10 +523,7 @@ impl<'d, 'de, 'sig, 'f, #[cfg(unix)] F: AsFd, #[cfg(not(unix))] F>
         let (key_signature, value_signature) = match de.0.signature {
             Signature::Dict { key, value } => (key.signature(), value.signature()),
             _ => {
-                return Err(Error::SignatureMismatch(
-                    de.0.signature.clone(),
-                    "a dict".to_string(),
-                ));
+                return Err(Error::signature_mismatch(de.0.signature, "a dict"));
             }
         };
         let ad = ArrayDeserializer::new(de)?;
@@ -607,9 +604,9 @@ impl<'de, #[cfg(unix)] F: AsFd, #[cfg(not(unix))] F> SeqAccess<'de>
         let signature = self.de.0.signature;
         let field_signature = match signature {
             Signature::Structure(fields) => {
-                let signature = fields.get(self.field_idx).ok_or_else(|| {
-                    Error::SignatureMismatch(signature.clone(), "a struct".to_string())
-                })?;
+                let signature = fields
+                    .get(self.field_idx)
+                    .ok_or_else(|| Error::signature_mismatch(signature, "a struct"))?;
                 self.field_idx += 1;
 
                 signature

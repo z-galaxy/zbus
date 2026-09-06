@@ -59,7 +59,7 @@ impl<'a> Builder<'a> {
     /// // Use the connection to interact with IBus services.
     /// # Ok::<_, Box<dyn Error + Send + Sync>>(())
     /// ```
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "ibus"))]
     pub fn ibus() -> Result<Self> {
         crate::connection::Builder::ibus().map(Self)
     }

@@ -20,11 +20,7 @@ pub struct PendingMethodCalls {
 }
 
 impl PendingMethodCalls {
-    pub fn register_call(
-        &self,
-        serial: NonZeroU32,
-    ) -> impl Future<Output = Result<Message>>
-    + OrderedFuture<Output = Result<Message>, Ordering = Sequence> {
+    pub fn register_call(&self, serial: NonZeroU32) -> PendingMethodCall {
         use std::collections::hash_map::Entry;
 
         let (reply_sender, reply_receiver) = broadcast(1);
@@ -103,7 +99,7 @@ impl Default for PendingMethodCalls {
 /// stream can be used to ensure that cache updates are not overwritten by a cache population whose
 /// task is scheduled later.
 #[derive(Debug)]
-struct PendingMethodCall {
+pub struct PendingMethodCall {
     serial: NonZeroU32,
     reply_receiver: Receiver<PendingMethodReply>,
     pending_method_calls: PendingMethodCalls,

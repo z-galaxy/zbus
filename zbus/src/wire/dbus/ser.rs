@@ -153,7 +153,7 @@ where
                     ObjectPath::SIGNATURE_STR,
                     VARIANT_SIGNATURE_CHAR,
                 );
-                return Err(Error::SignatureMismatch(signature.clone(), expected));
+                return Err(Error::signature_mismatch(signature, &expected));
             }
         }
 
@@ -266,9 +266,9 @@ where
             Signature::Array(child) => (child.alignment_dbus(), child.signature()),
             Signature::Dict { key, .. } => (DICT_ENTRY_ALIGNMENT_DBUS, key.signature()),
             _ => {
-                return Err(Error::SignatureMismatch(
-                    self.0.signature.clone(),
-                    "an array or dict".to_string(),
+                return Err(Error::signature_mismatch(
+                    self.0.signature,
+                    "an array or dict",
                 ));
             }
         };
@@ -317,10 +317,7 @@ where
         let (key_signature, value_signature) = match self.0.signature {
             Signature::Dict { key, value } => (key.signature(), value.signature()),
             _ => {
-                return Err(Error::SignatureMismatch(
-                    self.0.signature.clone(),
-                    "a dict".to_string(),
-                ));
+                return Err(Error::signature_mismatch(self.0.signature, "a dict"));
             }
         };
 
@@ -343,9 +340,9 @@ where
                 StructSerializer::structure(self).map(StructSeqSerializer::Struct)
             }
             Signature::Dict { .. } => self.serialize_map(Some(len)).map(StructSeqSerializer::Map),
-            _ => Err(Error::SignatureMismatch(
-                self.0.signature.clone(),
-                "a struct, array, u8 or variant".to_string(),
+            _ => Err(Error::signature_mismatch(
+                self.0.signature,
+                "a struct, array, u8 or variant",
             )),
         }
     }
@@ -475,10 +472,7 @@ where
     fn enum_variant(ser: &'b mut Serializer<'ser, W>, variant_index: u32) -> Result<Self> {
         // Encode enum variants as a struct with first field as variant index
         let Signature::Structure(fields) = ser.0.signature else {
-            return Err(Error::SignatureMismatch(
-                ser.0.signature.clone(),
-                "a struct".to_string(),
-            ));
+            return Err(Error::signature_mismatch(ser.0.signature, "a struct"));
         };
         let struct_field = fields
             .get(1)
@@ -514,9 +508,9 @@ where
                 }
             }
             Signature::Structure(fields) => {
-                let signature = fields.get(self.field_idx).ok_or_else(|| {
-                    Error::SignatureMismatch(signature.clone(), "a struct".to_string())
-                })?;
+                let signature = fields
+                    .get(self.field_idx)
+                    .ok_or_else(|| Error::signature_mismatch(signature, "a struct"))?;
                 self.field_idx += 1;
 
                 signature

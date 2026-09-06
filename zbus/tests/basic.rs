@@ -365,7 +365,7 @@ async fn test_freedesktop_credentials() -> Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "ibus"))]
 #[tokio::test]
 #[timeout(15000)]
 async fn ibus_connection() {
@@ -425,7 +425,7 @@ async fn ibus_connection() {
     result.unwrap();
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "ibus"))]
 async fn test_ibus_connection() -> Result<()> {
     let connection = zbus::connection::Builder::ibus()?.build().await?;
 

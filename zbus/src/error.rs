@@ -244,6 +244,16 @@ impl fmt::Display for Error {
 }
 
 impl Error {
+    /// A [`SignatureMismatch`](Error::SignatureMismatch) for `signature` where `expected` was
+    /// needed.
+    ///
+    /// The (de)serializers hit this from generic code. Building the error here keeps that error
+    /// path out of every instantiation.
+    #[cold]
+    pub(crate) fn signature_mismatch(signature: &Signature, expected: &str) -> Self {
+        Self::SignatureMismatch(signature.clone(), expected.to_string())
+    }
+
     /// A description of the error.
     ///
     /// This is a generic description of the error (if any). For a more detailed description

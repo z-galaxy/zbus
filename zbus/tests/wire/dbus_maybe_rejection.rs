@@ -85,6 +85,27 @@ fn dbus_deserialize_rejects_variant_carrying_maybe() {
     assert_maybe_rejected(res, "deserialize variant carrying maybe");
 }
 
+// The body signature in a message header is a `g` value in the header's fields array, so the
+// check must hold when a whole message is read. The message is a little-endian header with
+// nothing but a `mi` signature field and an empty body.
+#[cfg(feature = "comms")]
+#[test]
+fn dbus_message_rejects_header_signature_carrying_maybe() {
+    use zbus::message::Message;
+
+    if !maybe_supported() {
+        return;
+    }
+    let mut bytes = vec![b'l', 4, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0];
+    bytes.extend_from_slice(&[8, 0, 0, 0, 8, 1, b'g', 0, 2, b'm', b'i', 0]);
+    let data = Data::new(bytes, Context::new(LE, 0));
+
+    // SAFETY: the bytes are a well-formed header with no body; the point is that the reader
+    // rejects the signature rather than accepting it.
+    let res = unsafe { Message::from_bytes(data) };
+    assert_maybe_rejected(res, "read header carrying maybe body signature");
+}
+
 // The maybe type is unavailable when `zbus_utils/gvariant` is not in the graph: `m` does
 // not parse, so the hazard cannot arise and there is nothing to assert.
 fn maybe_supported() -> bool {

@@ -123,6 +123,10 @@ fn test_derive_error() {
         LetItBe {
             desc: String,
         },
+        // A named field must not clash with the locals the generated `create_reply` binds.
+        Shadowing {
+            builder: String,
+        },
     }
 }
 

@@ -59,7 +59,7 @@ impl<'a, T> Builder<'a, T> {
     /// Panics if the builder is lacking the necessary details to build a proxy.
     pub fn build(self) -> Result<T>
     where
-        T: From<crate::Proxy<'a>>,
+        T: From<crate::Proxy<'a>> + crate::proxy::Defaults,
     {
         block_on(self.0.build())
     }
