@@ -146,23 +146,18 @@ pub fn expand_derive(input: DeriveInput) -> Result<TokenStream, Error> {
             quote! {
                 impl ::std::convert::From<#zbus::Error> for #name {
                     fn from(value: #zbus::Error) -> #name {
-                        match &value {
+                        let (name, desc) = match &value {
                             #zbus::Error::MethodError(name, desc, _) => {
-                                let desc = desc.as_deref();
-                                match name.as_str() {
-                                    #error_converts
-                                    _ => Self::#ident(value),
-                                }
+                                (name.as_ref(), desc.as_deref())
                             }
                             #zbus::Error::FDO(e) => {
                                 let e = ::std::convert::AsRef::as_ref(e);
-                                let name = #zbus::DBusError::name(e);
-                                let desc = #zbus::DBusError::description(e);
-                                match name.as_str() {
-                                    #error_converts
-                                    _ => Self::#ident(value),
-                                }
+                                (#zbus::DBusError::name(e), #zbus::DBusError::description(e))
                             }
+                            _ => return Self::#ident(value),
+                        };
+                        match name.as_str() {
+                            #error_converts
                             _ => Self::#ident(value),
                         }
                     }
