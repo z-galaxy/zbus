@@ -1,11 +1,6 @@
 #[cfg(unix)]
 use crate::OwnedFd;
-use std::{
-    borrow::Cow,
-    io::{Cursor, Write},
-    num::NonZeroU32,
-    sync::Arc,
-};
+use std::{borrow::Cow, io::Cursor, num::NonZeroU32, sync::Arc};
 
 use enumflags2::BitFlags;
 
@@ -238,21 +233,20 @@ impl<'a> Builder<'a> {
             }
         }
 
-        let hdr_len = *crate::wire::serialized_size(ctxt, &header)?;
+        let mut bytes = Vec::new();
+        let mut cursor = Cursor::new(&mut bytes);
+        // SAFETY: There are no FDs involved.
+        unsafe { crate::wire::to_writer(&mut cursor, ctxt, &header) }?;
+        let hdr_len = bytes.len();
         // We need to align the body to 8-byte boundary.
-        let body_padding = padding_for_8_bytes(hdr_len);
-        let body_offset = hdr_len + body_padding;
+        let body_offset = hdr_len + padding_for_8_bytes(hdr_len);
         let total_len = body_offset + body.len();
         if total_len > MAX_MESSAGE_SIZE {
             return Err(Error::ExcessData);
         }
-        let mut bytes: Vec<u8> = Vec::with_capacity(total_len);
-        let mut cursor = Cursor::new(&mut bytes);
-
-        // SAFETY: There are no FDs involved.
-        unsafe { crate::wire::to_writer(&mut cursor, ctxt, &header) }?;
-        cursor.write_all(&[0u8; 8][..body_padding])?;
-        cursor.write_all(body)?;
+        bytes.reserve_exact(total_len - hdr_len);
+        bytes.resize(body_offset, 0);
+        bytes.extend_from_slice(body);
 
         let primary_header = header.into_primary();
         #[cfg(unix)]
