@@ -34,9 +34,9 @@ pub use autolaunch::{Autolaunch, AutolaunchScope};
 mod launchd;
 #[cfg(target_os = "macos")]
 pub use launchd::Launchd;
-#[cfg(unix)]
+#[cfg(all(unix, feature = "ibus"))]
 mod ibus;
-#[cfg(unix)]
+#[cfg(all(unix, feature = "ibus"))]
 pub use ibus::Ibus;
 #[cfg(any(feature = "vsock", feature = "tokio-vsock"))]
 #[path = "vsock.rs"]
@@ -65,7 +65,7 @@ pub enum Transport {
     ///
     /// IBus (Intelligent Input Bus) is an input method framework. This transport queries the
     /// IBus daemon for its D-Bus address using the `ibus address` command.
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "ibus"))]
     Ibus(Ibus),
     #[cfg(any(feature = "vsock", feature = "tokio-vsock"))]
     /// A VSOCK address.
@@ -222,7 +222,7 @@ impl Transport {
                 transport.connect(address).await
             }
 
-            #[cfg(unix)]
+            #[cfg(all(unix, feature = "ibus"))]
             Transport::Ibus(ibus) => {
                 let addr = ibus.bus_address().await?;
                 addr.connect().await
@@ -244,7 +244,7 @@ impl Transport {
             "autolaunch" => Autolaunch::from_options(options).map(Self::Autolaunch),
             #[cfg(target_os = "macos")]
             "launchd" => Launchd::from_options(options).map(Self::Launchd),
-            #[cfg(unix)]
+            #[cfg(all(unix, feature = "ibus"))]
             "ibus" => Ibus::from_options(options).map(Self::Ibus),
 
             _ => Err(Error::Address(format!(
@@ -400,7 +400,7 @@ impl Display for Transport {
             Self::Autolaunch(autolaunch) => write!(f, "{autolaunch}")?,
             #[cfg(target_os = "macos")]
             Self::Launchd(launchd) => write!(f, "{launchd}")?,
-            #[cfg(unix)]
+            #[cfg(all(unix, feature = "ibus"))]
             Self::Ibus(ibus) => write!(f, "{ibus}")?,
         }
 

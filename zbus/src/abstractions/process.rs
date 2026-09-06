@@ -2,7 +2,7 @@
 use crate::address::transport::Unixexec;
 #[cfg(all(feature = "async-io", feature = "unixexec"))]
 use async_process::{Child, unix::CommandExt};
-#[cfg(unix)]
+#[cfg(any(feature = "ibus", target_os = "macos"))]
 use std::process::Output;
 #[cfg(feature = "unixexec")]
 use std::process::Stdio;
@@ -71,7 +71,7 @@ impl Command {
 
     /// Executes the command as a child process, waiting for it to finish and
     /// collecting all of its output.
-    #[cfg(unix)]
+    #[cfg(any(feature = "ibus", target_os = "macos"))]
     pub async fn output(&mut self) -> Result<Output, Error> {
         self.0.output().await
     }
@@ -105,7 +105,7 @@ impl Command {
 }
 
 /// An asynchronous wrapper around running and getting command output
-#[cfg(unix)]
+#[cfg(any(feature = "ibus", target_os = "macos"))]
 pub async fn run<I, S>(program: S, args: I) -> Result<Output, Error>
 where
     I: IntoIterator<Item = S>,

@@ -61,8 +61,8 @@ pub(crate) mod async_lock;
 pub use async_drop::*;
 pub(crate) mod timeout;
 
-// Not unix-specific itself but only used on unix.
-#[cfg(target_family = "unix")]
+// Only the `unixexec` and `ibus` transports and, on macOS, the `launchd` one run commands.
+#[cfg(all(unix, any(feature = "unixexec", feature = "ibus", target_os = "macos")))]
 pub(crate) mod process;
 
 #[cfg(all(test, feature = "tokio", feature = "async-io"))]

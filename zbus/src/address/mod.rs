@@ -299,7 +299,7 @@ mod tests {
             Address::from_str("launchd:env=my_cool_env_key").unwrap(),
             Transport::Launchd(Launchd::new("my_cool_env_key")).into(),
         );
-        #[cfg(unix)]
+        #[cfg(all(unix, feature = "ibus"))]
         assert_eq!(
             Address::from_str("ibus:").unwrap(),
             Transport::Ibus(crate::address::transport::Ibus::new()).into(),
@@ -402,7 +402,7 @@ mod tests {
             Address::from(Transport::Launchd(Launchd::new("my_cool_key"))).to_string(),
             "launchd:env=my_cool_key"
         );
-        #[cfg(unix)]
+        #[cfg(all(unix, feature = "ibus"))]
         assert_eq!(
             Address::from(Transport::Ibus(crate::address::transport::Ibus::new())).to_string(),
             "ibus:"

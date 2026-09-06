@@ -28,8 +28,8 @@ That build compiles `zbus::wire` and `zbus::names` and nothing else — no conne
 object server. The optional wire-format features keep zvariant's names (`arrayvec`, `camino`,
 `chrono`, `enumflags2`, `heapless`, `option-as-array`, `serde_bytes`, `time`, `url`, `uuid`),
 and enabling any D-Bus feature (`comms`, `async-io`, `tokio`, `blocking-api`, `p2p`,
-`bus-impl`, `vsock`, `tokio-vsock`, `proxy`, `service`, `unixexec`) brings the D-Bus API
-back.
+`bus-impl`, `vsock`, `tokio-vsock`, `proxy`, `service`, `unixexec`, `ibus`) brings the D-Bus
+API back.
 
 ## Example code
 
