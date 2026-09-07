@@ -146,8 +146,10 @@ impl ObjectServer {
     /// situations where you'd need to register interfaces dynamically and that's where this
     /// method becomes useful.
     ///
-    /// If the interface already exists at this path, returns false.
-    pub fn at<'p, P, I>(&self, path: P, iface: I) -> Result<bool>
+    /// Returns `None` on success. If an interface of the same name already exists at this path,
+    /// the object server is left untouched and the passed `iface` is handed back as `Some`, so
+    /// the caller can retry (e.g. at a different path) without having to reconstruct it.
+    pub fn at<'p, P, I>(&self, path: P, iface: I) -> Result<Option<I>>
     where
         I: Interface,
         P: TryInto<ObjectPath<'p>>,

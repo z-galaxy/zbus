@@ -161,6 +161,11 @@ impl Node {
         self.interfaces.keys().all(is_default_interface)
     }
 
+    /// Whether an interface with the given name is registered at this node.
+    pub(super) fn has_interface(&self, name: &InterfaceName<'_>) -> bool {
+        self.interfaces.contains_key(name)
+    }
+
     pub(super) fn add_arc_interface(
         &mut self,
         name: InterfaceName<'static>,
