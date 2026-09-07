@@ -375,8 +375,8 @@ fn get_unix_peer_creds_blocking(fd: RawFd) -> std::io::Result<crate::fdo::Connec
 
     #[cfg(any(target_os = "android", target_os = "linux"))]
     {
+        use crate::log::debug;
         use rustix::net::sockopt::socket_peercred;
-        use tracing::debug;
 
         let ucred = socket_peercred(fd)?;
         let uid = ucred.uid.as_raw();

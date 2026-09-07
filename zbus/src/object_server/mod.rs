@@ -3,13 +3,13 @@
 #[cfg(feature = "object-manager")]
 use std::collections::HashMap;
 use std::{marker::PhantomData, sync::Arc};
-use tracing::{Instrument, debug, instrument, trace, trace_span};
 
 use crate::{
     Connection, Error, ObjectPath, Result,
     async_lock::RwLock,
     connection::WeakConnection,
     fdo,
+    log::{Instrument, debug, trace, trace_span},
     message::{Header, Message},
     names::InterfaceName,
 };
@@ -515,7 +515,7 @@ impl ObjectServer {
     ///   the caller through the associated server connection.
     ///
     /// Returns an error if the message is malformed.
-    #[instrument(skip(self))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self)))]
     pub(crate) async fn dispatch_call(&self, msg: &Message, hdr: &Header<'_>) -> Result<()> {
         let conn = self.connection();
 

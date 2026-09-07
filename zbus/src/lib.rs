@@ -150,6 +150,8 @@ pub mod object_server;
 pub use object_server::ObjectServer;
 
 #[cfg(feature = "comms")]
+mod log;
+#[cfg(feature = "comms")]
 mod utils;
 #[cfg(feature = "comms")]
 pub use utils::*;

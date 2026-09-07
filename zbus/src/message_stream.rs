@@ -7,11 +7,11 @@ use std::{
 use async_broadcast::Receiver as ActiveReceiver;
 use futures_core::stream::{self, FusedStream};
 use ordered_stream::{OrderedStream, PollResult};
-use tracing::warn;
 
 use crate::{
     AsyncDrop, Connection, MatchRule, OwnedMatchRule, Result,
     connection::ConnectionInner,
+    log::warn,
     message::{Message, Sequence},
 };
 
