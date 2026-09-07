@@ -19,12 +19,12 @@ use async_io::Async;
 #[cfg(feature = "async-io")]
 use std::sync::Arc;
 use std::{io, mem};
-use tracing::trace;
 
 use crate::{
     Message,
     conn::AuthMechanism,
     fdo::ConnectionCredentials,
+    log::trace,
     message::{
         PrimaryHeader,
         header::{MAX_MESSAGE_SIZE, MIN_MESSAGE_SIZE},

@@ -31,6 +31,9 @@ and enabling any D-Bus feature (`comms`, `async-io`, `tokio`, `blocking-api`, `p
 `bus-impl`, `vsock`, `tokio-vsock`, `proxy`, `service`, `unixexec`, `ibus`) brings the D-Bus
 API back.
 
+zbus logs through [`tracing`], behind the default `tracing` feature; a `default-features =
+false` build that wants zbus's logs must re-enable it explicitly.
+
 ## Example code
 
 We'll create a simple D-Bus service and client to demonstrate the usage of zbus. Note that these
@@ -174,3 +177,4 @@ see [the corresponding tokio issue on GitHub][tctiog].
 [`tokio`]: https://crates.io/crates/tokio
 [`async-io`]: https://crates.io/crates/async-io
 [serde]: https://crates.io/crates/serde
+[`tracing`]: https://crates.io/crates/tracing

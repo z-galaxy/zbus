@@ -1,5 +1,13 @@
 //! The client-side proxy API.
 
+use crate::{
+    AsyncDrop, Connection, Error, Executor, MatchRule, MessageStream, ObjectPath, OwnedMatchRule,
+    OwnedValue, Result, Str, Task, Value, as_value,
+    fdo::{self, IntrospectableProxy, NameOwnerChanged, PropertiesChangedStream, PropertiesProxy},
+    log::{Instrument, debug, info_span, trace, warn},
+    message::{Flags, Message, Sequence, Type},
+    names::{BusName, InterfaceName, MemberName, UniqueName},
+};
 use enumflags2::{BitFlags, bitflags};
 use event_listener::{Event, EventListener};
 use futures_core::{ready, stream};
@@ -12,15 +20,6 @@ use std::{
     pin::Pin,
     sync::{Arc, OnceLock, RwLock, RwLockReadGuard},
     task::{Context, Poll},
-};
-use tracing::{Instrument, debug, info_span, instrument, trace, warn};
-
-use crate::{
-    AsyncDrop, Connection, Error, Executor, MatchRule, MessageStream, ObjectPath, OwnedMatchRule,
-    OwnedValue, Result, Str, Task, Value, as_value,
-    fdo::{self, IntrospectableProxy, NameOwnerChanged, PropertiesChangedStream, PropertiesProxy},
-    message::{Flags, Message, Sequence, Type},
-    names::{BusName, InterfaceName, MemberName, UniqueName},
 };
 
 mod builder;
@@ -260,7 +259,7 @@ enum CachingResult {
 }
 
 impl PropertiesCache {
-    #[instrument(skip_all, level = "trace")]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, level = "trace"))]
     fn new(
         proxy: PropertiesProxy<'static>,
         interface: InterfaceName<'static>,
@@ -389,7 +388,7 @@ impl PropertiesCache {
     }
 
     /// new() runs this in a task it spawns for keeping the cache in sync.
-    #[instrument(skip_all, level = "trace")]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, level = "trace"))]
     async fn keep_updated(
         &self,
         mut prop_changes: PropertiesChangedStream,

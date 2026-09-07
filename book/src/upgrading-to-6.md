@@ -506,6 +506,22 @@ streams only need `proxy`, as before.
 
 [`fdo::ObjectManager`]: https://docs.rs/zbus/6/zbus/fdo/struct.ObjectManager.html
 
+### Logging through `tracing` is a feature
+
+zbus's log events and spans go through [`tracing`], which is now behind the `tracing`
+feature. It is a default feature, so a plain `zbus = "6"` dependency is unaffected. A
+`default-features = false` build that wants zbus's logs has to name it:
+
+```toml
+[dependencies]
+zbus = { version = "6", default-features = false, features = ["tokio", "proxy", "tracing"] }
+```
+
+With the feature off, zbus emits no log events or spans at all, and it no longer enables
+`tokio`'s own `tracing` feature either.
+
+[`tracing`]: https://docs.rs/tracing
+
 ### A proxy without properties has no properties cache
 
 `proxy::Defaults` has a new constant, `HAS_PROPERTIES`, which `#[proxy]` sets from the trait,

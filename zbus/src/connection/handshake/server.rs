@@ -1,7 +1,6 @@
 use async_trait::async_trait;
-use tracing::{instrument, trace};
 
-use crate::names::OwnedUniqueName;
+use crate::{log::trace, names::OwnedUniqueName};
 
 use super::{
     AuthMechanism, Authenticated, BoxedSplit, Command, Common, Error, Handshake, OwnedGuid, Result,
@@ -57,7 +56,7 @@ impl Server {
         })
     }
 
-    #[instrument(skip(self))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self)))]
     async fn auth_ok(&mut self) -> Result<()> {
         let guid = self.guid.clone();
         let cmd = Command::Ok(guid);
@@ -92,7 +91,7 @@ impl Server {
         }
     }
 
-    #[instrument(skip(self))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self)))]
     async fn unsupported_command_error(&mut self) -> Result<()> {
         let cmd = Command::Error("Unsupported or misplaced command".to_string());
         self.common.write_command(cmd).await?;
@@ -100,7 +99,7 @@ impl Server {
         Ok(())
     }
 
-    #[instrument(skip(self))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self)))]
     async fn rejected_error(&mut self) -> Result<()> {
         let cmd = Command::Rejected(self.common.mechanism().as_str().into());
         trace!("Sending authentication error");
@@ -111,7 +110,7 @@ impl Server {
     }
 
     /// Perform the next step in the handshake.
-    #[instrument(skip(self))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self)))]
     async fn next_step(&mut self) -> Result<bool> {
         match self.step {
             ServerHandshakeStep::WaitingForAuth => self.handle_auth().await?,
@@ -124,7 +123,7 @@ impl Server {
     }
 
     /// Handle the authentication step of the handshake.
-    #[instrument(skip(self))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self)))]
     async fn handle_auth(&mut self) -> Result<()> {
         assert_eq!(self.step, ServerHandshakeStep::WaitingForAuth);
 
@@ -162,7 +161,7 @@ impl Server {
     }
 
     /// Handle the authentication data receiving step of the handshake.
-    #[instrument(skip(self))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self)))]
     async fn handle_auth_data(&mut self, mech: AuthMechanism) -> Result<()> {
         assert!(matches!(self.step, ServerHandshakeStep::WaitingForData(_)));
 
@@ -180,7 +179,7 @@ impl Server {
     }
 
     /// Finalize the handshake.
-    #[instrument(skip(self))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self)))]
     async fn finalize(&mut self) -> Result<()> {
         assert_eq!(self.step, ServerHandshakeStep::WaitingForBegin);
 
@@ -218,7 +217,7 @@ impl Server {
 
 #[async_trait]
 impl Handshake for Server {
-    #[instrument(skip(self))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self)))]
     async fn perform(mut self) -> Result<Authenticated> {
         while !self.next_step().await? {}
 

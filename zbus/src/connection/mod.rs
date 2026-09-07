@@ -2,6 +2,7 @@
 use async_broadcast::{InactiveReceiver, Receiver, Sender as Broadcaster, broadcast};
 use enumflags2::BitFlags;
 use event_listener::{Event, EventListener};
+use futures_lite::StreamExt;
 use std::{
     collections::HashMap,
     io,
@@ -11,19 +12,17 @@ use std::{
     },
     time::Duration,
 };
-use tracing::{Instrument, info_span, trace, trace_span, warn};
-#[cfg(feature = "service")]
-use tracing::{debug, instrument};
-
-use futures_lite::StreamExt;
 
 #[cfg(feature = "service")]
 use crate::ObjectServer;
+#[cfg(feature = "service")]
+use crate::log::debug;
 use crate::{
     DBusError, Error, Executor, MatchRule, ObjectPath, OwnedGuid, OwnedMatchRule, Result, Task,
     async_lock::{Mutex, Semaphore, SemaphorePermit},
     fdo::{ConnectionCredentials, ReleaseNameReply, RequestNameFlags, RequestNameReply},
     is_flatpak,
+    log::{Instrument, info, info_span, trace, trace_span, warn},
     message::{self, Flags, Message, Type},
     names::{BusName, ErrorName, InterfaceName, MemberName, OwnedUniqueName, WellKnownName},
     timeout::timeout,
@@ -738,7 +737,7 @@ impl Connection {
                         match signal {
                             Some(signal) => match signal {
                                 Ok(_) => {
-                                    tracing::info!(
+                                    info!(
                                         "Connection `{}` lost name `{}`",
                                         // SAFETY: This is bus connection so unique name can't be
                                         // None.
@@ -1011,7 +1010,7 @@ impl Connection {
     }
 
     #[cfg(feature = "service")]
-    #[instrument(skip(self))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self)))]
     pub(crate) fn start_object_server(&self, started_event: Option<Event>) {
         self.inner.object_server_dispatch_task.get_or_init(|| {
             trace!("starting ObjectServer task");

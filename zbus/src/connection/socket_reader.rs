@@ -7,12 +7,12 @@ use std::{
 };
 
 use event_listener::Event;
-use tracing::{debug, instrument, trace};
 
 use crate::{
     Executor, Message, OwnedMatchRule, Task,
     async_lock::Mutex,
     connection::{MsgBroadcaster, PendingMethodCalls},
+    log::{debug, trace},
     message::Type,
 };
 
@@ -56,7 +56,10 @@ impl SocketReader {
     }
 
     // Keep receiving messages and put them on the queue.
-    #[instrument(name = "socket reader", skip(self), level = "trace")]
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(name = "socket reader", skip(self), level = "trace")
+    )]
     async fn receive_msg(mut self) {
         loop {
             trace!("Waiting for message on the socket..");
@@ -143,7 +146,7 @@ impl SocketReader {
         self.pending_method_calls.fail_all(error);
     }
 
-    #[instrument(skip(self), level = "trace")]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), level = "trace"))]
     async fn read_socket(&mut self) -> crate::Result<Message> {
         self.socket_status.activity_event.notify(usize::MAX);
         let seq = self.prev_seq + 1;
