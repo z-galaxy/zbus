@@ -1,5 +1,24 @@
 #[proxy(interface = "com.example.SampleInterface0", assume_defaults = true)]
 pub trait SampleInterface0 {
+    /// Frobate method
+    fn frobate(
+        &self,
+        foz: i32,
+        foo: i32,
+    ) -> zbus::Result<(String, std::collections::HashMap<u32, String>)>;
+
+    /// Bazic method
+    fn bazic(&self, bar: &(i32, i32), foo: &(i32,)) -> zbus::Result<((i32, i32), Vec<(i32,)>)>;
+
+    /// Bazify method
+    fn bazify(&self, bar: &(i32, i32, u32)) -> zbus::Result<zbus::OwnedValue>;
+
+    /// MogrifyMe method
+    fn mogrify_me(&self, bar: &(i32, i32, &[&zbus::Value<'_>])) -> zbus::Result<()>;
+
+    /// GetSignature method
+    fn get_signature(&self, challenge: &zbus::Signature) -> zbus::Result<zbus::Signature>;
+
     /// BarplexSig method
     fn barplex_sig(
         &self,
@@ -15,25 +34,6 @@ pub trait SampleInterface0 {
             bool,
         ),
     ) -> zbus::Result<Vec<(String, zbus::OwnedObjectPath)>>;
-
-    /// Bazic method
-    fn bazic(&self, bar: &(i32, i32), foo: &(i32,)) -> zbus::Result<((i32, i32), Vec<(i32,)>)>;
-
-    /// Bazify method
-    fn bazify(&self, bar: &(i32, i32, u32)) -> zbus::Result<zbus::OwnedValue>;
-
-    /// Frobate method
-    fn frobate(
-        &self,
-        foz: i32,
-        foo: i32,
-    ) -> zbus::Result<(String, std::collections::HashMap<u32, String>)>;
-
-    /// GetSignature method
-    fn get_signature(&self, challenge: &zbus::Signature) -> zbus::Result<zbus::Signature>;
-
-    /// MogrifyMe method
-    fn mogrify_me(&self, bar: &(i32, i32, &[&zbus::Value<'_>])) -> zbus::Result<()>;
 
     /// Odyssey method
     #[allow(clippy::too_many_arguments)]
@@ -60,16 +60,16 @@ pub trait SampleInterface0 {
     #[zbus(signal)]
     fn signal_array_of_strings(&self, array: Vec<&str>) -> zbus::Result<()>;
 
+    /// SignalValue signal
+    #[zbus(signal)]
+    fn signal_value(&self, value: zbus::Value<'_>) -> zbus::Result<()>;
+
     /// SignalDictStringToValue signal
     #[zbus(signal)]
     fn signal_dict_string_to_value(
         &self,
         dict: std::collections::HashMap<&str, zbus::Value<'_>>,
     ) -> zbus::Result<()>;
-
-    /// SignalValue signal
-    #[zbus(signal)]
-    fn signal_value(&self, value: zbus::Value<'_>) -> zbus::Result<()>;
 
     /// Bar property
     #[zbus(property)]

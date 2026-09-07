@@ -70,13 +70,12 @@ pub async fn my_iface_test(conn: Connection, event: Event) -> zbus::Result<u32> 
         .find(|i| i.name() == "org.freedesktop.MyIface")
         .unwrap();
     // Test if the r# prefix for the keyword was removed
-    assert!(my_iface.methods().iter().any(|m| m.name() == "Type"));
-    assert!(my_iface.properties().iter().any(|p| p.name() == "Let"));
-    assert!(my_iface.signals().iter().any(|s| s.name() == "Match"));
+    assert!(my_iface.methods().any(|m| m.name() == "Type"));
+    assert!(my_iface.properties().any(|p| p.name() == "Let"));
+    assert!(my_iface.signals().any(|s| s.name() == "Match"));
     assert_eq!(
         my_iface
             .methods()
-            .iter()
             .find(|m| m.name() == "RawIdentifierParameter")
             .unwrap()
             .args()
