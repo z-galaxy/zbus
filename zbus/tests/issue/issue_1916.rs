@@ -164,17 +164,24 @@ async fn issue_1916_async() {
     // A failed registration (here due to the name colliding with a default interface) must not
     // leave freshly auto-created nodes behind...
     assert!(
-        !object_server
+        object_server
             .at("/org/zbus/ghost", StandardNamed)
             .await
             .unwrap()
+            .is_some()
     );
     let xml = introspect("/").await.unwrap();
     assert!(!xml.contains("<node name="), "leftover nodes: {xml}");
 
     // ... while a failed registration at a path still in use must not remove anything.
     object_server.at("/org/zbus/iface", Iface).await.unwrap();
-    assert!(!object_server.at("/org/zbus/iface", Iface).await.unwrap());
+    assert!(
+        object_server
+            .at("/org/zbus/iface", Iface)
+            .await
+            .unwrap()
+            .is_some()
+    );
     let xml = introspect("/org/zbus").await.unwrap();
     assert!(
         xml.contains("<node name=\"iface\">"),

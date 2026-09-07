@@ -116,7 +116,9 @@ impl ObjectServer {
     /// However, there are situations where you'd need to register interfaces dynamically and that's
     /// where this method becomes useful.
     ///
-    /// If the interface already exists at this path, returns false.
+    /// Returns `None` on success. If an interface of the same name already exists at this path,
+    /// the object server is left untouched and the passed `iface` is handed back as `Some`, so
+    /// the caller can retry (e.g. at a different path) without having to reconstruct it.
     ///
     /// # Deadlocks
     ///
@@ -130,14 +132,22 @@ impl ObjectServer {
     /// interfaces — including the calling one, whose exclusive lock is held for the duration of the
     /// `&mut self` method. Registering the `ObjectManager` up front (typically at connection
     /// set-up), or from a `&self` method, avoids this.
-    pub async fn at<'p, P, I>(&self, path: P, iface: I) -> Result<bool>
+    pub async fn at<'p, P, I>(&self, path: P, iface: I) -> Result<Option<I>>
     where
         I: Interface,
         P: TryInto<ObjectPath<'p>>,
         P::Error: Into<Error>,
     {
-        self.add_arc_interface(path, I::name(), ArcInterface::new(iface))
-            .await
+        // `iface` is only moved into the object server once we know the slot is free, so that we
+        // can hand it back to the caller otherwise.
+        let mut iface = Some(iface);
+        let added = self
+            .add_interface_with(path, I::name(), || {
+                ArcInterface::new(iface.take().expect("closure is called at most once"))
+            })
+            .await?;
+
+        Ok(if added { None } else { iface })
     }
 
     pub(crate) async fn add_arc_interface<'p, P>(
@@ -150,17 +160,36 @@ impl ObjectServer {
         P: TryInto<ObjectPath<'p>>,
         P::Error: Into<Error>,
     {
+        self.add_interface_with(path, name, || arc_iface).await
+    }
+
+    /// Register the interface produced by `make` at `path`, under `name`.
+    ///
+    /// `make` is only called if no interface with that name exists at the path yet. Returns
+    /// whether the interface was added.
+    async fn add_interface_with<'p, P, F>(
+        &self,
+        path: P,
+        name: InterfaceName<'static>,
+        make: F,
+    ) -> Result<bool>
+    where
+        P: TryInto<ObjectPath<'p>>,
+        P::Error: Into<Error>,
+        F: FnOnce() -> ArcInterface,
+    {
         let path = path.try_into().map_err(Into::into)?;
         let mut root = self.root().write().await;
         let (node, manager_path) = root.get_child_mut(&path, true);
         let node = node.unwrap();
-        let added = node.add_arc_interface(name.clone(), arc_iface);
-        if !added {
+        if node.has_interface(&name) {
             // The nodes on the path may have been auto-created just now for this very
             // registration; remove the ones that nothing else needs.
             root.remove_node(&path);
             return Ok(false);
         }
+        let added = node.add_arc_interface(name.clone(), make());
+        debug_assert!(added);
         self.interfaces_added(node, name, path, manager_path)
             .await?;
 
