@@ -18,7 +18,8 @@ readme = "README.md"
 
 [features]
 default = []
-# Enable blocking API.
+# Compatibility feature; blocking proxy generation follows zbus's blocking-api
+# feature, not the features of this host-side procedural macro crate.
 blocking-api = []
 # Deprecated: GVariant support has moved to the `zgvariant` crate and will be removed in 6.0.
 # This feature is an unused pass-through kept only for compatibility until then.
