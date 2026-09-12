@@ -19,13 +19,15 @@ use crate::ObjectServer;
 use crate::log::debug;
 use crate::{
     DBusError, Error, Executor, MatchRule, ObjectPath, OwnedGuid, OwnedMatchRule, Result, Task,
-    async_lock::{Mutex, Semaphore, SemaphorePermit},
     fdo::{ConnectionCredentials, ReleaseNameReply, RequestNameFlags, RequestNameReply},
     is_flatpak,
     log::{Instrument, info, info_span, trace, trace_span, warn},
     message::{self, Flags, Message, Type},
     names::{BusName, ErrorName, InterfaceName, MemberName, OwnedUniqueName, WellKnownName},
-    timeout::timeout,
+    runtime::{
+        async_lock::{Mutex, Semaphore, SemaphorePermit},
+        timeout::timeout,
+    },
 };
 
 mod builder;

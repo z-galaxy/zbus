@@ -117,7 +117,7 @@ impl Transport {
                 .await??;
                 #[cfg(unix)]
                 {
-                    let split = crate::abstractions::select_runtime! {
+                    let split = crate::runtime::select_runtime! {
                         tokio: unix_stream_to_tokio(stream),
                         async_io: unix_stream_to_async_io(stream),
                     };
@@ -144,7 +144,7 @@ impl Transport {
             Transport::Vsock(addr) => {
                 #[cfg(all(feature = "vsock", feature = "tokio-vsock"))]
                 {
-                    if crate::abstractions::use_tokio() {
+                    if crate::runtime::use_tokio() {
                         vsock_connect_tokio(&addr, &address).await
                     } else {
                         vsock_connect_async_io(&addr, &address)
@@ -281,7 +281,7 @@ fn unix_stream_to_tokio(stream: UnixStream) -> Result<BoxedSplit> {
 #[cfg(feature = "async-io")]
 fn tcp_async_to_split(stream: Async<std::net::TcpStream>) -> Result<BoxedSplit> {
     #[cfg(feature = "tokio")]
-    if crate::abstractions::use_tokio() {
+    if crate::runtime::use_tokio() {
         return tokio::net::TcpStream::from_std(stream.into_inner()?)
             .map(Into::into)
             .map_err(Into::into);

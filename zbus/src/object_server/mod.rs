@@ -6,12 +6,12 @@ use std::{marker::PhantomData, sync::Arc};
 
 use crate::{
     BoxDBusError, Connection, Error, ObjectPath, Result,
-    async_lock::RwLock,
     connection::WeakConnection,
     fdo,
     log::{Instrument, debug, trace, trace_span},
     message::{Header, Message},
     names::InterfaceName,
+    runtime::async_lock::RwLock,
 };
 #[cfg(feature = "object-manager")]
 use crate::{Value, fdo::ObjectManager};

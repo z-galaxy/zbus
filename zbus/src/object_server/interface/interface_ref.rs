@@ -1,7 +1,7 @@
 use std::{marker::PhantomData, sync::Arc};
 
 use super::{Interface, InterfaceDeref, InterfaceDerefMut, SignalEmitter};
-use crate::async_lock::RwLock;
+use crate::runtime::async_lock::RwLock;
 
 /// Wrapper over an interface, along with its corresponding `SignalEmitter`
 /// instance. A reference to the underlying interface may be obtained via

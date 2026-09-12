@@ -130,9 +130,9 @@ mod message_stream;
 #[cfg(feature = "comms")]
 pub use message_stream::*;
 #[cfg(feature = "comms")]
-mod abstractions;
+pub mod runtime;
 #[cfg(feature = "comms")]
-pub use abstractions::*;
+pub use runtime::{AsyncDrop, Executor, Task};
 
 #[cfg(feature = "comms")]
 pub mod match_rule;

@@ -1,7 +1,13 @@
-//! This mod contains a bunch of abstractions.
+//! Integration with the async runtime that drives a connection.
 //!
-//! These abstractions allow us to make use of the appropriate API depending on which features are
-//! enabled.
+//! zbus does not ship a runtime of its own. A connection waits for socket readiness and timers,
+//! and runs its internal tasks, on `async-io` (the default) or on Tokio, chosen when the
+//! connection is built. This module holds what a connection exposes of that choice:
+//! [`Executor`] wraps the executor zbus drives for the `async-io` backend (and stands empty
+//! when Tokio runs the tasks itself), `Task` is its task handle, and [`AsyncDrop`] is the async
+//! counterpart of [`Drop`] that zbus's own types implement.
+//!
+//! See [`crate::Connection::executor`] for driving a connection from your own runtime.
 
 /// Evaluates the `tokio` or `async-io` expression for the active backend.
 ///
@@ -18,7 +24,7 @@ macro_rules! select_runtime {
     (tokio: $tokio:expr, async_io: $async_io:expr $(,)?) => {{
         #[cfg(all(feature = "tokio", feature = "async-io"))]
         {
-            if $crate::abstractions::use_tokio() {
+            if $crate::runtime::use_tokio() {
                 $tokio
             } else {
                 $async_io
@@ -54,11 +60,11 @@ pub(crate) fn use_tokio() -> bool {
     }
 }
 
-mod executor;
-pub use executor::*;
 mod async_drop;
+pub use async_drop::AsyncDrop;
+mod executor;
+pub use executor::{Executor, Task};
 pub(crate) mod async_lock;
-pub use async_drop::*;
 pub(crate) mod timeout;
 
 // Only the `unixexec` and `ibus` transports and, on macOS, the `launchd` one run commands.

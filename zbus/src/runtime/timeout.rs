@@ -37,7 +37,7 @@ pub(crate) async fn timeout<F, T>(fut: F, timeout: Duration) -> Result<T>
 where
     F: Future<Output = Result<T>>,
 {
-    crate::abstractions::select_runtime! {
+    super::select_runtime! {
         tokio: timeout_tokio(fut, timeout).await,
         async_io: timeout_async_io(fut, timeout).await,
     }

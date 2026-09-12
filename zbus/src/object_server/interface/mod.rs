@@ -15,12 +15,11 @@ use std::{
 use async_trait::async_trait;
 
 use crate::{
-    BoxDBusError, Connection, DBusError, Error, ObjectServer, OwnedValue, Value,
-    async_lock::RwLock,
-    fdo,
+    BoxDBusError, Connection, DBusError, Error, ObjectServer, OwnedValue, Value, fdo,
     message::{self, Header, Message},
     names::{InterfaceName, MemberName},
     object_server::SignalEmitter,
+    runtime::async_lock::RwLock,
 };
 
 /// Write `lines` as an XML comment at the given indentation level.

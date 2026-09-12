@@ -10,10 +10,10 @@ use event_listener::Event;
 
 use crate::{
     Executor, Message, OwnedMatchRule, Task,
-    async_lock::Mutex,
     connection::{MsgBroadcaster, PendingMethodCalls},
     log::{debug, trace},
     message::Type,
+    runtime::async_lock::Mutex,
 };
 
 use super::socket::ReadHalf;

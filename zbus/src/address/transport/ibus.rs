@@ -1,4 +1,4 @@
-use crate::{Address, Result, process::run};
+use crate::{Address, Result, runtime::process::run};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 /// The transport properties of an IBus D-Bus address.
