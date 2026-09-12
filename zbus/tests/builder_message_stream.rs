@@ -7,7 +7,11 @@
 
 #![cfg(all(unix, feature = "bus-impl"))]
 
+#[cfg(not(feature = "tokio"))]
 use std::os::unix::net::UnixStream;
+
+#[cfg(feature = "tokio")]
+use tokio::net::UnixStream;
 
 use futures_util::StreamExt;
 use ntest::timeout;

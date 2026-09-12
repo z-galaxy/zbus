@@ -42,7 +42,8 @@ mod utils;
 /// * `gen_async` - Whether or not to generate the asynchronous Proxy type.
 ///
 /// * `gen_blocking` - Whether or not to generate the blocking Proxy type. If the `blocking-api`
-///   cargo feature is disabled, this attribute is ignored and blocking Proxy type is not generated.
+///   cargo feature of `zbus` is disabled, this attribute is ignored and blocking Proxy type is not
+///   generated.
 ///
 /// * `async_name` - Specify the exact name of the asynchronous proxy type.
 ///

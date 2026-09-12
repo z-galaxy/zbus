@@ -77,10 +77,9 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, input: ItemTrait) -> Result<Tok
         )),
     }?;
     let gen_async = attrs.gen_async.unwrap_or(true);
-    #[cfg(feature = "blocking-api")]
+    // Whether the blocking proxy is actually generated is decided by the `blocking-api` feature
+    // of `zbus`, not by the features of this crate. See below.
     let gen_blocking = attrs.gen_blocking.unwrap_or(true);
-    #[cfg(not(feature = "blocking-api"))]
-    let gen_blocking = false;
 
     // Some sanity checks
     assert!(
@@ -105,7 +104,7 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, input: ItemTrait) -> Result<Tok
                 format!("{}Proxy", input.ident)
             }
         });
-        create_proxy(
+        let blocking_proxy = create_proxy(
             &input,
             iface_name.as_deref(),
             attrs.assume_defaults,
@@ -117,7 +116,19 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, input: ItemTrait) -> Result<Tok
             // async proxy only unless async proxy generation is disabled.
             !gen_async,
             crate_path.as_ref(),
-        )?
+        )?;
+        let zbus = zbus_path(crate_path.as_ref());
+
+        // The `blocking-api` feature of the `zbus` the generated code is compiled against decides
+        // whether the blocking proxy is generated, through a `zbus` macro that either forwards or
+        // drops its input. The `blocking-api` feature of this crate can differ from it: Cargo
+        // unifies the features of host dependencies, such as proc-macros and build scripts,
+        // separately from the target ones.
+        quote! {
+            #zbus::__if_blocking_api_feature! {
+                #blocking_proxy
+            }
+        }
     } else {
         quote! {}
     };
