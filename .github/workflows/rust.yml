@@ -2,9 +2,9 @@ name: Lint, Build and Test
 
 on:
   push:
-    branches: [main]
+    branches: [main, zbus-5]
   pull_request:
-    branches: [main]
+    branches: [main, zbus-5]
 
 jobs:
   MSRV:
@@ -77,6 +77,12 @@ jobs:
           cargo --locked clippy --target x86_64-unknown-netbsd
           cargo --locked clippy --target x86_64-pc-windows-gnu
           cargo --locked clippy --target aarch64-linux-android
+      - name: Check host and target blocking features separately
+        run: |
+          cargo --locked check --manifest-path test_fixtures/blocking_api/Cargo.toml
+          cargo --locked check --manifest-path test_fixtures/blocking_api/Cargo.toml --features target-blocking
+          cargo --locked check --manifest-path test_fixtures/blocking_api/Cargo.toml --features legacy-macro-feature
+          cargo --locked check --manifest-path test_fixtures/blocking_api/Cargo.toml --all-features
 
   linux_test:
     runs-on: ubuntu-latest
