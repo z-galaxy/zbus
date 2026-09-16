@@ -18,8 +18,16 @@ readme = "README.md"
 
 [features]
 default = []
-# Enable blocking API.
+# Compatibility feature; blocking proxy generation follows zbus's blocking-api
+# feature, not the features of this host-side procedural macro crate.
 blocking-api = []
+# Internal, turned on by zbus itself. It tells the `proxy` macro that the zbus it is paired with
+# defines `__if_blocking_api_feature!`, so blocking proxy generation can be deferred to the target
+# zbus's blocking-api feature. Released zbus up to 5.19.0 does not turn it on, and their
+# `zbus_macros = "^5.x"` requirement lets them pick up newer releases of this crate; with the
+# feature off the macro emits the pre-gate expansion, which those versions still compile. Don't
+# enable it by hand.
+blocking-api-gate = []
 # Deprecated: GVariant support has moved to the `zgvariant` crate and will be removed in 6.0.
 # This feature is an unused pass-through kept only for compatibility until then.
 gvariant = ["zvariant/gvariant", "zvariant_utils/gvariant"]

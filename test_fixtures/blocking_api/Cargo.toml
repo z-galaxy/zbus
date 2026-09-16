@@ -1,0 +1,24 @@
+[package]
+name = "blocking_api_fixture"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.87"
+publish = false
+
+# Keep this fixture isolated: a workspace build would unify the target's zbus
+# features with other members and hide the host/target mismatch.
+[workspace]
+resolver = "3"
+
+[features]
+target-blocking = ["renamed_zbus/blocking-api"]
+legacy-macro-feature = ["zbus_macros/blocking-api"]
+
+[dependencies]
+renamed_zbus = { package = "zbus", path = "../../zbus", default-features = false, features = ["tokio"] }
+zbus_macros = { path = "../../zbus_macros", default-features = false }
+
+[build-dependencies]
+# Cargo unifies host features separately from the target's. This enables the
+# blocking API on the host while the target leaves it disabled by default.
+renamed_zbus = { package = "zbus", path = "../../zbus", features = ["blocking-api"] }

@@ -77,9 +77,15 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, input: ItemTrait) -> Result<Tok
         )),
     }?;
     let gen_async = attrs.gen_async.unwrap_or(true);
-    #[cfg(feature = "blocking-api")]
+    // Whether the blocking proxy is actually generated is decided by the `blocking-api` feature
+    // of `zbus`, not by the features of this crate. See `gate_blocking_proxy` below.
+    #[cfg(feature = "blocking-api-gate")]
     let gen_blocking = attrs.gen_blocking.unwrap_or(true);
-    #[cfg(not(feature = "blocking-api"))]
+    // Paired with a `zbus` that predates the gate, so the decision can't be deferred to it and
+    // this crate's own feature is all there is to go on. See `gate_blocking_proxy` below.
+    #[cfg(all(not(feature = "blocking-api-gate"), feature = "blocking-api"))]
+    let gen_blocking = attrs.gen_blocking.unwrap_or(true);
+    #[cfg(all(not(feature = "blocking-api-gate"), not(feature = "blocking-api")))]
     let gen_blocking = false;
 
     // Some sanity checks
@@ -105,7 +111,7 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, input: ItemTrait) -> Result<Tok
                 format!("{}Proxy", input.ident)
             }
         });
-        create_proxy(
+        let blocking_proxy = create_proxy(
             &input,
             iface_name.as_deref(),
             attrs.assume_defaults,
@@ -117,7 +123,9 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, input: ItemTrait) -> Result<Tok
             // async proxy only unless async proxy generation is disabled.
             !gen_async,
             crate_path.as_ref(),
-        )?
+        )?;
+
+        gate_blocking_proxy(blocking_proxy, crate_path.as_ref())
     } else {
         quote! {}
     };
@@ -145,6 +153,36 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, input: ItemTrait) -> Result<Tok
 
         #async_proxy
     })
+}
+
+/// Hand the blocking proxy to `zbus` to keep or drop.
+///
+/// The `blocking-api` feature of the `zbus` the generated code is compiled against decides whether
+/// the blocking proxy is generated, through a `zbus` macro that either forwards or drops its
+/// input. The `blocking-api` feature of this crate can differ from it: Cargo unifies the features
+/// of host dependencies, such as proc-macros and build scripts, separately from the target ones.
+#[cfg(feature = "blocking-api-gate")]
+fn gate_blocking_proxy(blocking_proxy: TokenStream, crate_path: Option<&Path>) -> TokenStream {
+    let zbus = zbus_path(crate_path);
+
+    quote! {
+        #zbus::__if_blocking_api_feature! {
+            #blocking_proxy
+        }
+    }
+}
+
+/// Emit the blocking proxy the way it was emitted before the gate existed.
+///
+/// `zbus` turns `blocking-api-gate` on unconditionally, so it is off only when this crate is
+/// paired with a `zbus` that predates the gate and therefore does not define
+/// `__if_blocking_api_feature!`. That pairing is reachable, because every released `zbus` 5.x asks
+/// for `zbus_macros = "^5.x"` and so accepts a newer release of this crate — say when `zbus` is
+/// pinned and this crate is updated on its own. Emitting the gate there fails to compile `zbus`
+/// itself, whose `fdo` proxies go through this macro too.
+#[cfg(not(feature = "blocking-api-gate"))]
+fn gate_blocking_proxy(blocking_proxy: TokenStream, _crate_path: Option<&Path>) -> TokenStream {
+    blocking_proxy
 }
 
 #[allow(clippy::too_many_arguments)]

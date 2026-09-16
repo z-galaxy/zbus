@@ -41,14 +41,21 @@ tokio = ["dep:tokio"]
 vsock = ["dep:vsock", "async-io"]
 tokio-vsock = ["dep:tokio-vsock", "tokio"]
 # Enable blocking API (default).
-blocking-api = ["zbus_macros/blocking-api"]
+blocking-api = []
 # Enable `serde_bytes` feature of `zvariant`.
 serde_bytes = ["zvariant/serde_bytes"]
 # Dummy features to satisfy `cargo semver`. Should be removed at the next major version bump.
 async-fs = []
 
 [dependencies]
-zbus_macros = { path = "../zbus_macros", version = "5.19.0" }
+# `blocking-api-gate` is what tells the `proxy` macro that this crate defines
+# `__if_blocking_api_feature!`. It is enabled here rather than from the `blocking-api` feature so
+# that it tracks the presence of this crate, not the state of a feature: whenever the macro sees
+# it, deferring the decision is safe, and whenever it doesn't, the zbus in the graph is an older
+# release that can't answer.
+zbus_macros = { path = "../zbus_macros", version = "5.19.0", features = [
+    "blocking-api-gate",
+] }
 zvariant = { path = "../zvariant", features = [
     "enumflags2",
 ], version = "5.15.0" }
