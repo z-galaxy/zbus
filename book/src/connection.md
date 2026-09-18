@@ -76,8 +76,8 @@ cargo feature of `zbus` is enabled.
 
 zbus ships no async executor and no reactor of its own. A connection takes its readiness
 notifications, timers, spawned tasks and blocking work from one runtime, chosen once when it is
-built. Its async locks are a separate choice, made by cargo feature: `async-lock` (which the
-default `async-io` feature enables) or `tokio`.
+built. Its async locks are zbus's own, except on a Tokio build, where Tokio's locks stand in
+instead.
 
 ### Built-in backends
 
@@ -88,10 +88,9 @@ always runs on the Tokio runtime that is current when it is built; building one 
 with no such runtime fails with `Error::Unsupported`.
 
 A build with neither feature depends on no `tokio` crate, and on nothing the `async-io` feature
-owns bar one: zbus's own locks come from `async-lock` or from `tokio`, so such a build has to name
-one of the two, and `async-lock` is that exception — a crate of locks alone, with no thread and no
-reactor of its own. Every connection in the build needs an explicit runtime, given through
-[`Builder::runtime`].
+owns: zbus's own locks build on `event-listener`, not on anything `async-io` pulls in, so this
+build needs neither an extra feature nor an extra crate for them. Every connection in the build
+needs an explicit runtime, given through [`Builder::runtime`].
 
 ### Supplying your own runtime
 
@@ -121,7 +120,8 @@ that ignores the end of its input keeps that worker.
 
 zbus's integration tests include a reference runtime: a single-threaded one built on the
 `polling` crate, whose run loop drives a connection's readiness, timers and tasks without
-starting a thread of its own. The build it runs in enables `async-lock` for zbus's locks.
+starting a thread of its own. The build it runs in needs no extra feature for zbus's locks,
+which build on `event-listener` regardless of which runtime feature is chosen.
 
 The blocking API needs one thing of such a runtime: its loop has to run on a thread other than
 the one calling into `zbus::blocking`. A blocking call made from the thread the loop itself runs

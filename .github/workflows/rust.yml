@@ -36,7 +36,7 @@ jobs:
           cargo --locked check -p zbus --no-default-features --target x86_64-unknown-netbsd
           cargo --locked check -p zbus --no-default-features --target aarch64-linux-android
           # The external-runtime-only build: no async-io, no tokio.
-          EXT=async-lock,blocking-api,proxy,service,object-manager,unixexec,ibus,tracing,p2p
+          EXT=blocking-api,proxy,service,object-manager,unixexec,ibus,tracing,p2p
           cargo --locked check -p zbus --no-default-features --features $EXT
           cargo --locked check -p zbus --no-default-features --features $EXT \
             --target x86_64-pc-windows-gnu
@@ -115,9 +115,9 @@ jobs:
           cargo --locked clippy -p zbus --no-default-features --all-targets \
             --features async-io,proxy,service,ibus
           cargo --locked clippy -p zbus --no-default-features --all-targets \
-            --features async-lock,proxy,service,ibus
+            --features proxy,service,ibus
           # The external-runtime-only build: no async-io, no tokio.
-          EXT=async-lock,blocking-api,proxy,service,object-manager,unixexec,ibus,tracing,p2p
+          EXT=blocking-api,proxy,service,object-manager,unixexec,ibus,tracing,p2p
           cargo --locked clippy -p zbus --no-default-features --all-targets --features $EXT
           # The service-only and blocking-API fixtures have to be built on their own: in a
           # workspace-wide build, the features of their `zbus` dependency are unified with those of
@@ -227,20 +227,21 @@ jobs:
       - name: Test the external-runtime-only build
         if: matrix.suite == 'external'
         run: |
-          FEATURES=async-lock,blocking-api,proxy,service,object-manager,unixexec,ibus,tracing,p2p
+          FEATURES=blocking-api,proxy,service,object-manager,unixexec,ibus,tracing,p2p
           # `--tests` over `--lib`: the integration test targets have to build in this feature
           # set too, not only the library's own unit tests. `--doc` is left out: the rendered
           # examples connect to a bus, which a build with neither backend has no runtime for.
           dbus-run-session --config-file /tmp/dbus-session.conf -- \
             cargo --locked test --release --verbose -p zbus --no-default-features \
               --features $FEATURES --tests
-          # Nothing behind the async-io feature may reach an external-runtime user. `async-lock`
-          # is the exception: it is a lock crate with no threads and no reactor of its own, and
-          # this build asks for it by feature to get zbus's locks. The tree is written out before
-          # it is searched, so that a `cargo tree` failure fails the job instead of handing grep an
-          # empty stream. A `cargo tree` line is a prefix of box-drawing characters, the crate
-          # name and its version, so matching from the start of the line up to the version is what
-          # keeps a crate whose name merely contains one of these from counting.
+          # Nothing behind the async-io feature may reach an external-runtime user. zbus's own
+          # async locks build on `event-listener`, which this feature set already pulls in for
+          # its own reasons, so the check below needs no lock-crate exception. The tree is
+          # written out before it is searched, so that a `cargo tree` failure fails the job
+          # instead of handing grep an empty stream. A `cargo tree` line is a prefix of
+          # box-drawing characters, the crate name and its version, so matching from the start of
+          # the line up to the version is what keeps a crate whose name merely contains one of
+          # these from counting.
           FORBIDDEN="async-io|async-executor|async-task|async-process|blocking"
           FORBIDDEN="$FORBIDDEN|polling|async-channel|async-signal|piper"
           cargo --locked tree -e normal -p zbus --no-default-features --features $FEATURES \

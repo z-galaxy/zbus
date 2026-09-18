@@ -4,8 +4,9 @@
 //! runs its internal tasks and hands off its blocking work on `async-io` (the default), on Tokio,
 //! or on any implementation of [`traits::Runtime`] handed to [`Builder::runtime`]. Both built-in
 //! backends are implementations of that trait, picked by the `async-io` and `tokio` features. The
-//! async locks a connection holds are not part of that trait: they come from `async-lock` or from
-//! Tokio, whichever of the `async-lock` and `tokio` cargo features is on.
+//! async locks a connection holds are not part of that trait: they are zbus's own, built on
+//! `event-listener`, except on a Tokio build, where Tokio's locks stand in so that build does not
+//! carry a second lock implementation.
 //! [`AsyncDrop`] is the async counterpart of [`Drop`] that zbus's own types implement.
 //!
 //! [`Builder::runtime`]: crate::connection::Builder::runtime

@@ -58,7 +58,6 @@ camino = "1.1.9"
 enumflags2 = { version = "0.7.9", features = ["serde"] }
 async-io = "2.3.2"
 async-broadcast = "0.7.0"
-async-lock = "3.3.0"
 async-executor = "1.11.0"
 async-trait = "0.1.80"
 hex = "0.4.3"

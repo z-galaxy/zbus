@@ -91,8 +91,8 @@ Four things to know about the features:
 * `arrayvec` was a zvariant-only feature and is available in zbus now.
 * `comms` pulls in the `uuid` crate — it parses D-Bus GUIDs — without turning on zbus's own
   `uuid` feature, so the `Uuid` wire impls stay opt-in, as they were.
-* Any D-Bus feature (`async-io`, `tokio`, `async-lock`, `blocking-api`, `p2p`, `bus-impl`,
-  `vsock`) enables `comms`. In a workspace where one crate asks for the wire-only build
+* Any D-Bus feature (`async-io`, `tokio`, `blocking-api`, `p2p`, `bus-impl`, `vsock`) enables
+  `comms`. In a workspace where one crate asks for the wire-only build
   and another for the full one, Cargo's feature unification gives everybody the full build.
   That is a build-size question only; nothing behaves differently.
 
@@ -687,19 +687,19 @@ run while the runtime runs them. The two built-in backends are implementations o
 picked by cargo feature, so this method is for the runtime your application already has. Nothing
 changes for connections built without `runtime`.
 
-zbus's own async locks are not part of the trait: they still come from a cargo feature, either
-`async-lock` (which `async-io` enables, as before) or `tokio`. `async-lock` is a feature you can
-name on its own now, which is what a build on a runtime of its own does; with neither of the two,
-zbus does not compile.
+zbus's own async locks are not part of the trait: 5.x takes them from the `async_lock` crate,
+whereas 6.0 builds them itself, on `event-listener`, except when the `tokio` feature is enabled,
+where Tokio's locks stand in instead. Neither choice needs a cargo feature of its own, so a build
+with `comms` but neither `async-io` nor `tokio` pulls in no lock crate for them.
 
 A runtime may also abort or drop a task it was given, so the connection no longer relies on its
 socket-reader task running to its end: however that task stops, `Connection::closed()` resolves,
 pending method calls fail and every `MessageStream` on the connection ends. A stream therefore
 also ends once `Connection::close()` has been called, after yielding whatever it already held.
 
-A build with `comms` but neither `async-io` nor `tokio` is now valid, as long as it names
-`async-lock` for the locks; every connection in it needs a `runtime`, over an address or over a
-socket you supply.
+A build with `comms` but neither `async-io` nor `tokio` is valid, something 5.x has no equivalent
+of, and needs no lock feature for zbus's locks; every connection in it needs a `runtime`, over an
+address or over a socket you supply.
 
 Two things about such a build. `zbus::blocking` only works there while the runtime's loop runs on
 another thread: a blocking call made from the loop's own thread deadlocks, since the connection it

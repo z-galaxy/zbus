@@ -27,8 +27,8 @@ zbus = { version = "6", default-features = false }
 That build compiles `zbus::wire` and `zbus::names` and nothing else — no connection, proxy or
 object server. The optional wire-format features keep zvariant's names (`arrayvec`, `camino`,
 `chrono`, `enumflags2`, `heapless`, `option-as-array`, `serde_bytes`, `time`, `url`, `uuid`),
-and enabling any D-Bus feature (`comms`, `async-io`, `tokio`, `async-lock`, `blocking-api`,
-`p2p`, `bus-impl`, `vsock`, `proxy`, `service`, `unixexec`, `ibus`) brings the D-Bus API back.
+and enabling any D-Bus feature (`comms`, `async-io`, `tokio`, `blocking-api`, `p2p`, `bus-impl`,
+`vsock`, `proxy`, `service`, `unixexec`, `ibus`) brings the D-Bus API back.
 
 zbus logs through [`tracing`], behind the default `tracing` feature; a `default-features =
 false` build that wants zbus's logs must re-enable it explicitly.
@@ -145,9 +145,9 @@ connection lets go of the other pipe too. That is a cost at teardown rather than
 the connection, and a runtime that serves `unixexec:` addresses should still override
 `spawn_blocking` rather than park a thread there for it.
 
-zbus's async locks come from a cargo feature rather than from the runtime: `async-lock` (which
-`async-io` enables) or `tokio`. A build with neither of those two does not compile, so a build on
-a runtime of your own names `async-lock` itself.
+zbus's async locks are its own, built on `event-listener` rather than supplied by the runtime, so
+a build on a runtime of your own needs no lock feature and pulls in no lock crate for them. On a
+Tokio build, Tokio's locks stand in instead, so that build carries no second lock implementation.
 
 `zbus::blocking` over a runtime of your own only works while that runtime's loop runs on another
 thread. A blocking call made from the loop's own thread deadlocks: it waits on a connection that
