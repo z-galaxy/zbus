@@ -23,6 +23,8 @@ pub(crate) use async_io::AsyncIo;
 mod async_drop;
 pub use async_drop::AsyncDrop;
 mod blocking_thread;
+#[cfg(test)]
+mod builtin;
 mod erased;
 pub(crate) mod locks;
 mod task;
