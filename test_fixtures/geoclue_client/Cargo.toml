@@ -1,0 +1,21 @@
+[package]
+name = "geoclue_client_fixture"
+version = "0.0.0"
+edition = { workspace = true }
+rust-version = { workspace = true }
+publish = false
+
+description = "Size fixture: the book's GeoClue2 client enabling only the zbus features it needs"
+
+[features]
+default = ["builtin"]
+builtin = ["zbus/async-io"]
+tokio = ["zbus/tokio", "dep:tokio"]
+
+[dependencies]
+zbus = { path = "../../zbus", default-features = false, features = ["proxy"] }
+tokio = { workspace = true, optional = true, features = ["rt", "macros"] }
+futures-util = { workspace = true }
+
+[lints]
+workspace = true

@@ -6,6 +6,8 @@ members = [
     "zbus_xml",
     "zbus_xmlgen",
     "test_fixtures/blocking_api",
+    "test_fixtures/geoclue_client",
+    "test_fixtures/geoclue_service",
     "test_fixtures/renamed_zbus",
     "test_fixtures/service_only",
     "test_fixtures/zbus_only",
@@ -25,6 +27,13 @@ repository = "https://github.com/z-galaxy/zbus/"
 [profile.bench]
 debug = true
 strip = "none"
+
+# What a shipped binary weighs: the fixtures under test_fixtures/geoclue_* are built with it.
+[profile.size]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+strip = true
 
 [workspace.dependencies]
 # Local dependencies

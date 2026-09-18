@@ -663,6 +663,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "geoclue_client_fixture"
+version = "0.0.0"
+dependencies = [
+ "futures-util",
+ "tokio",
+ "zbus",
+]
+
+[[package]]
+name = "geoclue_service_fixture"
+version = "0.0.0"
+dependencies = [
+ "tokio",
+ "zbus",
+]
+
+[[package]]
 name = "getrandom"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
