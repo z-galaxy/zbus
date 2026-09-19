@@ -1,12 +1,17 @@
 //! What a connection costs on the runtime it is built on: its setup and teardown, a method
-//! call's round trip, a large body, a signal, the runtime's task spawn, its blocking hook, and
-//! the blocking API's own `block_on`. Every benchmark runs over a unix socket pair with a p2p
-//! handshake, so nothing here depends on a bus and everything goes through the runtime's
-//! readiness path, which an in-process channel would bypass.
+//! call's round trip — from the thread inside `block_on` and from behind a helper thread — a
+//! large body, a signal, the runtime's task spawn, its blocking hook, and the blocking API's own
+//! `block_on`. Every benchmark runs over a unix socket pair with a p2p handshake, so nothing
+//! here depends on a bus and everything goes through the runtime's readiness path, which an
+//! in-process channel would bypass.
 
 #[cfg(unix)]
 mod unix {
-    use std::{hint::black_box, os::unix::net::UnixStream, time::Duration};
+    use std::{
+        hint::black_box,
+        os::unix::net::UnixStream,
+        time::{Duration, Instant},
+    };
 
     use criterion::{BatchSize, Criterion, Throughput, criterion_group};
     use futures_util::StreamExt;
@@ -17,6 +22,27 @@ mod unix {
     const BIG: usize = 1024 * 1024;
 
     fn runtime(c: &mut Criterion) {
+        // Every other id builds its connection pair in one `block_on` and measures in later
+        // ones, so a helper thread holds the seat and the calling thread parks on each call.
+        // Here the pair is built and every call made inside one `block_on`, so the calling
+        // thread is the one running the runtime and zbus starts no thread of its own. The number
+        // is per call, comparable with `method-call/roundtrip`.
+        let mut group = c.benchmark_group("block_on");
+        group.bench_function("roundtrip-inside", |b| {
+            b.iter_custom(|iters| {
+                zbus::block_on(async move {
+                    let (_server, client) = pair().await;
+                    let started = Instant::now();
+                    for _ in 0..iters {
+                        black_box(ping(&client, 1).await);
+                    }
+
+                    started.elapsed()
+                })
+            });
+        });
+        group.finish();
+
         let mut group = c.benchmark_group("connection");
         group.sample_size(20);
         group.bench_function("build-and-drop", |b| {
