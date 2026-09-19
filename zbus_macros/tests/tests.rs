@@ -462,26 +462,30 @@ fn test_proxy_object_list() {
         ],
     };
 
-    fn check_return(list: Vec<ObjectListProxyBlocking<'_>>) {
-        for (correct, returned) in OBJECT_LIST.paths.iter().zip(list.into_iter()) {
+    fn check_return(list: Vec<ObjectListProxy<'_>>) {
+        for (correct, returned) in OBJECT_LIST.paths.iter().zip(list) {
             assert!(returned.inner().path() == correct);
         }
     }
 
-    let connection = zbus::blocking::connection::Builder::session()
-        .serve_at(OBJECT_LIST.paths[1].as_ref(), OBJECT_LIST.clone())
-        .build()
-        .unwrap();
+    let connection = zbus::block_on(
+        zbus::connection::Builder::session()
+            .serve_at(OBJECT_LIST.paths[1].as_ref(), OBJECT_LIST.clone())
+            .build(),
+    )
+    .unwrap();
     let destination = connection.unique_name().unwrap().clone();
 
-    let proxy = ObjectListProxyBlocking::builder(&connection)
-        .path(OBJECT_LIST.paths[1].as_ref())
-        .destination(&destination)
-        .build()
-        .unwrap();
+    let proxy = zbus::block_on(
+        ObjectListProxy::builder(&connection)
+            .path(OBJECT_LIST.paths[1].as_ref())
+            .destination(&destination)
+            .build(),
+    )
+    .unwrap();
 
-    check_return(proxy.get_test_objects().unwrap());
-    check_return(proxy.objects().unwrap());
+    check_return(zbus::block_on(proxy.get_test_objects()).unwrap());
+    check_return(zbus::block_on(proxy.objects()).unwrap());
 }
 
 // This crate has no `zvariant` dependency, so the path `signature!` expands to has to resolve

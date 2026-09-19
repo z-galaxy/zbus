@@ -41,7 +41,7 @@ impl MyIface {
 
 #[interface(
     interface = "org.freedesktop.MyIface",
-    proxy(gen_blocking = true, assume_defaults = true, visibility = "pub(crate)")
+    proxy(assume_defaults = true, visibility = "pub(crate)")
 )]
 impl MyIface {
     #[instrument]

@@ -30,14 +30,12 @@ mod iface;
 mod proxy;
 mod utils;
 
-/// Attribute macro for defining D-Bus proxies (using [`zbus::Proxy`] and
-/// [`zbus::blocking::Proxy`]).
+/// Attribute macro for defining D-Bus proxies (using [`zbus::Proxy`]).
 ///
-/// The macro must be applied on a `trait T`. Two matching `impl T` will provide an asynchronous
-/// Proxy implementation, named `TraitNameProxy` and a blocking one, named `TraitNameProxyBlocking`.
-/// The proxy instances can be created with the associated `new()` or `builder()` methods. The
-/// former doesn't take any argument and uses the default service name and path. The later allows
-/// you to specify non-default proxy arguments.
+/// The macro must be applied on a `trait T`. A matching `impl T` will provide an asynchronous
+/// Proxy implementation, named `TraitNameProxy`. The proxy instances can be created with the
+/// associated `new()` or `builder()` methods. The former doesn't take any argument and uses the
+/// default service name and path. The later allows you to specify non-default proxy arguments.
 ///
 /// The following attributes are supported:
 ///
@@ -48,15 +46,7 @@ mod utils;
 /// * `default_path` - The default object path the method calls will be sent on and signals will be
 ///   sent for by the target service.
 ///
-/// * `gen_async` - Whether or not to generate the asynchronous Proxy type.
-///
-/// * `gen_blocking` - Whether or not to generate the blocking Proxy type. If the `blocking-api`
-///   cargo feature of `zbus` is disabled, this attribute is ignored and blocking Proxy type is not
-///   generated.
-///
-/// * `async_name` - Specify the exact name of the asynchronous proxy type.
-///
-/// * `blocking_name` - Specify the exact name of the blocking proxy type.
+/// * `async_name` - Specify the exact name of the proxy type.
 ///
 /// * `assume_defaults` - whether to auto-generate values for `default_path` and `default_service`
 ///   if none are specified (default: `false`). `proxy` generates a warning if neither this
@@ -103,24 +93,20 @@ mod utils;
 ///   `object` attribute to specify the proxy object to be constructed from the returned
 ///   [`ObjectPath`].
 ///
-/// * `async_object` - if the assumptions made by `object` attribute about naming of the
-///   asynchronous proxy type, don't fit your bill, you can use this to specify its exact name.
-///
-/// * `blocking_object` - if the assumptions made by `object` attribute about naming of the blocking
-///   proxy type, don't fit your bill, you can use this to specify its exact name.
+/// * `async_object` - if the assumptions made by `object` attribute about naming of the proxy type,
+///   don't fit your bill, you can use this to specify its exact name.
 ///
 /// * `object_vec` - this method returns a list of [`ObjectPath`]s (DBus signature `ao`) that should
-///   be converted to the proxy object type named by `object`, `async_object` and `blocking_object`
-///   attributes, and returned as a `Vec<_>`.
+///   be converted to the proxy object type named by `object` and `async_object` attributes, and
+///   returned as a `Vec<_>`.
 ///
 ///   NB: Any doc comments provided shall be appended to the ones added by the macro.
 ///
 /// # Signals
 ///
 /// For each signal method declared, this macro will provide a method, named `receive_<method_name>`
-/// to create a [`zbus::SignalStream`] ([`zbus::blocking::SignalIterator`] for the blocking proxy)
-/// wrapper, named `<SignalName>Stream` (`<SignalName>Iterator` for the blocking proxy) that yield
-/// a [`zbus::message::Message`] wrapper, named `<SignalName>`. This wrapper provides type safe
+/// to create a [`zbus::SignalStream`] wrapper, named `<SignalName>Stream` that yield a
+/// [`zbus::message::Message`] wrapper, named `<SignalName>`. This wrapper provides type safe
 /// access to the signal arguments. It also implements `Deref<Target = Message>` to allow easy
 /// access to the underlying [`zbus::message::Message`].
 ///
@@ -133,7 +119,7 @@ mod utils;
 /// ```no_run
 /// # use std::error::Error;
 /// use zbus::proxy;
-/// use zbus::{blocking::Connection, Result, fdo, Value};
+/// use zbus::{Connection, Result, fdo, Value};
 /// use futures_util::stream::StreamExt;
 /// use zbus::block_on;
 ///
@@ -154,16 +140,14 @@ mod utils;
 ///     #[zbus(signal)]
 ///     fn some_signal(&self, arg1: &str, arg2: u32) -> fdo::Result<()>;
 ///
-///     #[zbus(object = "SomeOtherIface", blocking_object = "SomeOtherInterfaceBlock")]
-///     // The method will return a `SomeOtherIfaceProxy` or `SomeOtherIfaceProxyBlock`, depending
-///     // on whether it is called on `SomeIfaceProxy` or `SomeIfaceProxyBlocking`, respectively.
+///     #[zbus(object = "SomeOtherIface", async_object = "SomeOtherInterfaceProxy")]
+///     // The method will return a `SomeOtherInterfaceProxy`.
 ///     //
-///     // NB: We explicitly specified the exact name of the blocking proxy type. If we hadn't,
-///     // `SomeOtherIfaceProxyBlock` would have been assumed and expected. We could also specify
-///     // the specific name of the asynchronous proxy types, using the `async_object` attribute.
+///     // NB: We explicitly specified the exact name of the proxy type. If we hadn't,
+///     // `SomeOtherIfaceProxy` would have been assumed and expected.
 ///     fn some_method(&self, arg1: &str);
 ///
-///     #[zbus(property, object = "SomeOtherIface", blocking_object = "SomeOtherInterfaceBlock")]
+///     #[zbus(property, object = "SomeOtherIface", async_object = "SomeOtherInterfaceProxy")]
 ///     // Properties that return an ObjectPath can also use the `object` attribute.
 ///     fn related_object(&self);
 /// }
@@ -171,30 +155,18 @@ mod utils;
 /// #[proxy(
 ///     interface = "org.test.SomeOtherIface",
 ///     default_service = "org.test.SomeOtherService",
-///     blocking_name = "SomeOtherInterfaceBlock",
+///     async_name = "SomeOtherInterfaceProxy",
 /// )]
 /// trait SomeOtherIface {}
 ///
-/// let connection = Connection::session()?;
-/// // Use `builder` to override the default arguments, `new` otherwise.
-/// let proxy = SomeIfaceProxyBlocking::builder(&connection)
-///                .destination("org.another.Service")
-///                .cache_properties(zbus::proxy::CacheProperties::No)
-///                .build()?;
-/// let _ = proxy.do_this("foo", 32, &Value::new(true));
-/// let _ = proxy.set_a_property("val");
-///
-/// let signal = proxy.receive_some_signal()?.next().unwrap();
-/// let args = signal.args()?;
-/// println!("arg1: {}, arg2: {}", args.arg1(), args.arg2());
-///
-/// // Now the same again, but asynchronous.
-/// block_on(async move {
-///     let proxy = SomeIfaceProxy::builder(&connection.into())
+/// block_on(async {
+///     let connection = Connection::session().await?;
+///     // Use `builder` to override the default arguments, `new` otherwise.
+///     let proxy = SomeIfaceProxy::builder(&connection)
+///                    .destination("org.another.Service")
 ///                    .cache_properties(zbus::proxy::CacheProperties::No)
 ///                    .build()
-///                    .await
-///                    .unwrap();
+///                    .await?;
 ///     let _ = proxy.do_this("foo", 32, &Value::new(true)).await;
 ///     let _ = proxy.set_a_property("val").await;
 ///
@@ -214,9 +186,7 @@ mod utils;
 /// [`zbus::Proxy`]: https://docs.rs/zbus/latest/zbus/proxy/struct.Proxy.html
 /// [`zbus::message::Message`]: https://docs.rs/zbus/latest/zbus/message/struct.Message.html
 /// [`zbus::proxy::PropertyStream`]: https://docs.rs/zbus/latest/zbus/proxy/struct.PropertyStream.html
-/// [`zbus::blocking::Proxy`]: https://docs.rs/zbus/latest/zbus/blocking/proxy/struct.Proxy.html
 /// [`zbus::SignalStream`]: https://docs.rs/zbus/latest/zbus/proxy/struct.SignalStream.html
-/// [`zbus::blocking::SignalIterator`]: https://docs.rs/zbus/latest/zbus/blocking/proxy/struct.SignalIterator.html
 /// [`ObjectPath`]: https://docs.rs/zbus/latest/zbus/struct.ObjectPath.html
 /// [dbus_emits_changed_signal]: https://dbus.freedesktop.org/doc/dbus-specification.html#introspection-format
 #[cfg(feature = "proxy")]
@@ -257,12 +227,13 @@ pub fn proxy(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// * `proxy` - If specified, a proxy type will also be generated for the interface. This attribute
 #[cfg_attr(
     feature = "proxy",
-    doc = "  supports all the [`macro@proxy`]-specific sub-attributes (e.g `gen_async`). The common",
-    doc = "  sub-attributes (e.g `name`) are automatically forwarded to the [`macro@proxy`] macro."
+    doc = "  supports all the [`macro@proxy`]-specific sub-attributes (e.g `async_name`). The",
+    doc = "  common sub-attributes (e.g `name`) are automatically forwarded to the",
+    doc = "  [`macro@proxy`] macro."
 )]
 #[cfg_attr(
     not(feature = "proxy"),
-    doc = "  supports all the `proxy` macro-specific sub-attributes (e.g `gen_async`). The common",
+    doc = "  supports all the `proxy` macro-specific sub-attributes (e.g `async_name`). The common",
     doc = "  sub-attributes (e.g `name`) are automatically forwarded to the `proxy` macro."
 )]
 ///   If the `proxy` cargo feature of `zbus` is disabled, the attribute is accepted but no proxy

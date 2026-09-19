@@ -158,17 +158,8 @@ pub(crate) type MsgBroadcaster = Broadcaster<Result<Message>>;
 /// `Connection` keeps internal queues of incoming message. The default capacity of each of these is
 /// 64. The capacity of the main (unfiltered) queue is configurable through the [`set_max_queued`]
 /// method. When the queue is full, no more messages can be received until room is created for more.
-#[cfg_attr(
-    feature = "blocking-api",
-    doc = "This is why it's important to ensure that all [`crate::MessageStream`] and",
-    doc = "[`crate::blocking::MessageIterator`] instances are continuously polled and iterated on,",
-    doc = "respectively."
-)]
-#[cfg_attr(
-    not(feature = "blocking-api"),
-    doc = "This is why it's important to ensure that all [`crate::MessageStream`] instances are",
-    doc = "continuously polled."
-)]
+/// This is why it's important to ensure that all [`crate::MessageStream`] instances are
+/// continuously polled.
 ///
 /// For sending messages you can use the [`Connection::send`] method.
 ///
@@ -1423,13 +1414,6 @@ impl Connection {
             .set(name)
             // programmer (probably our) error if this fails.
             .expect("unique name already set");
-    }
-}
-
-#[cfg(feature = "blocking-api")]
-impl From<crate::blocking::Connection> for Connection {
-    fn from(conn: crate::blocking::Connection) -> Self {
-        conn.into_inner()
     }
 }
 

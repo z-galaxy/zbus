@@ -130,11 +130,6 @@ zbus's integration tests include a reference runtime: a single-threaded one buil
 starting a thread of its own. The build it runs in needs no extra feature for zbus's locks,
 which build on `event-listener` regardless of which runtime feature is chosen.
 
-The blocking API needs one thing of such a runtime: its loop has to run on a thread other than
-the one calling into `zbus::blocking`. A blocking call made from the thread the loop itself runs
-on deadlocks, because the connection it waits on only makes progress while that loop runs — which
-it cannot do until the call it is blocked in returns.
-
 ### Bringing your own socket
 
 Besides an address, a connection can be built directly over a socket you already have.

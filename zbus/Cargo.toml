@@ -15,7 +15,6 @@ readme = "README.md"
 [features]
 default = [
     "builtin-runtime",
-    "blocking-api",
     "proxy",
     "service",
     "object-manager",
@@ -67,8 +66,6 @@ tokio = ["comms", "dep:tokio"]
 # `tokio`'s own `tracing` feature is not enabled either.
 tracing = ["dep:tracing", "tokio?/tracing"]
 vsock = ["comms", "dep:vsock"]
-# Enable blocking API (default).
-blocking-api = ["comms"]
 # The client-side (proxy) API (default).
 proxy = ["comms", "zbus_macros/proxy"]
 # The service-side (object server) API (default).
@@ -185,7 +182,6 @@ polling.workspace = true
 # because some features (such as vsock) are target-specific
 features = [
     "builtin-runtime",
-    "blocking-api",
     "comms",
     "arrayvec",
     "camino",
@@ -233,7 +229,7 @@ required-features = ["p2p", "service"]
 [[bench]]
 name = "runtime"
 harness = false
-required-features = ["p2p", "service", "blocking-api"]
+required-features = ["p2p", "service"]
 
 [[bench]]
 name = "names"
@@ -246,7 +242,7 @@ harness = false
 [[example]]
 name = "screen-brightness"
 path = "examples/screen-brightness.rs"
-required-features = ["blocking-api"]
+required-features = ["proxy"]
 
 [[example]]
 name = "watch-systemd-jobs"

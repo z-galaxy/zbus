@@ -6,8 +6,6 @@ mod issue_1015;
 mod issue_104;
 #[cfg(feature = "proxy")]
 mod issue_121;
-#[cfg(feature = "blocking-api")]
-mod issue_122;
 mod issue_1478;
 #[cfg(all(feature = "proxy", feature = "service"))]
 mod issue_173;

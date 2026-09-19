@@ -12,10 +12,7 @@ use zbus::interface;
 
 struct ServiceOnly;
 
-#[interface(
-    name = "org.freedesktop.ServiceOnlyFixture",
-    proxy(gen_blocking = false)
-)]
+#[interface(name = "org.freedesktop.ServiceOnlyFixture", proxy)]
 impl ServiceOnly {
     fn some_method(&self) -> String {
         "some".to_string()

@@ -5,7 +5,6 @@ members = [
     "zbus_macros",
     "zbus_xml",
     "zbus_xmlgen",
-    "test_fixtures/blocking_api",
     "test_fixtures/geoclue_client",
     "test_fixtures/geoclue_service",
     "test_fixtures/renamed_zbus",

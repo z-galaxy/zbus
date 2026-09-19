@@ -39,11 +39,7 @@ fn issue_813() {
             }
         }
     }
-    #[zbus::proxy(
-        gen_blocking = false,
-        default_path = "/org/zbus/Issue813",
-        interface = "org.zbus.Issue813"
-    )]
+    #[zbus::proxy(default_path = "/org/zbus/Issue813", interface = "org.zbus.Issue813")]
     trait Issue813 {
         fn pass_fd(&self, fd: Fd<'_>) -> zbus::Result<()>;
     }

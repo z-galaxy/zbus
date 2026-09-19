@@ -9,11 +9,7 @@ use std::{
 
 use clap::Parser;
 use snakecase::ascii::to_snakecase;
-use zbus::{
-    ObjectPath,
-    blocking::{Connection, connection, fdo::IntrospectableProxy},
-    names::BusName,
-};
+use zbus::{Connection, ObjectPath, connection, fdo::IntrospectableProxy, names::BusName};
 use zbus_xml::{Interface, Node, Warning};
 
 use zbus_xmlgen::CodeGenerator;
@@ -33,17 +29,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         cli::Command::System {
             service,
             object_path,
-        } => DBusInfo::new(Connection::system()?, service, object_path)?,
+        } => DBusInfo::new(zbus::block_on(Connection::system())?, service, object_path)?,
         cli::Command::Session {
             service,
             object_path,
-        } => DBusInfo::new(Connection::session()?, service, object_path)?,
+        } => DBusInfo::new(zbus::block_on(Connection::session())?, service, object_path)?,
         cli::Command::Address {
             address,
             service,
             object_path,
         } => DBusInfo::new(
-            connection::Builder::address(&*address).build()?,
+            zbus::block_on(connection::Builder::address(&*address).build())?,
             service,
             object_path,
         )?,
@@ -144,12 +140,16 @@ impl DBusInfo<'_> {
 
         let input_src = format!("Interface '{path}' from service '{service}' on system bus",);
 
-        let xml = IntrospectableProxy::builder(&connection)
-            .destination(service.clone())
-            .path(path.clone())
-            .build()
-            .unwrap()
-            .introspect()?;
+        let xml = zbus::block_on(async {
+            IntrospectableProxy::builder(&connection)
+                .destination(service.clone())
+                .path(path.clone())
+                .build()
+                .await
+                .unwrap()
+                .introspect()
+                .await
+        })?;
 
         let (node, warnings) = Node::from_reader_with_warnings(xml.as_bytes())?;
         report_warnings(&warnings);

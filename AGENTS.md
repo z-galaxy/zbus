@@ -85,8 +85,8 @@ GVariant is not supported; it lives in the separate zgvariant crate.
 
 ### Key Design Patterns
 
-**Async-first with Blocking Wrappers**: 
-- Primary API is async, blocking variants in `zbus::blocking`
+**Async-first**:
+- The API is async; a program with no runtime of its own drives it with `zbus::block_on`
 - Runtime agnostic but with special tokio integration
 
 **Type Safety**:

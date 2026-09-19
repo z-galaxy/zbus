@@ -30,7 +30,7 @@ path = "src/main.rs"
 required-features = ["cli"]
 
 [dependencies]
-zbus = { path = "../zbus", features = ["blocking-api"], version = "6.0.0" }
+zbus = { path = "../zbus", version = "6.0.0" }
 zbus_xml = { path = "../zbus_xml", version = "6.0.0" }
 
 snakecase.workspace = true

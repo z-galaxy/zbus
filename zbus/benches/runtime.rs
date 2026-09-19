@@ -1,9 +1,8 @@
 //! What a connection costs on the runtime it is built on: its setup and teardown, a method
 //! call's round trip — from the thread inside `block_on` and from behind a helper thread — a
-//! large body, a signal, the runtime's task spawn, its blocking hook, and the blocking API's own
-//! `block_on`. Every benchmark runs over a unix socket pair with a p2p handshake, so nothing
-//! here depends on a bus and everything goes through the runtime's readiness path, which an
-//! in-process channel would bypass.
+//! large body, a signal, the runtime's task spawn and its blocking hook. Every benchmark runs
+//! over a unix socket pair with a p2p handshake, so nothing here depends on a bus and everything
+//! goes through the runtime's readiness path, which an in-process channel would bypass.
 
 #[cfg(unix)]
 mod unix {
@@ -130,20 +129,6 @@ mod unix {
                 },
                 BatchSize::PerIteration,
             );
-        });
-        group.finish();
-
-        let (_blocking_server, blocking_client) = zbus::block_on(pair());
-        let blocking_client = zbus::blocking::Connection::from(blocking_client);
-        let mut group = c.benchmark_group("blocking-api");
-        group.bench_function("roundtrip", |b| {
-            b.iter(|| {
-                black_box(
-                    blocking_client
-                        .call_method(None::<()>, PATH, Some(INTERFACE), "Ping", &1u32)
-                        .unwrap(),
-                )
-            });
         });
         group.finish();
     }

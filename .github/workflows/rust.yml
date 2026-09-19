@@ -36,7 +36,7 @@ jobs:
           cargo --locked check -p zbus --no-default-features --target x86_64-unknown-netbsd
           cargo --locked check -p zbus --no-default-features --target aarch64-linux-android
           # The external-runtime-only build: no builtin-runtime, no tokio.
-          EXT=blocking-api,proxy,service,object-manager,unixexec,ibus,tracing,p2p
+          EXT=proxy,service,object-manager,unixexec,ibus,tracing,p2p
           cargo --locked check -p zbus --no-default-features --features $EXT
           cargo --locked check -p zbus --no-default-features --features $EXT \
             --target x86_64-pc-windows-gnu
@@ -101,11 +101,11 @@ jobs:
           # The proxy and service API can be disabled independently. `--all-targets` covers the
           # tests, examples and benchmarks, whose `required-features` must match what they use.
           cargo --locked clippy -p zbus --no-default-features --all-targets \
-            --features builtin-runtime,blocking-api,p2p
+            --features builtin-runtime,p2p
           cargo --locked clippy -p zbus --no-default-features --all-targets \
-            --features builtin-runtime,blocking-api,p2p,proxy
+            --features builtin-runtime,p2p,proxy
           cargo --locked clippy -p zbus --no-default-features --all-targets \
-            --features builtin-runtime,blocking-api,p2p,service
+            --features builtin-runtime,p2p,service
           cargo --locked clippy -p zbus --no-default-features --all-targets \
             --features tokio,p2p,proxy
           cargo --locked clippy -p zbus --no-default-features --all-targets \
@@ -117,14 +117,11 @@ jobs:
           cargo --locked clippy -p zbus --no-default-features --all-targets \
             --features proxy,service,ibus
           # The external-runtime-only build: no builtin-runtime, no tokio.
-          EXT=blocking-api,proxy,service,object-manager,unixexec,ibus,tracing,p2p
+          EXT=proxy,service,object-manager,unixexec,ibus,tracing,p2p
           cargo --locked clippy -p zbus --no-default-features --all-targets --features $EXT
-          # The service-only and blocking-API fixtures have to be built on their own: in a
-          # workspace-wide build, the features of their `zbus` dependency are unified with those of
-          # the other members.
+          # The service-only fixture has to be built on its own: in a workspace-wide build, the
+          # features of its `zbus` dependency are unified with those of the other members.
           cargo --locked clippy -p service_only_fixture
-          cargo --locked clippy -p blocking_api_fixture
-          cargo --locked clippy -p blocking_api_fixture --features target-blocking
           cargo --locked clippy -p geoclue_service_fixture -p geoclue_client_fixture
           cargo --locked clippy -p geoclue_service_fixture -p geoclue_client_fixture \
             --no-default-features --features tokio
@@ -194,19 +191,14 @@ jobs:
       - name: Test the doc examples with the proxy or service API disabled
         if: matrix.suite == 'builtin-runtime'
         run: |
-          # With and without the blocking API.
+          # One run per side of the API: the examples of the other side are left out of the
+          # crate documentation when its feature is off.
           dbus-run-session --config-file /tmp/dbus-session.conf -- \
             cargo --locked test --release --verbose --doc -p zbus --no-default-features \
               --features builtin-runtime,proxy
           dbus-run-session --config-file /tmp/dbus-session.conf -- \
             cargo --locked test --release --verbose --doc -p zbus --no-default-features \
               --features builtin-runtime,service
-          dbus-run-session --config-file /tmp/dbus-session.conf -- \
-            cargo --locked test --release --verbose --doc -p zbus --no-default-features \
-              --features builtin-runtime,blocking-api,proxy
-          dbus-run-session --config-file /tmp/dbus-session.conf -- \
-            cargo --locked test --release --verbose --doc -p zbus --no-default-features \
-              --features builtin-runtime,blocking-api,service
       - name: Test tokio support
         if: matrix.suite == 'tokio'
         run: |
@@ -231,7 +223,7 @@ jobs:
       - name: Test the external-runtime-only build
         if: matrix.suite == 'external'
         run: |
-          FEATURES=blocking-api,proxy,service,object-manager,unixexec,ibus,tracing,p2p
+          FEATURES=proxy,service,object-manager,unixexec,ibus,tracing,p2p
           # `--tests` over `--lib`: the integration test targets have to build in this feature
           # set too, not only the library's own unit tests. `--doc` is left out: the rendered
           # examples connect to a bus, which a build with neither backend has no runtime for.
@@ -374,10 +366,6 @@ jobs:
         run: |
           cargo --locked doc --no-default-features --features builtin-runtime,proxy -p zbus
           cargo --locked doc --no-default-features --features builtin-runtime,service -p zbus
-          cargo --locked doc --no-default-features \
-            --features builtin-runtime,blocking-api,proxy -p zbus
-          cargo --locked doc --no-default-features \
-            --features builtin-runtime,blocking-api,service -p zbus
       - name: Check zbus_xml documentation build
         run: cargo --locked doc --all-features -p zbus_xml
 
