@@ -1379,7 +1379,7 @@ enum Either<L, R> {
 #[cfg(all(
     test,
     feature = "service",
-    any(feature = "async-io", feature = "tokio")
+    any(feature = "builtin-runtime", feature = "tokio")
 ))]
 mod tests {
     use super::*;
@@ -1513,10 +1513,10 @@ mod tests {
             let server_fut = async move {
                 use std::time::Duration;
 
-                #[cfg(feature = "async-io")]
+                #[cfg(feature = "builtin-runtime")]
                 use async_io::Timer;
 
-                #[cfg(all(feature = "tokio", not(feature = "async-io")))]
+                #[cfg(all(feature = "tokio", not(feature = "builtin-runtime")))]
                 use tokio::time::sleep;
 
                 let iface_ref = conn
@@ -1533,10 +1533,10 @@ mod tests {
                             .unwrap();
                     }
 
-                    #[cfg(feature = "async-io")]
+                    #[cfg(feature = "builtin-runtime")]
                     Timer::after(Duration::from_millis(5)).await;
 
-                    #[cfg(all(feature = "tokio", not(feature = "async-io")))]
+                    #[cfg(all(feature = "tokio", not(feature = "builtin-runtime")))]
                     sleep(Duration::from_millis(5)).await;
                 }
             };

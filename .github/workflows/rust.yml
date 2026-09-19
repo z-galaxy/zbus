@@ -35,7 +35,7 @@ jobs:
           cargo --locked check -p zbus --no-default-features --target x86_64-unknown-freebsd
           cargo --locked check -p zbus --no-default-features --target x86_64-unknown-netbsd
           cargo --locked check -p zbus --no-default-features --target aarch64-linux-android
-          # The external-runtime-only build: no async-io, no tokio.
+          # The external-runtime-only build: no builtin-runtime, no tokio.
           EXT=blocking-api,proxy,service,object-manager,unixexec,ibus,tracing,p2p
           cargo --locked check -p zbus --no-default-features --features $EXT
           cargo --locked check -p zbus --no-default-features --features $EXT \
@@ -101,22 +101,22 @@ jobs:
           # The proxy and service API can be disabled independently. `--all-targets` covers the
           # tests, examples and benchmarks, whose `required-features` must match what they use.
           cargo --locked clippy -p zbus --no-default-features --all-targets \
-            --features async-io,blocking-api,p2p
+            --features builtin-runtime,blocking-api,p2p
           cargo --locked clippy -p zbus --no-default-features --all-targets \
-            --features async-io,blocking-api,p2p,proxy
+            --features builtin-runtime,blocking-api,p2p,proxy
           cargo --locked clippy -p zbus --no-default-features --all-targets \
-            --features async-io,blocking-api,p2p,service
+            --features builtin-runtime,blocking-api,p2p,service
           cargo --locked clippy -p zbus --no-default-features --all-targets \
             --features tokio,p2p,proxy
           cargo --locked clippy -p zbus --no-default-features --all-targets \
             --features tokio,p2p,service
           cargo --locked clippy -p zbus --no-default-features --all-targets \
-            --features async-io,proxy,service,unixexec
+            --features builtin-runtime,proxy,service,unixexec
           cargo --locked clippy -p zbus --no-default-features --all-targets \
-            --features async-io,proxy,service,ibus
+            --features builtin-runtime,proxy,service,ibus
           cargo --locked clippy -p zbus --no-default-features --all-targets \
             --features proxy,service,ibus
-          # The external-runtime-only build: no async-io, no tokio.
+          # The external-runtime-only build: no builtin-runtime, no tokio.
           EXT=blocking-api,proxy,service,object-manager,unixexec,ibus,tracing,p2p
           cargo --locked clippy -p zbus --no-default-features --all-targets --features $EXT
           # The service-only and blocking-API fixtures have to be built on their own: in a
@@ -140,9 +140,9 @@ jobs:
         suite:
           - all-features
           - default
-          - async-io
+          - builtin-runtime
           - tokio
-          - tokio-async-io
+          - tokio-builtin-runtime
           - external
           - wire
     env:
@@ -182,43 +182,47 @@ jobs:
         run: |
           dbus-run-session --config-file /tmp/dbus-session-abstract.conf -- \
             cargo --locked test --release --verbose -- basic_connection
-      - name: Test the full zbus suite with async-io but without Tokio
-        if: matrix.suite == 'async-io'
+          # See CI/forbidden-deps.sh for what this guards against and why.
+          CI/forbidden-deps.sh default
+      - name: Test the full zbus suite with the builtin runtime but without Tokio
+        if: matrix.suite == 'builtin-runtime'
         run: |
           dbus-run-session --config-file /tmp/dbus-session.conf -- \
             cargo --locked test --release --verbose -p zbus \
               --features uuid,url,time,chrono,option-as-array,vsock,bus-impl \
               -- --skip fdpass_systemd
       - name: Test the doc examples with the proxy or service API disabled
-        if: matrix.suite == 'async-io'
+        if: matrix.suite == 'builtin-runtime'
         run: |
           # With and without the blocking API.
           dbus-run-session --config-file /tmp/dbus-session.conf -- \
             cargo --locked test --release --verbose --doc -p zbus --no-default-features \
-              --features async-io,proxy
+              --features builtin-runtime,proxy
           dbus-run-session --config-file /tmp/dbus-session.conf -- \
             cargo --locked test --release --verbose --doc -p zbus --no-default-features \
-              --features async-io,service
+              --features builtin-runtime,service
           dbus-run-session --config-file /tmp/dbus-session.conf -- \
             cargo --locked test --release --verbose --doc -p zbus --no-default-features \
-              --features async-io,blocking-api,proxy
+              --features builtin-runtime,blocking-api,proxy
           dbus-run-session --config-file /tmp/dbus-session.conf -- \
             cargo --locked test --release --verbose --doc -p zbus --no-default-features \
-              --features async-io,blocking-api,service
+              --features builtin-runtime,blocking-api,service
       - name: Test tokio support
         if: matrix.suite == 'tokio'
         run: |
           dbus-run-session --config-file /tmp/dbus-session.conf -- \
             cargo --locked test --release --verbose --tests -p zbus --no-default-features \
               --features tokio,proxy,service -- --skip fdpass_systemd
-          # The doc examples have to build without the default async-io runtime, driven by tokio
+          # The doc examples have to build without the default builtin-runtime, driven by tokio
           # instead. `-p zbus` is load-bearing: a workspace-wide `--no-default-features` is undone
           # by zbus_xmlgen's default-featured zbus dependency.
           dbus-run-session --config-file /tmp/dbus-session.conf -- \
             cargo --locked test --release --verbose --doc -p zbus --no-default-features \
               --features tokio,service
-      - name: Test tokio and async-io enabled together
-        if: matrix.suite == 'tokio-async-io'
+          # See CI/forbidden-deps.sh for what this guards against and why.
+          CI/forbidden-deps.sh tokio-only --no-default-features --features tokio,proxy,service
+      - name: Test tokio and the builtin runtime enabled together
+        if: matrix.suite == 'tokio-builtin-runtime'
         run: |
           # The features are additive, so the backend is then chosen at run time.
           dbus-run-session --config-file /tmp/dbus-session.conf -- \
@@ -234,22 +238,8 @@ jobs:
           dbus-run-session --config-file /tmp/dbus-session.conf -- \
             cargo --locked test --release --verbose -p zbus --no-default-features \
               --features $FEATURES --tests
-          # Nothing behind the async-io feature may reach an external-runtime user. zbus's own
-          # async locks build on `event-listener`, which this feature set already pulls in for
-          # its own reasons, so the check below needs no lock-crate exception. The tree is
-          # written out before it is searched, so that a `cargo tree` failure fails the job
-          # instead of handing grep an empty stream. A `cargo tree` line is a prefix of
-          # box-drawing characters, the crate name and its version, so matching from the start of
-          # the line up to the version is what keeps a crate whose name merely contains one of
-          # these from counting.
-          FORBIDDEN="async-io|async-executor|async-task|async-process|blocking"
-          FORBIDDEN="$FORBIDDEN|polling|async-channel|async-signal|piper"
-          cargo --locked tree -e normal -p zbus --no-default-features --features $FEATURES \
-            > /tmp/external-tree.txt
-          if grep -E "^[^a-zA-Z0-9]*($FORBIDDEN) v" /tmp/external-tree.txt; then
-            echo "a crate owned by the async-io feature is in the external-only graph" >&2
-            exit 1
-          fi
+          # See CI/forbidden-deps.sh for what this guards against and why.
+          CI/forbidden-deps.sh external-only --no-default-features --features $FEATURES
       - name: Test the wire-format-only build
         if: matrix.suite == 'wire'
         run: |
@@ -268,7 +258,8 @@ jobs:
           # The same graph with the D-Bus API on: the message header carries a body signature
           # that must be rejected too.
           dbus-run-session --config-file /tmp/dbus-session.conf -- \
-            cargo --locked test -p zbus --no-default-features --features zbus_utils/gvariant,async-io
+            cargo --locked test -p zbus --no-default-features \
+              --features zbus_utils/gvariant,builtin-runtime
 
   windows_test:
     runs-on: windows-latest
@@ -337,7 +328,7 @@ jobs:
           Start-Process C:\vcpkg\installed\x64-windows\tools\dbus\dbus-daemon.exe '--config-file=CI/win32-session.conf --address=autolaunch:'
           # The tokio-only build. `-p zbus` is load-bearing: a workspace-wide
           # `--no-default-features` is undone by zbus_xmlgen's default-featured zbus dependency.
-          # `--tests` because the doc examples assume the async-io runtime.
+          # `--tests` because the doc examples assume the builtin runtime.
           cargo --locked test -p zbus --no-default-features --features tokio,proxy,service --tests
           # The wire-format-only build.
           cargo --locked test -p zbus --no-default-features
@@ -381,10 +372,12 @@ jobs:
         run: cargo --locked doc --no-default-features -p zbus
       - name: Check documentation build with the proxy or service API disabled
         run: |
-          cargo --locked doc --no-default-features --features async-io,proxy -p zbus
-          cargo --locked doc --no-default-features --features async-io,service -p zbus
-          cargo --locked doc --no-default-features --features async-io,blocking-api,proxy -p zbus
-          cargo --locked doc --no-default-features --features async-io,blocking-api,service -p zbus
+          cargo --locked doc --no-default-features --features builtin-runtime,proxy -p zbus
+          cargo --locked doc --no-default-features --features builtin-runtime,service -p zbus
+          cargo --locked doc --no-default-features \
+            --features builtin-runtime,blocking-api,proxy -p zbus
+          cargo --locked doc --no-default-features \
+            --features builtin-runtime,blocking-api,service -p zbus
       - name: Check zbus_xml documentation build
         run: cargo --locked doc --all-features -p zbus_xml
 

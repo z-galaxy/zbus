@@ -1464,23 +1464,32 @@ enum NameStatus {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(all(feature = "service", any(feature = "async-io", feature = "tokio")))]
+    #[cfg(all(
+        feature = "service",
+        any(feature = "builtin-runtime", feature = "tokio")
+    ))]
     use super::*;
     #[cfg(all(
         feature = "proxy",
         feature = "service",
-        any(feature = "async-io", feature = "tokio")
+        any(feature = "builtin-runtime", feature = "tokio")
     ))]
     use crate::fdo::DBusProxy;
     use crate::runtime::io::tests::RefusedPort;
-    #[cfg(all(feature = "service", any(feature = "async-io", feature = "tokio")))]
+    #[cfg(all(
+        feature = "service",
+        any(feature = "builtin-runtime", feature = "tokio")
+    ))]
     use ntest::timeout;
-    #[cfg(all(feature = "service", any(feature = "async-io", feature = "tokio")))]
+    #[cfg(all(
+        feature = "service",
+        any(feature = "builtin-runtime", feature = "tokio")
+    ))]
     use std::{pin::pin, time::Duration};
     #[cfg(all(
         feature = "proxy",
         feature = "service",
-        any(feature = "async-io", feature = "tokio")
+        any(feature = "builtin-runtime", feature = "tokio")
     ))]
     use test_log::test;
 
@@ -1589,7 +1598,7 @@ mod tests {
     #[cfg(all(
         feature = "proxy",
         feature = "service",
-        any(feature = "async-io", feature = "tokio")
+        any(feature = "builtin-runtime", feature = "tokio")
     ))]
     #[test]
     #[timeout(15000)]
@@ -1602,7 +1611,7 @@ mod tests {
     #[cfg(all(
         feature = "proxy",
         feature = "service",
-        any(feature = "async-io", feature = "tokio")
+        any(feature = "builtin-runtime", feature = "tokio")
     ))]
     async fn test_disconnect_on_drop() {
         #[derive(Default)]
@@ -1637,7 +1646,10 @@ mod tests {
         assert!(!name_has_owner);
     }
 
-    #[cfg(all(feature = "service", any(feature = "async-io", feature = "tokio")))]
+    #[cfg(all(
+        feature = "service",
+        any(feature = "builtin-runtime", feature = "tokio")
+    ))]
     #[tokio::test(start_paused = true)]
     #[timeout(15000)]
     async fn test_graceful_shutdown() {
@@ -1732,7 +1744,7 @@ mod tests {
 
 // Every pipe here is a real socket, which only a backend can create.
 #[cfg(feature = "p2p")]
-#[cfg(all(test, any(feature = "async-io", feature = "tokio")))]
+#[cfg(all(test, any(feature = "builtin-runtime", feature = "tokio")))]
 mod p2p_tests {
     use crate::wire::{Endian, NATIVE_ENDIAN};
     use event_listener::Event;
@@ -1741,7 +1753,7 @@ mod p2p_tests {
     use test_log::test;
 
     use super::{Builder, Connection, socket};
-    #[cfg(all(unix, feature = "tokio", feature = "async-io"))]
+    #[cfg(all(unix, feature = "tokio", feature = "builtin-runtime"))]
     use crate::runtime::Runtime;
     use crate::{Guid, Message, MessageStream, Result, conn::AuthMechanism};
 
@@ -1898,7 +1910,7 @@ mod p2p_tests {
     // `crate::utils::block_on` would establish one on this build and so send the builder to the
     // Tokio arm instead. The guard on the spawned task is that runtime's own timer, so the task
     // and the timer are both under test here.
-    #[cfg(all(unix, feature = "tokio", feature = "async-io"))]
+    #[cfg(all(unix, feature = "tokio", feature = "builtin-runtime"))]
     #[test]
     #[timeout(15000)]
     fn unix_p2p_builtin_runtime_backend() {

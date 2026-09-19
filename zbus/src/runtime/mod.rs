@@ -19,9 +19,9 @@ pub use io_source::{Interest, IoSource};
 mod async_drop;
 pub use async_drop::AsyncDrop;
 mod blocking_thread;
-#[cfg(feature = "async-io")]
+#[cfg(feature = "builtin-runtime")]
 pub(crate) mod builtin;
-#[cfg(feature = "async-io")]
+#[cfg(feature = "builtin-runtime")]
 pub(crate) use builtin::Builtin;
 mod erased;
 pub(crate) mod locks;
@@ -48,7 +48,7 @@ use crate::Result;
 /// The runtime a connection runs on, chosen once when it is built.
 #[derive(Clone, Debug)]
 pub(crate) enum Runtime {
-    #[cfg(feature = "async-io")]
+    #[cfg(feature = "builtin-runtime")]
     Builtin(Builtin),
     #[cfg(feature = "tokio")]
     Tokio(Tokio),
@@ -73,11 +73,11 @@ impl Runtime {
         if let Some(runtime) = Tokio::current() {
             return Ok(Self::Tokio(runtime));
         }
-        #[cfg(feature = "async-io")]
+        #[cfg(feature = "builtin-runtime")]
         {
             Ok(Self::Builtin(Builtin::new()?))
         }
-        #[cfg(not(feature = "async-io"))]
+        #[cfg(not(feature = "builtin-runtime"))]
         {
             Err(crate::Error::Unsupported)
         }
@@ -100,7 +100,7 @@ impl Runtime {
     /// returns, so a socket is only ever driven by the runtime the connection was built with.
     pub(crate) fn register_io_source(&self, source: IoSource) -> std::io::Result<io::Registration> {
         match self {
-            #[cfg(feature = "async-io")]
+            #[cfg(feature = "builtin-runtime")]
             Self::Builtin(runtime) => {
                 traits::Runtime::register_io_source(runtime, source).map(io::Registration::Builtin)
             }
@@ -124,7 +124,7 @@ impl Runtime {
         T: Send + 'static,
     {
         match self {
-            #[cfg(feature = "async-io")]
+            #[cfg(feature = "builtin-runtime")]
             Self::Builtin(runtime) => Task::Builtin(traits::Runtime::spawn(runtime, name, future)),
             #[cfg(feature = "tokio")]
             Self::Tokio(runtime) => Task::Tokio(traits::Runtime::spawn(runtime, name, future)),
@@ -147,7 +147,7 @@ impl Runtime {
         T: Send + 'static,
     {
         match self {
-            #[cfg(feature = "async-io")]
+            #[cfg(feature = "builtin-runtime")]
             Self::Builtin(runtime) => traits::Runtime::spawn_blocking(runtime, work),
             #[cfg(feature = "tokio")]
             Self::Tokio(runtime) => traits::Runtime::spawn_blocking(runtime, work),

@@ -313,7 +313,7 @@ impl From<crate::Connection> for Connection {
 }
 
 #[cfg(feature = "p2p")]
-#[cfg(all(test, unix, any(feature = "async-io", feature = "tokio")))]
+#[cfg(all(test, unix, any(feature = "builtin-runtime", feature = "tokio")))]
 mod tests {
     use event_listener::Listener;
     use ntest::timeout;

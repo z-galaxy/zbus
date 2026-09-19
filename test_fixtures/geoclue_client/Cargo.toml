@@ -9,7 +9,7 @@ description = "Size fixture: the book's GeoClue2 client enabling only the zbus f
 
 [features]
 default = ["builtin"]
-builtin = ["zbus/async-io"]
+builtin = ["zbus/builtin-runtime"]
 tokio = ["zbus/tokio", "dep:tokio"]
 
 [dependencies]

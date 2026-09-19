@@ -30,7 +30,7 @@ impl<T, E> ResultAdapter for Result<T, E> {
 
 /// The caller's future and, between two polls of it, the runtime zbus brings along: the tasks,
 /// sockets and timers of every connection built on it run on this very thread.
-#[cfg(all(feature = "async-io", not(feature = "tokio")))]
+#[cfg(all(feature = "builtin-runtime", not(feature = "tokio")))]
 #[doc(hidden)]
 pub fn block_on<F: std::future::Future>(future: F) -> F::Output {
     crate::runtime::builtin::block_on(future)
@@ -38,7 +38,7 @@ pub fn block_on<F: std::future::Future>(future: F) -> F::Output {
 
 /// With neither backend a connection's tasks run on its runtime, so the blocking facade only has
 /// to poll the caller's future.
-#[cfg(not(any(feature = "tokio", feature = "async-io")))]
+#[cfg(not(any(feature = "tokio", feature = "builtin-runtime")))]
 #[doc(hidden)]
 pub fn block_on<F: std::future::Future>(future: F) -> F::Output {
     futures_lite::future::block_on(future)

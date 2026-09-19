@@ -14,11 +14,12 @@ target-blocking = ["renamed_zbus/blocking-api"]
 [dependencies]
 # Renamed on purpose: the blocking gate is emitted through the `crate` path, so the default
 # `::zbus` name would not catch a path that fails to forward.
-# `async-io` rather than `tokio` because the split being tested is `blocking-api`, and the runtime
-# is beside the point: the workspace-wide Clippy runs unify this member's features with the other
-# members', so asking for `tokio` there would turn it on for a build that otherwise never has it.
+# `builtin-runtime` rather than `tokio` because the split being tested is `blocking-api`, and the
+# runtime is beside the point: the workspace-wide Clippy runs unify this member's features with
+# the other members', so asking for `tokio` there would turn it on for a build that otherwise
+# never has it.
 renamed_zbus = { package = "zbus", path = "../../zbus", default-features = false, features = [
-    "async-io",
+    "builtin-runtime",
     "proxy",
 ] }
 
@@ -27,7 +28,7 @@ renamed_zbus = { package = "zbus", path = "../../zbus", default-features = false
 # the target ones, so this enables `blocking-api` in the (host) zbus while the (target) zbus above
 # leaves it off. The macros must not act on their own features.
 renamed_zbus = { package = "zbus", path = "../../zbus", default-features = false, features = [
-    "async-io",
+    "builtin-runtime",
     "proxy",
     "blocking-api",
 ] }

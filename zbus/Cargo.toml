@@ -14,7 +14,7 @@ readme = "README.md"
 
 [features]
 default = [
-    "async-io",
+    "builtin-runtime",
     "blocking-api",
     "proxy",
     "service",
@@ -59,13 +59,9 @@ comms = [
     # needed here. `dep:uuid` rather than `uuid` keeps the `Uuid` wire impls opt-in, as today.
     "dep:uuid",
 ]
-async-io = [
-    "comms",
-    "dep:async-io",
-    "async-executor",
-    "async-task",
-    "blocking",
-]
+# The runtime zbus ships: readiness, timers and tasks on one thread per connection (default).
+# `tokio` adds the Tokio backend, which a connection built inside a Tokio runtime prefers.
+builtin-runtime = ["comms"]
 tokio = ["comms", "dep:tokio"]
 # Logging through `tracing` (default). With this off, zbus emits no log events or spans, and
 # `tokio`'s own `tracing` feature is not enabled either.
@@ -119,10 +115,6 @@ heapless = { workspace = true, optional = true }
 serde_bytes = { workspace = true, optional = true }
 time = { workspace = true, optional = true }
 url = { workspace = true, optional = true }
-async-io = { workspace = true, optional = true }
-async-executor = { workspace = true, optional = true }
-blocking = { workspace = true, optional = true }
-async-task = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = [
     "rt",
     "rt-multi-thread",
@@ -185,7 +177,6 @@ static_assertions.workspace = true
 async-io.workspace = true
 async-executor.workspace = true
 async-task.workspace = true
-blocking.workspace = true
 polling.workspace = true
 
 [package.metadata.docs.rs]
@@ -193,7 +184,7 @@ polling.workspace = true
 # all-features = true
 # because some features (such as vsock) are target-specific
 features = [
-    "async-io",
+    "builtin-runtime",
     "blocking-api",
     "comms",
     "arrayvec",
@@ -260,4 +251,4 @@ required-features = ["blocking-api"]
 [[example]]
 name = "watch-systemd-jobs"
 path = "examples/watch-systemd-jobs.rs"
-required-features = ["async-io", "proxy"]
+required-features = ["builtin-runtime", "proxy"]

@@ -845,7 +845,7 @@ mod tests {
     use test_log::test;
 
     use super::{Address, Builder};
-    #[cfg(any(feature = "async-io", feature = "tokio"))]
+    #[cfg(any(feature = "builtin-runtime", feature = "tokio"))]
     use crate::Error;
     use crate::{names::WellKnownName, utils::block_on};
 
@@ -863,7 +863,7 @@ mod tests {
     }
 
     // The build gets as far as connecting, which needs a backend.
-    #[cfg(any(feature = "async-io", feature = "tokio"))]
+    #[cfg(any(feature = "builtin-runtime", feature = "tokio"))]
     #[test]
     fn typed_values() {
         // No `Result` anywhere before `build`.

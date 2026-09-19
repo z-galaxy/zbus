@@ -13,7 +13,7 @@ use super::erased::ExternalTask;
 /// [`TaskHandle::detach`](super::traits::TaskHandle::detach) lets it run on.
 #[derive(Debug)]
 pub(crate) enum Task<T> {
-    #[cfg(feature = "async-io")]
+    #[cfg(feature = "builtin-runtime")]
     Builtin(super::builtin::Task<T>),
     #[cfg(feature = "tokio")]
     Tokio(super::tokio_rt::TokioTask<T>),
@@ -29,7 +29,7 @@ where
     /// Detaches the task to let it keep running in the background.
     pub(crate) fn detach(self) {
         match self {
-            #[cfg(feature = "async-io")]
+            #[cfg(feature = "builtin-runtime")]
             Self::Builtin(task) => super::traits::TaskHandle::detach(task),
             #[cfg(feature = "tokio")]
             Self::Tokio(task) => super::traits::TaskHandle::detach(task),
@@ -46,7 +46,7 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match self.get_mut() {
-            #[cfg(feature = "async-io")]
+            #[cfg(feature = "builtin-runtime")]
             Self::Builtin(task) => Pin::new(task).poll(cx),
             #[cfg(feature = "tokio")]
             Self::Tokio(task) => Pin::new(task).poll(cx),

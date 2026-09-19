@@ -507,7 +507,7 @@ where
 }
 
 // The test here talks to the session bus, which needs a backend to connect to.
-#[cfg(all(test, any(feature = "async-io", feature = "tokio")))]
+#[cfg(all(test, any(feature = "builtin-runtime", feature = "tokio")))]
 mod tests {
     use super::*;
     use crate::blocking;

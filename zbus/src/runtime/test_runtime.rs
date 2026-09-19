@@ -61,7 +61,7 @@ where
     Body: Fn(Runtime) -> Fut,
     Fut: Future<Output = ()>,
 {
-    #[cfg(feature = "async-io")]
+    #[cfg(feature = "builtin-runtime")]
     futures_lite::future::block_on(body(Runtime::Builtin(
         super::Builtin::new().expect("a runtime of zbus's own"),
     )));
