@@ -167,7 +167,7 @@ use futures_util::stream::StreamExt;
 use zbus::{OwnedObjectPath, proxy, Connection};
 
 # fn main() {
-#     async_io::block_on(watch_systemd_jobs()).expect("Error listening to signal");
+#     zbus::block_on(watch_systemd_jobs()).expect("Error listening to signal");
 # }
 
 #[proxy(

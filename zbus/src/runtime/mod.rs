@@ -1,10 +1,12 @@
 //! Integration with the async runtime that drives a connection.
 //!
-//! zbus does not ship a runtime of its own. A connection watches its socket, takes its timers,
-//! runs its internal tasks and hands off its blocking work on `async-io` (the default), on Tokio,
-//! or on any implementation of [`traits::Runtime`] handed to [`Builder::runtime`]. Both built-in
-//! backends are implementations of that trait, picked by the `async-io` and `tokio` features. The
-//! async locks a connection holds are not part of that trait: they are zbus's own, built on
+//! By default, a connection runs on the runtime zbus brings along (the `builtin-runtime`
+//! feature, on by default): one runtime per process, run by the thread inside
+//! [`block_on`](crate::block_on) and by a helper thread only where no thread is inside it, with
+//! no runtime dependency of its own. A connection built inside a Tokio runtime runs on it
+//! instead (the `tokio` feature). Any other runtime reaches a connection
+//! through an implementation of [`traits::Runtime`], handed to [`Builder::runtime`]. The async
+//! locks a connection holds are not part of that trait: they are zbus's own, built on
 //! `event-listener`, except on a Tokio build, where Tokio's locks stand in so that build does not
 //! carry a second lock implementation.
 //! [`AsyncDrop`] is the async counterpart of [`Drop`] that zbus's own types implement.
@@ -63,7 +65,7 @@ impl Runtime {
     /// runtime zbus brings along, when that is compiled in. This keeps the features additive:
     /// enabling `tokio` elsewhere in the dependency graph doesn't force every zbus user into a
     /// tokio runtime. Two builds have no default left and report [`Error::Unsupported`] instead,
-    /// so that a connection in them has to be given a runtime of its own: one with neither
+    /// so that a connection in them has to be given an external runtime: one with neither
     /// compiled in, and one with only `tokio` called from a thread where no Tokio runtime is
     /// current.
     ///

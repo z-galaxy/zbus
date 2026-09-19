@@ -487,16 +487,17 @@ impl<'a> Builder<'a> {
     /// Run the connection on `runtime`.
     ///
     /// The connection creates and watches its sockets, takes its timers, runs its internal
-    /// tasks and hands off its blocking work on `runtime`. zbus never drives a runtime of its
-    /// own, so the tasks the connection spawns only make progress while `runtime` runs them.
-    /// This is how an application whose event loop is neither of the two zbus can be compiled
-    /// with puts a connection on the one it has.
+    /// tasks and hands off its blocking work on `runtime`. zbus never polls `runtime` itself, so
+    /// the tasks the connection spawns only make progress while `runtime` runs them. This is how
+    /// an application whose event loop is neither of the two zbus can be compiled with puts a
+    /// connection on the one it has.
     ///
     /// Without this, the connection runs on the backend zbus is compiled with: Tokio when the
     /// `tokio` feature is on and a Tokio runtime is current on this thread, otherwise the
-    /// built-in async-io backend. Where that leaves no backend, [`Builder::build`] reports
-    /// [`Error::Unsupported`] unless a runtime is set here: in a build with neither feature, and
-    /// in a `tokio` build without `async-io` on a thread where no Tokio runtime is current.
+    /// runtime zbus brings along (the `builtin-runtime` feature). Where that leaves no backend,
+    /// [`Builder::build`] reports [`Error::Unsupported`] unless a runtime is set here: in a build
+    /// with neither feature, and in a `tokio` build without `builtin-runtime` on a thread where
+    /// no Tokio runtime is current.
     pub fn runtime(mut self, runtime: impl traits::Runtime) -> Self {
         self.runtime = Some(Runtime::from_external(runtime));
 

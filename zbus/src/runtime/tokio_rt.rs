@@ -18,8 +18,8 @@ use super::{Interest, IoSource, traits};
 /// The Tokio runtime a connection runs on.
 ///
 /// The handle is taken when the connection is built, so its tasks, timers and blocking work keep
-/// going to that runtime even where the connection is later polled from a thread that has no
-/// Tokio runtime of its own.
+/// going to that runtime even where the connection is later polled from a thread with no Tokio
+/// runtime current.
 #[derive(Clone, Debug)]
 pub(crate) struct Tokio {
     handle: Handle,

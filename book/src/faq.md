@@ -152,8 +152,8 @@ as a variant.
 ## Why do async tokio API calls from interface methods not work?
 
 Many of the tokio (and tokio-based) APIs assume the tokio runtime to be driving the async machinery,
-and by default zbus drives a connection's tasks and I/O on a thread of its own (the `async-io`
-backend), so it's not possible to use these APIs from interface methods.
+and by default zbus drives a connection's tasks and I/O on a thread of its own (the
+`builtin-runtime` backend), so it's not possible to use these APIs from interface methods.
 
 Not to worry, though! You can enable tight integration between tokio and zbus by enabling `tokio`
 feature:
@@ -161,23 +161,24 @@ feature:
 ```toml
 # Sample Cargo.toml snippet.
 [dependencies]
-# Also disable the default `async-io` feature to avoid unused dependencies.
+# Also disable the default `builtin-runtime` feature to skip compiling in the fallback backend.
 zbus = { version = "6", default-features = false, features = ["tokio"] }
 ```
 
-Disabling `async-io` is recommended but not required. With both features enabled, the backend is
-chosen once per connection, when it is built: Tokio when a Tokio runtime is current on the thread
-that builds it, `async-io` otherwise. This keeps the features additive, so an `async-io`-based
-application keeps working even when another crate in the workspace enables zbus's `tokio` feature.
+Disabling `builtin-runtime` is recommended but not required. With both features enabled, the
+backend is chosen once per connection, when it is built: Tokio when a Tokio runtime is current on
+the thread that builds it, the runtime zbus brings along otherwise. This keeps the features
+additive, so an application that relies on the built-in backend keeps working even when another
+crate in the workspace enables zbus's `tokio` feature.
 
 This per-connection selection applies to the async API. The blocking API (`zbus::blocking`) drives
 its connections through its own `block_on`, which uses tokio whenever the `tokio` feature is
 enabled, so those connections always run on tokio when that feature is on.
 
 **Note**: On Windows, a connection that ends up on Tokio cannot use a Unix domain socket, even
-when `async-io` is also compiled in; give it a TCP or `autolaunch:` address instead, or build it
-from a thread with no Tokio runtime current so it picks `async-io`. See [the corresponding tokio
-issue on GitHub][tctiog].
+when `builtin-runtime` is also compiled in; give it a TCP or `autolaunch:` address instead, or
+build it from a thread with no Tokio runtime current so it picks the built-in backend. See [the
+corresponding tokio issue on GitHub][tctiog].
 
 ## I'm experiencing hangs, what could be wrong?
 

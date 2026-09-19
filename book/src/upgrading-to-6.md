@@ -91,8 +91,8 @@ Four things to know about the features:
 * `arrayvec` was a zvariant-only feature and is available in zbus now.
 * `comms` pulls in the `uuid` crate — it parses D-Bus GUIDs — without turning on zbus's own
   `uuid` feature, so the `Uuid` wire impls stay opt-in, as they were.
-* Any D-Bus feature (`async-io`, `tokio`, `blocking-api`, `p2p`, `bus-impl`, `vsock`) enables
-  `comms`. In a workspace where one crate asks for the wire-only build
+* Any D-Bus feature (`builtin-runtime`, `tokio`, `blocking-api`, `p2p`, `bus-impl`, `vsock`)
+  enables `comms`. In a workspace where one crate asks for the wire-only build
   and another for the full one, Cargo's feature unification gives everybody the full build.
   That is a build-size question only; nothing behaves differently.
 
@@ -408,8 +408,8 @@ whichever runtime it was built with. Hand a stream of another kind over as the s
   Windows). A `tokio::net::UnixStream` becomes one with `into_std()`; an `async_io::Async<T>`
   becomes one with `into_inner()`. Tokio cannot watch a unix socket on Windows, so a Tokio
   connection there can no longer use one — through this constructor or through a `unix:` address
-  — even where the `async-io` feature is also on. Give such a connection a TCP or `autolaunch:`
-  address instead.
+  — even where the `builtin-runtime` feature is also on. Give such a connection a TCP or
+  `autolaunch:` address instead.
 - `Builder::tcp_stream` takes a `std::net::TcpStream`. A `tokio::net::TcpStream` becomes one with
   `into_std()`; an `async_io::Async<T>` becomes one with `into_inner()`.
 - `Builder::vsock_stream` takes a `vsock::VsockStream`. It serves a Tokio connection too, so the
@@ -663,9 +663,10 @@ streams only need `proxy`, as before.
 A connection used to pick its executor by cargo feature, with
 `Builder::internal_executor(false)` and `Connection::executor().tick()` as the way to drive
 zbus's tasks from another runtime. That pair is gone, together with the `Executor` and `Task`
-types. A connection now takes its readiness, its timers, its internal tasks and its blocking work
+types. A connection takes its readiness, its timers, its internal tasks and its blocking work
 from one runtime: Tokio when the `tokio` feature is on and a runtime is current, otherwise the
-built-in async-io runtime, or whatever you pass to `Builder::runtime`:
+runtime zbus brings along (the `builtin-runtime` feature, on by default), or whatever you pass
+to `Builder::runtime`:
 
 ```rust,no_run
 use zbus::{Connection, Result, connection::Builder, runtime::traits::Runtime};
@@ -674,6 +675,14 @@ async fn connect(runtime: impl Runtime) -> Result<Connection> {
     Builder::session().runtime(runtime).build().await
 }
 ```
+
+5.x's `async-io` feature has no 6.0 equivalent by that name — it's gone outright, with no
+compatibility alias. `builtin-runtime` is the default, so a plain `zbus = "6"` dependency
+carries it without asking by name; a `default-features = false` build that named `async-io`
+explicitly drops that name or renames it to `builtin-runtime`. The backend behind it changed
+too: 5.x's feature pulled in the `async-io`, `async-executor`, `async-task` and `blocking`
+crates, whereas `builtin-runtime` is zbus's own reactor and task scheduler — one runtime per
+process, driven by the thread inside `zbus::block_on` — and depends on none of them.
 
 An implementation of `zbus::runtime::traits::Runtime` supplies a readiness registration, a timer
 and task spawning; every async runtime already has all three. Every socket a connection owns goes
@@ -687,19 +696,20 @@ run while the runtime runs them. The two built-in backends are implementations o
 picked by cargo feature, so this method is for the runtime your application already has. Nothing
 changes for connections built without `runtime`.
 
-zbus's own async locks are not part of the trait: 5.x takes them from the `async_lock` crate,
-whereas 6.0 builds them itself, on `event-listener`, except when the `tokio` feature is enabled,
-where Tokio's locks stand in instead. Neither choice needs a cargo feature of its own, so a build
-with `comms` but neither `async-io` nor `tokio` pulls in no lock crate for them.
+zbus's own async locks are not part of the trait: 5.x takes them from the `async_lock` crate;
+6.0 has no dependency on it at all, building its locks itself, on `event-listener`, except when
+the `tokio` feature is enabled, where Tokio's locks stand in instead. Neither choice needs a
+cargo feature of its own, so a build with `comms` but neither `builtin-runtime` nor `tokio`
+pulls in no lock crate for them.
 
 A runtime may also abort or drop a task it was given, so the connection no longer relies on its
 socket-reader task running to its end: however that task stops, `Connection::closed()` resolves,
 pending method calls fail and every `MessageStream` on the connection ends. A stream therefore
 also ends once `Connection::close()` has been called, after yielding whatever it already held.
 
-A build with `comms` but neither `async-io` nor `tokio` is valid, something 5.x has no equivalent
-of, and needs no lock feature for zbus's locks; every connection in it needs a `runtime`, over an
-address or over a socket you supply.
+A build with `comms` but neither `builtin-runtime` nor `tokio` is valid, something 5.x has no
+equivalent of, and needs no lock feature for zbus's locks; every connection in it needs a
+`runtime`, over an address or over a socket you supply.
 
 Two things about such a build. `zbus::blocking` only works there while the runtime's loop runs on
 another thread: a blocking call made from the loop's own thread deadlocks, since the connection it

@@ -2,8 +2,8 @@
 //!
 //! This module hosts all our blocking API. All the types under this module are thin wrappers
 //! around the corresponding asynchronous types. Most of the method calls are simply calling their
-//! asynchronous counterparts on the underlying types and use [`async_io::block_on`] (or
-//! [`tokio::runtime::Runtime::block_on`]) to turn them into blocking calls.
+//! asynchronous counterparts on the underlying types and use [`block_on`](crate::block_on) to turn
+//! them into blocking calls.
 //!
 //! This module is only available when the `blocking-api` feature is enabled (default).
 //!
@@ -24,10 +24,12 @@
 //! allows non-async methods for convenience, these methods are called from an async context. The
 //! [`blocking` crate] provides an easy way around this problem though.
 //!
+//! With the built-in runtime, a blocking call made from inside a task that runtime is running — a
+//! method of a served interface, say — panics rather than deadlocks, since it would be waiting
+//! for the very thread it is on.
+//!
 //! [asf]: https://rust-lang.github.io/wg-async/vision/shiny_future/users_manual.html#caveat-beware-the-async-sandwich
 //! [`blocking` crate]: https://docs.rs/blocking/
-//! [`tokio::runtime::Runtime::block_on`]: https://docs.rs/tokio/latest/tokio/runtime/struct.Runtime.html#method.block_on
-//! [`async_io::block_on`]: https://docs.rs/async-io/latest/async_io/fn.block_on.html
 
 pub mod connection;
 pub use connection::Connection;

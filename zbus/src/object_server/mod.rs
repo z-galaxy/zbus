@@ -49,7 +49,7 @@ pub(crate) use node::Node;
 /// # use std::error::Error;
 /// use zbus::{Connection, interface};
 /// use event_listener::Event;
-/// # use async_io::block_on;
+/// # use zbus::block_on;
 ///
 /// struct Example {
 ///     // Interfaces are owned by the ObjectServer. They can have
@@ -345,7 +345,7 @@ impl ObjectServer {
     /// ```no_run
     /// # use std::error::Error;
     /// # use zbus::{Connection, interface};
-    /// # use async_io::block_on;
+    /// # use zbus::block_on;
     /// #
     /// struct MyIface(u32);
     ///
