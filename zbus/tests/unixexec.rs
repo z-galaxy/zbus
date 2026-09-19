@@ -53,7 +53,7 @@ async fn test_unixexec_connection() -> Result<()> {
     let kept = connection.clone();
     connection.close().await?;
     #[cfg(target_os = "linux")]
-    wait_for_the_helper_to_go();
+    wait_for_the_helper_to_go().await;
     drop(kept);
 
     Ok(())
@@ -65,10 +65,24 @@ async fn test_unixexec_connection() -> Result<()> {
 /// one that was told nothing stays in it running and one that was never waited for stays in it
 /// as a zombie. So an empty list is both halves of what closing a connection promises, and the
 /// test's own timeout is what bounds the wait for it.
+///
+/// The wait gives the runtime its turn between two looks rather than spinning the thread,
+/// because zbus's built-in runtime runs on this very thread, between two polls of the future
+/// this is inside of, and the wait for the helper is its work to do.
 #[cfg(target_os = "linux")]
-fn wait_for_the_helper_to_go() {
+async fn wait_for_the_helper_to_go() {
     while !children().is_empty() {
-        std::thread::yield_now();
+        let mut yielded = false;
+        std::future::poll_fn(|cx| {
+            if yielded {
+                return std::task::Poll::Ready(());
+            }
+            yielded = true;
+            cx.waker().wake_by_ref();
+
+            std::task::Poll::Pending
+        })
+        .await;
     }
 }
 

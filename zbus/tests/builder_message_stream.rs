@@ -19,8 +19,8 @@ use zbus::{Connection, Guid, connection::Builder};
 #[cfg(feature = "async-io")]
 #[test]
 #[timeout(15000)]
-fn build_message_stream_does_not_drop_pipelined_hello_async_io() {
-    async_io::block_on(async {
+fn build_message_stream_does_not_drop_pipelined_hello_builtin_runtime() {
+    futures_lite::future::block_on(async {
         let (s0, s1) = std::os::unix::net::UnixStream::pair().unwrap();
         let guid = Guid::generate();
 

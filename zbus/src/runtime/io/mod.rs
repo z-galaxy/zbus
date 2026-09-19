@@ -216,7 +216,7 @@ pub(crate) trait SocketOps: fmt::Debug + Send + Sync + 'static {
 #[derive(Debug)]
 pub(crate) enum Registration {
     #[cfg(feature = "async-io")]
-    AsyncIo(super::async_io::Registration),
+    Builtin(super::builtin::RegisteredIoSource),
     #[cfg(feature = "tokio")]
     Tokio(super::tokio_rt::Registration),
     External(Box<dyn ErasedRegistration>),
@@ -241,7 +241,7 @@ impl Registration {
     ) -> Poll<io::Result<T>> {
         match self {
             #[cfg(feature = "async-io")]
-            Self::AsyncIo(registration) => {
+            Self::Builtin(registration) => {
                 traits::PollIo::poll_io(registration, cx, interest, operation)
             }
             #[cfg(feature = "tokio")]

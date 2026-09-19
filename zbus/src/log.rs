@@ -7,9 +7,9 @@
 #[cfg(feature = "tracing")]
 pub(crate) use tracing::{Instrument, debug, info, info_span, trace, trace_span, warn};
 
-// The error level is called for where a task of the runtime zbus brings along panics, and that
-// runtime is compiled for the tests alone.
-#[cfg(all(test, feature = "tracing"))]
+// The error level is called for by the runtime zbus brings along, where a task of it panics and
+// where its wait on the platform's poll fails.
+#[cfg(all(feature = "async-io", feature = "tracing"))]
 pub(crate) use tracing::error;
 
 #[cfg(not(feature = "tracing"))]
@@ -39,7 +39,7 @@ mod noop {
     macro_rules! warn_event {
         ($($arg:tt)*) => { $crate::log::event!($($arg)*) };
     }
-    #[cfg(test)]
+    #[cfg(feature = "async-io")]
     macro_rules! error {
         ($($arg:tt)*) => { $crate::log::event!($($arg)*) };
     }
@@ -55,7 +55,7 @@ mod noop {
     }
 
     pub(crate) use debug;
-    #[cfg(test)]
+    #[cfg(feature = "async-io")]
     pub(crate) use error;
     pub(crate) use event;
     pub(crate) use info;
@@ -68,7 +68,7 @@ mod noop {
 #[cfg(not(feature = "tracing"))]
 pub(crate) use noop::{debug, event, info, info_span, trace, trace_span, warn};
 
-#[cfg(all(test, not(feature = "tracing")))]
+#[cfg(all(feature = "async-io", not(feature = "tracing")))]
 pub(crate) use noop::error;
 
 /// A no-op stand-in for `tracing::Span`, used when the `tracing` feature is disabled.

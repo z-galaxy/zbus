@@ -88,6 +88,49 @@ fn cancelling_the_last_task_from_another_thread_lets_the_helper_exit() {
     assert!(helper_gone(&runtime));
 }
 
+/// A wake that crosses from the thread in one runtime's seat to a task on another reaches it.
+///
+/// Two built-in runtimes can be alive in one process, each with tasks of its own, so a task of
+/// one can wake a task of the other from the thread that holds the first runtime's seat. The
+/// thread in the second runtime's seat is asleep in a wait of its own by then and has to be told
+/// over its wake channel; a wake is only ever left unsent when it comes from the very thread it
+/// would be telling.
+///
+/// The waiting task announces itself and the thread here waits that announcement out, so that
+/// the wake is sent to a runtime whose thread has nothing of its own left to poll and is
+/// therefore in a wait that only its wake channel can end.
+#[test]
+#[timeout(15000)]
+fn a_task_on_one_runtime_wakes_a_task_on_another() {
+    let waiting_runtime = runtime();
+    let waking_runtime = runtime();
+    let listening = Arc::new(Event::new());
+    let woken = Arc::new(Event::new());
+
+    // Taken before the task is spawned, so the announcement cannot be missed.
+    let announced = listening.listen();
+    let waiting = {
+        let woken = woken.clone();
+        waiting_runtime.spawn("a task waiting to be woken", async move {
+            let wake = woken.listen();
+            listening.notify(1);
+            wake.await;
+
+            42
+        })
+    };
+    block_on(announced);
+    // The announcement is made inside the poll that leaves the task waiting, so the helper
+    // reaches its wait a moment after it; this is that moment.
+    thread::sleep(Duration::from_millis(100));
+
+    let _waking = waking_runtime.spawn("a task on another runtime", async move {
+        woken.notify(1);
+    });
+
+    assert_eq!(block_on(waiting).unwrap(), 42);
+}
+
 #[test]
 #[timeout(15000)]
 fn a_finished_detached_task_lets_the_helper_exit() {

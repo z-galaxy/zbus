@@ -16,15 +16,13 @@ pub mod traits;
 pub(crate) mod io;
 mod io_source;
 pub use io_source::{Interest, IoSource};
-#[cfg(feature = "async-io")]
-mod async_io;
-#[cfg(feature = "async-io")]
-pub(crate) use async_io::AsyncIo;
 mod async_drop;
 pub use async_drop::AsyncDrop;
 mod blocking_thread;
-#[cfg(test)]
-mod builtin;
+#[cfg(feature = "async-io")]
+pub(crate) mod builtin;
+#[cfg(feature = "async-io")]
+pub(crate) use builtin::Builtin;
 mod erased;
 pub(crate) mod locks;
 mod task;
@@ -36,8 +34,6 @@ mod timeout;
 mod tokio_rt;
 #[cfg(feature = "tokio")]
 use tokio_rt::Tokio;
-#[cfg(any(feature = "async-io", test))]
-mod unblock;
 
 // Only the `unixexec` and `ibus` transports and, on macOS, the `launchd` one run a program.
 #[cfg(all(unix, any(feature = "unixexec", feature = "ibus", target_os = "macos")))]
@@ -53,7 +49,7 @@ use crate::Result;
 #[derive(Clone, Debug)]
 pub(crate) enum Runtime {
     #[cfg(feature = "async-io")]
-    AsyncIo(AsyncIo),
+    Builtin(Builtin),
     #[cfg(feature = "tokio")]
     Tokio(Tokio),
     /// A runtime handed to the builder, reached through the object-safe mirrors of the traits.
@@ -63,12 +59,13 @@ pub(crate) enum Runtime {
 impl Runtime {
     /// The runtime for a connection built without an explicit one.
     ///
-    /// Tokio when it is compiled in and a runtime is current on this thread, otherwise async-io
-    /// when that is compiled in. This keeps the features additive: enabling `tokio` elsewhere in
-    /// the dependency graph doesn't force every zbus user into a tokio runtime. Two builds have
-    /// no default left and report [`Error::Unsupported`] instead, so that a connection in them
-    /// has to be given a runtime of its own: one with neither backend compiled in, and one with
-    /// only `tokio` called from a thread where no Tokio runtime is current.
+    /// Tokio when it is compiled in and a runtime is current on this thread, otherwise the
+    /// runtime zbus brings along, when that is compiled in. This keeps the features additive:
+    /// enabling `tokio` elsewhere in the dependency graph doesn't force every zbus user into a
+    /// tokio runtime. Two builds have no default left and report [`Error::Unsupported`] instead,
+    /// so that a connection in them has to be given a runtime of its own: one with neither
+    /// compiled in, and one with only `tokio` called from a thread where no Tokio runtime is
+    /// current.
     ///
     /// [`Error::Unsupported`]: crate::Error::Unsupported
     pub(crate) fn default_for_build() -> Result<Self> {
@@ -78,7 +75,7 @@ impl Runtime {
         }
         #[cfg(feature = "async-io")]
         {
-            Ok(Self::AsyncIo(AsyncIo::new()))
+            Ok(Self::Builtin(Builtin::new()?))
         }
         #[cfg(not(feature = "async-io"))]
         {
@@ -104,8 +101,8 @@ impl Runtime {
     pub(crate) fn register_io_source(&self, source: IoSource) -> std::io::Result<io::Registration> {
         match self {
             #[cfg(feature = "async-io")]
-            Self::AsyncIo(runtime) => {
-                traits::Runtime::register_io_source(runtime, source).map(io::Registration::AsyncIo)
+            Self::Builtin(runtime) => {
+                traits::Runtime::register_io_source(runtime, source).map(io::Registration::Builtin)
             }
             #[cfg(feature = "tokio")]
             Self::Tokio(runtime) => {
@@ -128,7 +125,7 @@ impl Runtime {
     {
         match self {
             #[cfg(feature = "async-io")]
-            Self::AsyncIo(runtime) => Task::AsyncIo(traits::Runtime::spawn(runtime, name, future)),
+            Self::Builtin(runtime) => Task::Builtin(traits::Runtime::spawn(runtime, name, future)),
             #[cfg(feature = "tokio")]
             Self::Tokio(runtime) => Task::Tokio(traits::Runtime::spawn(runtime, name, future)),
             Self::External(runtime) => {
@@ -151,7 +148,7 @@ impl Runtime {
     {
         match self {
             #[cfg(feature = "async-io")]
-            Self::AsyncIo(runtime) => traits::Runtime::spawn_blocking(runtime, work),
+            Self::Builtin(runtime) => traits::Runtime::spawn_blocking(runtime, work),
             #[cfg(feature = "tokio")]
             Self::Tokio(runtime) => traits::Runtime::spawn_blocking(runtime, work),
             Self::External(runtime) => traits::Runtime::spawn_blocking(runtime, work),

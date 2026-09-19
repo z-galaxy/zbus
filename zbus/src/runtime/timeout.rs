@@ -10,7 +10,7 @@ impl Runtime {
     pub(crate) async fn sleep(&self, duration: Duration) {
         match self {
             #[cfg(feature = "async-io")]
-            Self::AsyncIo(runtime) => traits::Runtime::sleep(runtime, duration).await,
+            Self::Builtin(runtime) => traits::Runtime::sleep(runtime, duration).await,
             #[cfg(feature = "tokio")]
             Self::Tokio(runtime) => traits::Runtime::sleep(runtime, duration).await,
             Self::External(runtime) => traits::Runtime::sleep(runtime, duration).await,
