@@ -91,7 +91,7 @@ Four things to know about the features:
 * `arrayvec` was a zvariant-only feature and is available in zbus now.
 * `comms` pulls in the `uuid` crate — it parses D-Bus GUIDs — without turning on zbus's own
   `uuid` feature, so the `Uuid` wire impls stay opt-in, as they were.
-* Any D-Bus feature (`builtin-runtime`, `tokio`, `blocking-api`, `p2p`, `bus-impl`, `vsock`)
+* Any D-Bus feature (`builtin-runtime`, `tokio`, `p2p`, `bus-impl`, `vsock`)
   enables `comms`. In a workspace where one crate asks for the wire-only build
   and another for the full one, Cargo's feature unification gives everybody the full build.
   That is a build-size question only; nothing behaves differently.
@@ -353,11 +353,11 @@ fn make_message() -> zbus::Result<Message> {
 ```
 
 This covers `message::Builder` and the `Message::method_call`, `Message::signal`,
-`Message::error` and `Message::method_return` constructors that create it; `proxy::Builder`;
+`Message::error` and `Message::method_return` constructors that create it; `proxy::Builder`; and
 `connection::Builder` and its `session`, `system`, `ibus`, `address` and `authenticated_socket`
-constructors; and the blocking proxy and connection builders. `match_rule::Builder::build()`
-moves the other way: it used to be infallible and now returns `Result<MatchRule<'_>>`, since it
-is the one builder whose fields were already fully validated by the time `build()` ran.
+constructors. `match_rule::Builder::build()` moves the other way: it used to be infallible and
+now returns `Result<MatchRule<'_>>`, since it is the one builder whose fields were already fully
+validated by the time `build()` ran.
 
 To migrate:
 
@@ -416,9 +416,6 @@ whichever runtime it was built with. Hand a stream of another kind over as the s
   `tokio-vsock` feature and the constructor that took its stream are both gone; `vsock` no longer
   enables `async-io` either.
 
-`zbus::blocking::connection::Builder` mirrors the Unix and TCP constructors; it has no VSOCK
-stream constructor.
-
 `Builder::socket` is likewise no longer a way to bring a runtime's own socket type along: the
 `Socket`, `ReadHalf` and `WriteHalf` implementations for `async_io::Async<T>` and for Tokio's
 stream types are gone. Implement `Socket` for a transport that is none of the three above, such
@@ -449,8 +446,8 @@ only through a direct `T::alignment(..)` call or an `impl Basic` that overrode i
 
 ### `PropertiesProxy::set` takes a `&Value`
 
-The `org.freedesktop.DBus.Properties` proxy — `zbus::fdo::PropertiesProxy` and its blocking
-sibling — takes the new value by reference:
+The `org.freedesktop.DBus.Properties` proxy — `zbus::fdo::PropertiesProxy` — takes the new value
+by reference:
 
 ```rust,noplayground
 use zbus::{fdo::PropertiesProxy, names::InterfaceName, Value};
@@ -711,11 +708,41 @@ A build with `comms` but neither `builtin-runtime` nor `tokio` is valid, somethi
 equivalent of, and needs no lock feature for zbus's locks; every connection in it needs a
 `runtime`, over an address or over a socket you supply.
 
-Two things about such a build. `zbus::blocking` only works there while the runtime's loop runs on
-another thread: a blocking call made from the loop's own thread deadlocks, since the connection it
-waits on only makes progress while that loop runs. And the examples rendered throughout this book
-and zbus's API documentation connect to a bus without naming a runtime, so they need one of the
-built-in backends and report `Error::Unsupported` in a build that has neither.
+The examples rendered throughout this book and zbus's API documentation connect to a bus without
+naming a runtime, so they need one of the built-in backends and report `Error::Unsupported` in a
+build that has neither.
+
+### The blocking API is gone
+
+5.x's `zbus::blocking` module — `blocking::Connection`, `blocking::Proxy`, the
+`*ProxyBlocking` types `#[proxy]` generated, `blocking::ObjectServer` and the signal, property
+and message iterators — and its `blocking-api` cargo feature have no 6.0 equivalent. A program
+without an async runtime of its own drives the async API with `zbus::block_on`, which on the
+default `builtin-runtime` feature also runs the connection's work on the calling thread:
+
+```rust,compile_fail,noplayground
+// 5.x
+let connection = zbus::blocking::Connection::session()?;
+let proxy = FooProxyBlocking::new(&connection)?;
+let answer = proxy.bar()?;
+
+// 6.0
+let answer = zbus::block_on(async {
+    let connection = zbus::Connection::session().await?;
+    let proxy = FooProxy::new(&connection).await?;
+    proxy.bar().await
+})?;
+```
+
+One `zbus::block_on` around the whole program is the shape to prefer, because a call returning
+with the connection alive leaves its work to a helper thread until the next call. A blocking
+iterator becomes the stream it wrapped, driven with `StreamExt::next` inside the future. The
+`#[proxy]` attributes `gen_blocking`, `blocking_name` and `blocking_object` are gone with the
+proxies they configured, and so is `gen_async`, since the async proxy is the only one;
+`async_name` and `async_object` stay. Two rules come with `zbus::block_on`: the future must not
+block the thread waiting for work the connection has to do, and the function must not be called
+from inside a task zbus is running, where it panics. See the [synchronous programs
+chapter](blocking.md).
 
 ### Logging through `tracing` is a feature
 
