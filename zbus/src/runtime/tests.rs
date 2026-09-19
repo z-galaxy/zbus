@@ -71,7 +71,7 @@ fn external_runtime_drives_a_channel_connection() {
 }
 
 /// An explicit runtime wins over the Tokio runtime a connection would otherwise detect.
-#[cfg(all(unix, feature = "async-io", feature = "tokio", feature = "p2p"))]
+#[cfg(all(unix, feature = "builtin-runtime", feature = "tokio", feature = "p2p"))]
 #[test]
 #[timeout(15000)]
 fn an_explicit_runtime_beats_tokio_detection() {
@@ -241,7 +241,7 @@ fn an_address_is_connected_on_the_runtime_it_is_given() {
 }
 
 /// Without a backend, a connection can only run on a runtime the caller supplies.
-#[cfg(not(any(feature = "async-io", feature = "tokio")))]
+#[cfg(not(any(feature = "builtin-runtime", feature = "tokio")))]
 #[test]
 #[timeout(15000)]
 fn a_connection_without_a_runtime_is_unsupported() {

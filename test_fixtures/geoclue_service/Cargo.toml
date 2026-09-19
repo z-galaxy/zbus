@@ -1,0 +1,20 @@
+[package]
+name = "geoclue_service_fixture"
+version = "0.0.0"
+edition = { workspace = true }
+rust-version = { workspace = true }
+publish = false
+
+description = "Size fixture: a GeoClue2-shaped service enabling only the zbus features it needs"
+
+[features]
+default = ["builtin"]
+builtin = ["zbus/builtin-runtime"]
+tokio = ["zbus/tokio", "dep:tokio"]
+
+[dependencies]
+zbus = { path = "../../zbus", default-features = false, features = ["service"] }
+tokio = { workspace = true, optional = true, features = ["rt", "macros"] }
+
+[lints]
+workspace = true

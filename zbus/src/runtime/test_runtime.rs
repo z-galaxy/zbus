@@ -1,10 +1,10 @@
 //! A runtime implemented over the dev-dependencies, for the tests of the external path.
 //!
-//! It is a [`traits::Runtime`] over the same smol crates the `async-io` backend is built on,
-//! reached as dev-dependencies: those never enter a user's graph, so this runtime exists in
-//! every test build, including the one with neither backend compiled in. Its tasks run on one
-//! thread per instance, which lives as long as the process, and its registrations and timers are
-//! async-io's: enough for a test, not a model for a real host.
+//! It is a [`traits::Runtime`] over the smol crates, reached as dev-dependencies: those never
+//! enter a user's graph, so this runtime exists in every test build, including the one with no
+//! runtime of zbus's own compiled in. Its tasks run on one thread per instance, which lives as
+//! long as the process, and its registrations and timers are async-io's: enough for a test, not
+//! a model for a real host.
 
 use std::{
     future::Future,
@@ -18,7 +18,7 @@ use std::{
 use async_executor::Executor;
 use async_io::{Async, Timer};
 
-use super::{Interest, IoSource, Runtime, traits, unblock};
+use super::{Interest, IoSource, Runtime, blocking_thread, traits};
 
 /// Runs `body` once under every runtime this build can make.
 ///
@@ -61,8 +61,10 @@ where
     Body: Fn(Runtime) -> Fut,
     Fut: Future<Output = ()>,
 {
-    #[cfg(feature = "async-io")]
-    futures_lite::future::block_on(body(Runtime::AsyncIo(super::AsyncIo::new())));
+    #[cfg(feature = "builtin-runtime")]
+    futures_lite::future::block_on(body(Runtime::Builtin(
+        super::Builtin::new().expect("a runtime of zbus's own"),
+    )));
 
     futures_lite::future::block_on(body(Runtime::from_external(TestRuntime::new())));
     futures_lite::future::block_on(body(Runtime::from_external(ReadinessFirst::new())));
@@ -158,7 +160,7 @@ impl traits::Runtime for TestRuntime {
             .lock()
             .unwrap_or_else(PoisonError::into_inner) += 1;
 
-        unblock::run(work)
+        blocking_thread::run(work)
     }
 }
 

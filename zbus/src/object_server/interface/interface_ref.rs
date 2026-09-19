@@ -50,7 +50,7 @@ where
     ///
     /// ```no_run
     /// # use std::error::Error;
-    /// # use async_io::block_on;
+    /// # use zbus::block_on;
     /// # use zbus::{Connection, interface};
     ///
     /// struct MyIface(u32);

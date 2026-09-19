@@ -1340,13 +1340,6 @@ impl AsyncDrop for SignalStream<'_> {
     }
 }
 
-#[cfg(feature = "blocking-api")]
-impl<'a> From<crate::blocking::Proxy<'a>> for Proxy<'a> {
-    fn from(proxy: crate::blocking::Proxy<'a>) -> Self {
-        proxy.into_inner()
-    }
-}
-
 /// This trait is implemented by all async proxies, which are generated with the
 /// [`proxy`](macro@zbus::proxy) macro.
 pub trait ProxyImpl<'c>
@@ -1379,7 +1372,7 @@ enum Either<L, R> {
 #[cfg(all(
     test,
     feature = "service",
-    any(feature = "async-io", feature = "tokio")
+    any(feature = "builtin-runtime", feature = "tokio")
 ))]
 mod tests {
     use super::*;
@@ -1471,7 +1464,6 @@ mod tests {
     /// call to add the match rule never resolved and resulted in a deadlock.
     async fn test_signal_stream_deadlock() -> Result<()> {
         #[proxy(
-            gen_blocking = false,
             default_path = "/org/zbus/Test",
             default_service = "org.zbus.Test.MR501",
             interface = "org.zbus.Test"
@@ -1513,10 +1505,7 @@ mod tests {
             let server_fut = async move {
                 use std::time::Duration;
 
-                #[cfg(feature = "async-io")]
-                use async_io::Timer;
-
-                #[cfg(all(feature = "tokio", not(feature = "async-io")))]
+                #[cfg(all(feature = "tokio", not(feature = "builtin-runtime")))]
                 use tokio::time::sleep;
 
                 let iface_ref = conn
@@ -1533,10 +1522,10 @@ mod tests {
                             .unwrap();
                     }
 
-                    #[cfg(feature = "async-io")]
-                    Timer::after(Duration::from_millis(5)).await;
+                    #[cfg(feature = "builtin-runtime")]
+                    conn.runtime().sleep(Duration::from_millis(5)).await;
 
-                    #[cfg(all(feature = "tokio", not(feature = "async-io")))]
+                    #[cfg(all(feature = "tokio", not(feature = "builtin-runtime")))]
                     sleep(Duration::from_millis(5)).await;
                 }
             };

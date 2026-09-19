@@ -16,11 +16,11 @@ use zbus::{Connection, Guid, connection::Builder};
 
 /// Simulates the busd race: a bus client pipelines Hello during SASL auth, before the server
 /// has started polling. `build_message_stream` must still deliver it.
-#[cfg(feature = "async-io")]
+#[cfg(feature = "builtin-runtime")]
 #[test]
 #[timeout(15000)]
-fn build_message_stream_does_not_drop_pipelined_hello_async_io() {
-    async_io::block_on(async {
+fn build_message_stream_does_not_drop_pipelined_hello_builtin_runtime() {
+    futures_lite::future::block_on(async {
         let (s0, s1) = std::os::unix::net::UnixStream::pair().unwrap();
         let guid = Guid::generate();
 

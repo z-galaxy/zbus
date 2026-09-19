@@ -80,14 +80,15 @@ impl MessageStream {
     /// ```
     /// # // The example decodes the signal with the `NameOwnerChanged` type of the `DBusProxy`.
     /// # #[cfg(feature = "proxy")]
-    /// use async_io::Timer;
-    /// # #[cfg(feature = "proxy")]
     /// use zbus::{AsyncDrop, Connection, MatchRule, MessageStream, fdo::NameOwnerChanged};
     /// # #[cfg(feature = "proxy")]
     /// use futures_util::{TryStreamExt, future::select, future::Either::{Left, Right}, pin_mut};
     ///
+    /// # #[cfg(not(feature = "proxy"))]
+    /// # fn main() {}
     /// # #[cfg(feature = "proxy")]
-    /// # zbus::block_on(async {
+    /// # #[tokio::main]
+    /// # async fn main() -> zbus::Result<()> {
     /// let conn = Connection::session().await?;
     /// let rule = MatchRule::builder()
     ///     .msg_type(zbus::message::Type::Signal)
@@ -137,15 +138,15 @@ impl MessageStream {
     /// pin_mut!(stream);
     /// let next = stream.try_next();
     /// pin_mut!(next);
-    /// let timeout = Timer::after(std::time::Duration::from_millis(50));
+    /// let timeout = tokio::time::sleep(std::time::Duration::from_millis(50));
     /// pin_mut!(timeout);
     /// match select(next, timeout).await {
     ///    Left((msg, _)) => unreachable!("unexpected message: {:?}", msg),
     ///    Right((_, _)) => (),
     /// }
     ///
-    /// # Ok::<(), zbus::Error>(())
-    /// # }).unwrap();
+    /// # Ok(())
+    /// # }
     /// ```
     ///
     /// # Caveats

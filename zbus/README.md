@@ -27,8 +27,8 @@ zbus = { version = "6", default-features = false }
 That build compiles `zbus::wire` and `zbus::names` and nothing else — no connection, proxy or
 object server. The optional wire-format features keep zvariant's names (`arrayvec`, `camino`,
 `chrono`, `enumflags2`, `heapless`, `option-as-array`, `serde_bytes`, `time`, `url`, `uuid`),
-and enabling any D-Bus feature (`comms`, `async-io`, `tokio`, `async-lock`, `blocking-api`,
-`p2p`, `bus-impl`, `vsock`, `proxy`, `service`, `unixexec`, `ibus`) brings the D-Bus API back.
+and enabling any D-Bus feature (`comms`, `builtin-runtime`, `tokio`, `p2p`, `bus-impl`, `vsock`,
+`proxy`, `service`, `unixexec`, `ibus`) brings the D-Bus API back.
 
 zbus logs through [`tracing`], behind the default `tracing` feature; a `default-features =
 false` build that wants zbus's logs must re-enable it explicitly.
@@ -115,11 +115,11 @@ async fn main() -> Result<()> {
 }
 ```
 
-## Blocking API
+## Synchronous programs
 
-While zbus is primarily asynchronous (since 2.0), [blocking wrappers][bw] are provided for
-convenience. Since zbus 5.0, blocking API can be disabled by disabling the `blocking-api` cargo
-feature.
+zbus's API is async. A program with no async runtime of its own drives it with `zbus::block_on`,
+which runs a future to completion on the calling thread. See the [synchronous programs
+chapter][bw] of the book.
 
 ## Proxy and service API
 
@@ -130,10 +130,12 @@ size of your binary.
 
 ## Compatibility with async runtimes
 
-zbus is runtime-agnostic. By default (the `async-io` feature), a connection runs its I/O, timers
-and tasks on two threads of zbus's own: one running the tasks and one running [`async-io`]'s
-reactor. With `tokio` instead, it runs on your Tokio runtime, with no extra thread. For any other
-runtime, hand an implementation of [`runtime::traits::Runtime`] to
+zbus is runtime-agnostic. By default (the `builtin-runtime` feature), a connection runs on the
+runtime zbus brings along, with no runtime dependency of its own: one runtime for the whole
+process, run by the thread inside `zbus::block_on`, and, only where a connection has work and no
+thread is inside `zbus::block_on`, by a helper thread that leaves once nothing is left to run. With
+`tokio` instead, it runs on your Tokio runtime, with no extra thread. For any other runtime, hand
+an implementation of [`runtime::traits::Runtime`] to
 [`connection::Builder::runtime`], which then supplies everything a connection needs, sockets
 included — except a handful of calls with no async form (a couple of transport lookups, a
 peer-credential group lookup, waiting on a helper process), which go through the trait's
@@ -145,41 +147,41 @@ connection lets go of the other pipe too. That is a cost at teardown rather than
 the connection, and a runtime that serves `unixexec:` addresses should still override
 `spawn_blocking` rather than park a thread there for it.
 
-zbus's async locks come from a cargo feature rather than from the runtime: `async-lock` (which
-`async-io` enables) or `tokio`. A build with neither of those two does not compile, so a build on
-a runtime of your own names `async-lock` itself.
+zbus's async locks are its own, built on `event-listener` rather than supplied by the runtime, so
+a build on a runtime of your own needs no lock feature and pulls in no lock crate for them. On a
+Tokio build, Tokio's locks stand in instead, so that build carries no second lock implementation.
 
-`zbus::blocking` over a runtime of your own only works while that runtime's loop runs on another
-thread. A blocking call made from the loop's own thread deadlocks: it waits on a connection that
-only makes progress while the loop it just stopped runs.
+`zbus::block_on` over a runtime of your own only works while that runtime's loop runs on another
+thread. A call made from the loop's own thread deadlocks: it waits on a connection that only makes
+progress while the loop it just stopped runs.
 
 ### Special tokio support
 
 Enabling the `tokio` feature puts a connection on your [`tokio`] runtime instead of the default
-`async-io` backend, with no thread of zbus's own:
+`builtin-runtime` backend, with no thread of zbus's own:
 
 ```toml
 # Sample Cargo.toml snippet.
 [dependencies]
-# Also disable the default `async-io` feature to avoid unused dependencies.
+# Also disable the default `builtin-runtime` feature to skip compiling in the fallback backend.
 zbus = { version = "6", default-features = false, features = ["tokio"] }
 ```
 
-The `tokio` and `async-io` features are additive: with both enabled, zbus picks Tokio when a Tokio
-runtime is current on the thread that builds the connection, and `async-io` otherwise. With only
-`tokio` (no `async-io`), a connection must be built from a thread running a Tokio runtime.
+The `tokio` and `builtin-runtime` features are additive: with both enabled, zbus picks Tokio when
+a Tokio runtime is current on the thread that builds the connection, and `builtin-runtime`
+otherwise. With only `tokio` (no `builtin-runtime`), a connection must be built from a thread
+running a Tokio runtime.
 
-The blocking API (`zbus::blocking`) drives its connections through its own `block_on`, which uses
-tokio whenever the `tokio` feature is enabled, so those connections always run on tokio when that
-feature is on.
+A program with no async runtime of its own drives the API from inside `zbus::block_on`, which
+with the `tokio` feature polls the future on a Tokio runtime of its own, so a connection built
+inside that call always runs on tokio when that feature is on.
 
 **Note**: On Windows, a connection that ends up on Tokio cannot use a Unix domain socket, even when
-`async-io` is also compiled in; see [the corresponding tokio issue on GitHub][tctiog].
+`builtin-runtime` is also compiled in; see [the corresponding tokio issue on GitHub][tctiog].
 
 [zbus]: https://github.com/z-galaxy/zbus\#readme
-[bw]: https://docs.rs/zbus/latest/zbus/blocking/index.html
+[bw]: https://z-galaxy.github.io/zbus/blocking.html
 [tctiog]: https://github.com/tokio-rs/tokio/issues/2201
-[`async-io`]: https://crates.io/crates/async-io
 [`connection::Builder::runtime`]: https://docs.rs/zbus/latest/zbus/connection/struct.Builder.html#method.runtime
 [`runtime::traits::Runtime`]: https://docs.rs/zbus/latest/zbus/runtime/traits/trait.Runtime.html
 [`tokio`]: https://crates.io/crates/tokio

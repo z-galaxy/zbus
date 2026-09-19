@@ -5,7 +5,8 @@ members = [
     "zbus_macros",
     "zbus_xml",
     "zbus_xmlgen",
-    "test_fixtures/blocking_api",
+    "test_fixtures/geoclue_client",
+    "test_fixtures/geoclue_service",
     "test_fixtures/renamed_zbus",
     "test_fixtures/service_only",
     "test_fixtures/zbus_only",
@@ -25,6 +26,13 @@ repository = "https://github.com/z-galaxy/zbus/"
 [profile.bench]
 debug = true
 strip = "none"
+
+# What a shipped binary weighs: the fixtures under test_fixtures/geoclue_* are built with it.
+[profile.size]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+strip = true
 
 [workspace.dependencies]
 # Local dependencies
@@ -49,7 +57,6 @@ camino = "1.1.9"
 enumflags2 = { version = "0.7.9", features = ["serde"] }
 async-io = "2.3.2"
 async-broadcast = "0.7.0"
-async-lock = "3.3.0"
 async-executor = "1.11.0"
 async-trait = "0.1.80"
 hex = "0.4.3"
@@ -63,7 +70,6 @@ futures-lite = { version = "2.6.0", default-features = false, features = [
 event-listener = "5.3.0"
 xdg-home = "1.1.0"
 tracing = "0.1.40"
-blocking = "1.6.0"
 async-task = "4.7.1"
 polling = "3.11.0"
 tokio = "1.37.0"
@@ -94,7 +100,9 @@ async-recursion = "1.1.1"
 winnow = "1.0"
 uds_windows = "1.1.0"
 rustix = { version = "1.1.2", default-features = false, features = [
+    "event",
     "net",
+    "pipe",
     "process",
     "std",
 ] }

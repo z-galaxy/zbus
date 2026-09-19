@@ -22,7 +22,7 @@ jobs:
           cache-target: release
           bins: cargo-codspeed
       - name: Build the benchmark target(s)
-        run: cargo codspeed build
+        run: cargo codspeed build --features zbus/p2p
       - name: Run the benchmarks
         uses: CodSpeedHQ/action@v5
         with:

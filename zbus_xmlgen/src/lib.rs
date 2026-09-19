@@ -560,7 +560,7 @@ impl<'i> Types<'i> {
         // back to the structural type.
         let idx = interface.name().rfind('.').unwrap() + 1;
         let trait_name = &interface.name()[idx..];
-        let mut taken: HashSet<String> = ["Proxy", "ProxyBlocking"]
+        let mut taken: HashSet<String> = ["Proxy"]
             .iter()
             .map(|suffix| format!("{trait_name}{suffix}"))
             .chain(interface.signals().iter().flat_map(|signal| {

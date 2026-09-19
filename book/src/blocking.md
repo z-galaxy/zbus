@@ -1,35 +1,26 @@
-# Blocking API
+# Synchronous programs
 
 <!-- toc -->
 
-While zbus API being primarily asynchronous (since 2.0) is a great thing, it could easily feel
-daunting for simple use cases. Not to worry! In the spirit of "ease" being a primary goal of zbus,
-it provides blocking wrapper types, under the [blocking module].
+zbus's API is async, and a program does not need an async runtime of its own to use it:
+[`zbus::block_on`] runs a future to completion on the calling thread, and with the default
+`builtin-runtime` feature that same thread runs the connection's work in between, so the program
+below is one thread with zbus as its one dependency, plus `futures-util` for the stream extension
+trait where a program reads a stream. Everything in the other chapters works the same way inside
+the future handed to `zbus::block_on`.
 
-**Note:** Use of the blocking API presented in this chapter in an async context will likely result
-in panics and hangs. This is not a limitation of zbus but rather a
-[well-known general problem][wkgp] in the Rust async/await world. The [`blocking` crate],
-[`async-std`][assb] and [`tokio`][tsb] crates provide a easy way around this problem.
-
-**Note:** Since zbus 5.0, blocking API can be disabled through the `blocking-api` cargo feature. If
-you use this API, make sure you are not unintentionally disabling it by disabling the default
-features in your `Cargo.toml`.
-
-## Establishing a connection
-
-The only difference to that of [asynchronous `Connection` API] is that you use
-[`blocking::Connection`] type instead. This type's API is almost identical to that of `Connection`,
-except all its methods are blocking.
+Two rules come with it. The future must not block the thread waiting for something the connection
+has to do — a synchronous wait for a reply, a busy loop until a signal has arrived — because that
+work runs on this very thread between two polls of the future, so such a wait never ends. And
+`zbus::block_on` must not be called from inside a task zbus is running: from a method of an
+interface the connection serves, say, or from a future polled inside another `zbus::block_on`.
+Such a call panics, because it could only wait for the thread it is on.
 
 ## Client
 
-Similar to `blocking::Connection`, you use `blocking::Proxy` type. Its constructors require
-`blocking::Connection` instead of `Connection`. Moreover, `proxy` macro generates a
-`blocking::Proxy` wrapper for you as well. Let's convert the last example in the previous chapter,
-to use the blocking connection and proxy:
-
 ```rust,no_run
-use zbus::{blocking::Connection, ObjectPath, proxy, Result};
+use futures_util::stream::StreamExt;
+use zbus::{Connection, ObjectPath, Result, proxy};
 
 #[proxy(
     default_service = "org.freedesktop.GeoClue2",
@@ -68,41 +59,45 @@ trait Location {
     #[zbus(property)]
     fn longitude(&self) -> Result<f64>;
 }
-let conn = Connection::system().unwrap();
-let manager = ManagerProxyBlocking::new(&conn).unwrap();
-let mut client = manager.get_client().unwrap();
-// Gotta do this, sorry!
-client.set_desktop_id("org.freedesktop.zbus").unwrap();
 
-let mut location_updated = client.receive_location_updated().unwrap();
+fn main() -> Result<()> {
+    zbus::block_on(async {
+        let conn = Connection::system().await?;
+        let manager = ManagerProxy::new(&conn).await?;
+        let mut client = manager.get_client().await?;
+        // Gotta do this, sorry!
+        client.set_desktop_id("org.freedesktop.zbus").await?;
 
-client.start().unwrap();
+        let mut location_updated = client.receive_location_updated().await?;
 
-// Wait for the signal.
-let signal = location_updated.next().unwrap();
-let args = signal.args().unwrap();
+        client.start().await?;
 
-let location = LocationProxyBlocking::builder(&conn)
-    .path(args.new())
-    .build()
-    .unwrap();
-println!(
-    "Latitude: {}\nLongitude: {}",
-    location.latitude().unwrap(),
-    location.longitude().unwrap(),
-);
+        // Wait for the signal.
+        let signal = location_updated.next().await.unwrap();
+        let args = signal.args()?;
+
+        let location = LocationProxy::builder(&conn)
+            .path(args.new())
+            .build()
+            .await?;
+        println!(
+            "Latitude: {}\nLongitude: {}",
+            location.latitude().await?,
+            location.longitude().await?,
+        );
+
+        Ok(())
+    })
+}
 ```
-
-As you can see, nothing changed in the `proxy` usage here and the rest largely remained the
-same as well. One difference that's not obvious is that the blocking API for receiving signals,
-implement [`std::iter::Iterator`] trait instead of [`futures::stream::Stream`].
 
 ### Watching for properties
 
 That's almost the same as receiving signals:
 
 ```rust,no_run
-use zbus::{blocking::Connection, proxy, Result};
+use futures_util::stream::StreamExt;
+use zbus::{Connection, Result, proxy};
 
 #[proxy(
     interface = "org.freedesktop.systemd1.Manager",
@@ -111,55 +106,44 @@ use zbus::{blocking::Connection, proxy, Result};
 )]
 trait SystemdManager {
     #[zbus(property)]
-    fn log_level(&self) -> zbus::Result<String>;
+    fn log_level(&self) -> Result<String>;
 }
 
 fn main() -> Result<()> {
-    let connection = Connection::session()?;
+    zbus::block_on(async {
+        let connection = Connection::session().await?;
 
-    let proxy = SystemdManagerProxyBlocking::new(&connection)?;
-    let v = proxy.receive_log_level_changed().next().unwrap();
-    println!("LogLevel changed: {:?}", v.get());
+        let proxy = SystemdManagerProxy::new(&connection).await?;
+        let v = proxy.receive_log_level_changed().await.next().await.unwrap();
+        println!("LogLevel changed: {:?}", v.get().await?);
 
-    Ok(())
+        Ok(())
+    })
 }
 ```
 
 ## Server
 
-Similarly here, you'd use [`blocking::ObjectServer`] that is associated with every
-[`blocking::Connection`] instance. While there is no blocking version of `Interface`,
-`interface` allows you to write non-async methods.
+A service is the same as in the [service chapter](service.md), with the connection built and the
+object served inside one `zbus::block_on`: the future that never resolves keeps the program alive,
+and the calls arriving on the connection are handled in between its polls.
 
-**Note:** Even though you can write non-async methods, these methods are still called from an async
-context. Therefore, you can not use blocking API in the method implementation directly. See note at
-the beginning of this chapter for details on why and a possible workaround.
+Note that the methods of the interface are called from the connection's own tasks. They are
+therefore subject to the second rule above: an interface method must not call `zbus::block_on`.
 
 ```rust,no_run
-use zbus::{blocking::connection, interface, fdo, object_server::SignalEmitter};
-use event_listener::{Event, Listener};
+use std::future::pending;
+
+use zbus::{Result, connection, interface, object_server::SignalEmitter};
 
 struct Greeter {
     name: String,
-    done: Event,
 }
 
 #[interface(name = "org.zbus.MyGreeter1")]
 impl Greeter {
     fn say_hello(&self, name: &str) -> String {
         format!("Hello {}!", name)
-    }
-
-    // Rude!
-    async fn go_away(
-        &self,
-        #[zbus(signal_emitter)]
-        emitter: SignalEmitter<'_>,
-    ) -> fdo::Result<()> {
-        emitter.greeted_everyone().await?;
-        self.done.notify(1);
-
-        Ok(())
     }
 
     /// A "GreeterName" property.
@@ -180,32 +164,25 @@ impl Greeter {
 
     /// A signal; the implementation is provided by the macro.
     #[zbus(signal)]
-    async fn greeted_everyone(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
+    async fn greeted_everyone(emitter: &SignalEmitter<'_>) -> Result<()>;
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let greeter = Greeter {
-        name: "GreeterName".to_string(),
-        done: event_listener::Event::new(),
-    };
-    let done_listener = greeter.done.listen();
-    let _handle = connection::Builder::session()
-        .name("org.zbus.MyGreeter")
-        .serve_at("/org/zbus/MyGreeter", greeter)
-        .build()?;
+fn main() -> Result<()> {
+    zbus::block_on(async {
+        let greeter = Greeter {
+            name: "GreeterName".to_string(),
+        };
+        let _connection = connection::Builder::session()
+            .name("org.zbus.MyGreeter")
+            .serve_at("/org/zbus/MyGreeter", greeter)
+            .build()
+            .await?;
 
-    done_listener.wait();
+        pending::<()>().await;
 
-    Ok(())
+        Ok(())
+    })
 }
 ```
 
-[asynchronous `Connection` API]: https://docs.rs/zbus/latest/zbus/connection/struct.Connection.html
-[`blocking::Connection`]: https://docs.rs/zbus/latest/zbus/blocking/connection/struct.Connection.html
-[`std::iter::Iterator`]: https://doc.rust-lang.org/nightly/std/iter/trait.Iterator.html
-[blocking module]: https://docs.rs/zbus/latest/zbus/blocking/index.html
-[wkgp]: https://rust-lang.github.io/wg-async-foundations/vision/shiny_future/users_manual.html#caveat-beware-the-async-sandwich
-[`blocking` crate]: https://docs.rs/blocking/
-[assb]: https://docs.rs/async-std/4/async_std/task/fn.spawn_blocking.html
-[tsb]: https://docs.rs/tokio/4/tokio/task/fn.spawn_blocking.html
-[`futures::stream::Stream`]: https://docs.rs/futures/0.3.17/futures/stream/trait.Stream.html
+[`zbus::block_on`]: https://docs.rs/zbus/latest/zbus/fn.block_on.html

@@ -391,11 +391,10 @@ struct Greeter {
     name = "org.zbus.MyGreeter.WithProxy",
     // Specifying the `proxy` attribute instructs `interface` to generate the
     // client-side proxy. You can specify proxy-specific attributes
-    // (e.g `gen_blocking) here. All the attributes that are common between
+    // (e.g `async_name`) here. All the attributes that are common between
     // `proxy` and `interface` macros (e.g `name`) are automtically forwarded to
     // the `proxy` macro.
     proxy(
-        gen_blocking = false,
         default_path = "/org/zbus/MyGreeter/WithProxy",
         default_service = "org.zbus.MyGreeter.WithProxy",
     ),

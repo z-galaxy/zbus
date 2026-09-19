@@ -46,19 +46,13 @@ mod doctests {
     doc_comment::doctest!("../../book/src/introduction.md");
     #[cfg(all(feature = "proxy", feature = "service"))]
     doc_comment::doctest!("../../book/src/service.md");
-    #[cfg(all(feature = "blocking-api", feature = "proxy", feature = "service"))]
+    #[cfg(all(feature = "proxy", feature = "service"))]
     doc_comment::doctest!("../../book/src/blocking.md");
     #[cfg(all(feature = "proxy", feature = "service"))]
     doc_comment::doctest!("../../book/src/upgrading-to-6.md");
     #[cfg(all(feature = "proxy", feature = "service"))]
     doc_comment::doctest!("../../book/src/faq.md");
 }
-
-#[cfg(all(feature = "comms", not(feature = "async-lock"), not(feature = "tokio")))]
-compile_error!(
-    "Either \"async-lock\" (enabled by the default \"async-io\" feature) or \"tokio\" must be \
-     enabled: zbus takes its async locks from one of the two."
-);
 
 #[cfg(all(feature = "vsock", not(target_os = "linux")))]
 compile_error!("The \"vsock\" feature is only supported on Linux.");
@@ -152,9 +146,6 @@ pub use utils::*;
 #[macro_use]
 pub mod fdo;
 
-#[cfg(feature = "blocking-api")]
-pub mod blocking;
-
 #[cfg(feature = "comms")]
 pub use zbus_macros::DBusError;
 #[cfg(feature = "service")]
@@ -162,22 +153,10 @@ pub use zbus_macros::interface;
 #[cfg(feature = "proxy")]
 pub use zbus_macros::proxy;
 
-// The macros emit feature-dependent code through these macros, so that the decision follows the
+// The macros emit feature-dependent code through this macro, so that the decision follows the
 // features of the `zbus` the generated code is compiled against. The features of `zbus_macros`
 // can differ from them: Cargo unifies the features of host dependencies, such as proc-macros and
 // build scripts, separately from the target ones.
-#[cfg(feature = "blocking-api")]
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __if_blocking_api_feature {
-    ($($item:tt)*) => { $($item)* };
-}
-#[cfg(not(feature = "blocking-api"))]
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __if_blocking_api_feature {
-    ($($item:tt)*) => {};
-}
 #[cfg(feature = "proxy")]
 #[doc(hidden)]
 #[macro_export]

@@ -15,18 +15,12 @@ fn a_unix_stream_builder_takes_the_platform_stream() {
     #[cfg(any(unix, windows))]
     {
         let _: fn(PlatformUnixStream) -> Builder<'static> = Builder::unix_stream;
-        #[cfg(feature = "blocking-api")]
-        let _: fn(PlatformUnixStream) -> zbus::blocking::connection::Builder<'static> =
-            zbus::blocking::connection::Builder::unix_stream;
     }
 }
 
 #[test]
 fn a_tcp_stream_builder_takes_the_std_stream() {
     let _: fn(std::net::TcpStream) -> Builder<'static> = Builder::tcp_stream;
-    #[cfg(feature = "blocking-api")]
-    let _: fn(std::net::TcpStream) -> zbus::blocking::connection::Builder<'static> =
-        zbus::blocking::connection::Builder::tcp_stream;
 }
 
 #[test]

@@ -1,7 +1,7 @@
 #![cfg(all(
     feature = "proxy",
     feature = "service",
-    any(feature = "async-io", feature = "tokio")
+    any(feature = "builtin-runtime", feature = "tokio")
 ))]
 #![allow(clippy::disallowed_names)]
 
