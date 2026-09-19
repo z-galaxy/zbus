@@ -102,7 +102,9 @@ async-recursion = "1.1.1"
 winnow = "1.0"
 uds_windows = "1.1.0"
 rustix = { version = "1.1.2", default-features = false, features = [
+    "event",
     "net",
+    "pipe",
     "process",
     "std",
 ] }
