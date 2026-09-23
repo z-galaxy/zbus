@@ -1,0 +1,26 @@
+[package]
+name = "mixed_version_fixture"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.87"
+publish = false
+
+# Keep this fixture isolated: it deliberately builds against a released zbus rather than the one
+# in this workspace, which a workspace build would substitute.
+[workspace]
+resolver = "3"
+
+[features]
+target-blocking = ["zbus/blocking-api"]
+
+[dependencies]
+# Pinned to the newest zbus release that predates `__if_blocking_api_feature!`. Every released
+# zbus 5.x asks for `zbus_macros = "^5.x"`, so it accepts the macro crate below even though that
+# one is newer. Don't move this pin forward past the release that introduced the gate: a zbus that
+# defines the gate cannot exercise the fallback this fixture exists to protect.
+zbus = { version = "=5.19.0", default-features = false, features = ["async-io"] }
+
+# The other half of the pairing: this workspace's macro crate, standing in for a release of it
+# that a user picked up on its own while holding zbus back.
+[patch.crates-io]
+zbus_macros = { path = "../../zbus_macros" }

@@ -99,6 +99,23 @@ pub mod blocking;
 
 pub use zbus_macros::{DBusError, interface, proxy};
 
+// The `proxy` macro emits the blocking proxy through this macro, so that whether it is generated
+// follows the `blocking-api` feature of the `zbus` the generated code is compiled against. The
+// features of `zbus_macros` can differ from it: Cargo unifies the features of host dependencies,
+// such as proc-macros and build scripts, separately from the target ones.
+#[cfg(feature = "blocking-api")]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __if_blocking_api_feature {
+    ($($item:tt)*) => { $($item)* };
+}
+#[cfg(not(feature = "blocking-api"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __if_blocking_api_feature {
+    ($($item:tt)*) => {};
+}
+
 // Required for the macros to function within this crate.
 extern crate self as zbus;
 
