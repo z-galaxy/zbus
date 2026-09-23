@@ -4,8 +4,8 @@ use std::collections::{BTreeMap, HashMap};
 
 use endi::NATIVE_ENDIAN;
 use zvariant::{
-    DeserializeDict, Dict, OwnedObjectPath, SerializeDict, Str, Type, Value, as_value::optional,
-    serialized::Context, to_bytes,
+    DeserializeDict, Dict, LE, OwnedObjectPath, SerializeDict, Str, Type, Value,
+    as_value::optional, serialized::Context, to_bytes,
 };
 
 #[macro_use]
@@ -119,7 +119,8 @@ fn dict_value() {
     // Dict<u32, u8>
     let mut map: HashMap<u32, u8> = HashMap::new();
     map.insert(1, 2);
-    let encoded = to_bytes(ctxt, &map).unwrap();
+    // The byte order is explicit since the encoding is compared against hardcoded bytes.
+    let encoded = to_bytes(Context::new_dbus(LE, 0), &map).unwrap();
     assert_eq!(
         encoded.bytes(),
         [
@@ -132,7 +133,8 @@ fn dict_value() {
     // GVariant format now
     #[cfg(feature = "gvariant")]
     {
-        let ctxt = Context::new_gvariant(NATIVE_ENDIAN, 0);
+        // Explicit byte order here too, for the same reason.
+        let ctxt = Context::new_gvariant(LE, 0);
         let encoded = to_bytes(ctxt, &map).unwrap();
         assert_eq!(
             encoded.bytes(),
