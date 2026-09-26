@@ -28,12 +28,13 @@ impl<T, E> ResultAdapter for Result<T, E> {
     type Err = E;
 }
 
-/// Runs a future to completion on the calling thread, and zbus's runtime with it.
+/// Runs a future to completion on the calling thread, and [zruntime](https://docs.rs/zruntime)
+/// with it.
 ///
 /// This is for a program that has no async runtime of its own. Put the async code in one
 /// call to this function; the call blocks the thread until the future completes. In
-/// between polls of the future, the calling thread also runs the scheduler and the I/O
-/// reactor of every connection built in it, and two threads that each call this drive
+/// between polls of the future, the calling thread also runs zruntime's scheduler and I/O
+/// reactor for every connection built in it, and two threads that each call this drive
 /// their own connections, in parallel. A handful of blocking system calls — a DNS lookup,
 /// a nonce-file read, a peer-credential lookup — run on a short-lived worker thread of
 /// their own instead, so they never hold up the calling thread. If the call returns while

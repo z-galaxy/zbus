@@ -2112,6 +2112,7 @@ dependencies = [
  "zbus_utils",
  "zbus_xml",
  "zcheapstr",
+ "zruntime",
 ]
 
 [[package]]
@@ -2259,3 +2260,13 @@ name = "zmij"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6d6085d62852e35540689d1f97ad663e3971fc19cf5eceab364d62c646ea167"
+
+[[package]]
+name = "zruntime"
+version = "0.1.0"
+source = "git+https://github.com/z-galaxy/zruntime?branch=claude%2Fzbus-runtime-extraction-89807p#fc0f9ff69087f2566911918f7a0f7efc39594636"
+dependencies = [
+ "rustix",
+ "tracing",
+ "windows-sys",
+]

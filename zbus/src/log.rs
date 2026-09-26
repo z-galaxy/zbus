@@ -7,11 +7,6 @@
 #[cfg(feature = "tracing")]
 pub(crate) use tracing::{Instrument, debug, info, info_span, trace, trace_span, warn};
 
-// The error level is called for by the runtime zbus brings along, where a task of it panics and
-// where its wait on the platform's poll fails.
-#[cfg(all(feature = "builtin-runtime", feature = "tracing"))]
-pub(crate) use tracing::error;
-
 #[cfg(not(feature = "tracing"))]
 mod noop {
     // The event shims type-check their arguments in a branch that is never taken, the way the
@@ -39,10 +34,6 @@ mod noop {
     macro_rules! warn_event {
         ($($arg:tt)*) => { $crate::log::event!($($arg)*) };
     }
-    #[cfg(feature = "builtin-runtime")]
-    macro_rules! error {
-        ($($arg:tt)*) => { $crate::log::event!($($arg)*) };
-    }
     macro_rules! trace_span {
         ($($arg:tt)*) => {
             $crate::log::Span
@@ -55,8 +46,6 @@ mod noop {
     }
 
     pub(crate) use debug;
-    #[cfg(feature = "builtin-runtime")]
-    pub(crate) use error;
     pub(crate) use event;
     pub(crate) use info;
     pub(crate) use info_span;
@@ -67,9 +56,6 @@ mod noop {
 
 #[cfg(not(feature = "tracing"))]
 pub(crate) use noop::{debug, event, info, info_span, trace, trace_span, warn};
-
-#[cfg(all(feature = "builtin-runtime", not(feature = "tracing")))]
-pub(crate) use noop::error;
 
 /// A no-op stand-in for `tracing::Span`, used when the `tracing` feature is disabled.
 #[cfg(not(feature = "tracing"))]

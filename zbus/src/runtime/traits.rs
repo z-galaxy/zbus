@@ -1,15 +1,14 @@
 //! What a runtime supplies to a connection.
 //!
-//! By default, a connection runs on the runtime zbus brings along (the `builtin-runtime`
-//! feature, on by default): one runtime per thread that runs [`block_on`](crate::block_on),
-//! driven by that thread, and by a helper thread only for work left with no thread inside
-//! `block_on`, with no runtime dependency of its own. A connection built inside a Tokio runtime
-//! runs on it instead (the `tokio` feature), and any other runtime reaches a connection through
-//! whatever implements [`Runtime`] and is handed to [`Builder::runtime`]. Implementing the trait
-//! takes a readiness registration, a timer and a task handle, all of which every async runtime
-//! already has, together with a hook for blocking work. Both built-in backends are
-//! implementations of these traits, and the polling-based runtime in zbus's integration tests is
-//! a worked example of the whole contract on a single thread.
+//! By default, a connection runs on [zruntime] (the `builtin-runtime` feature, on by default):
+//! one runtime per thread that runs [`block_on`](crate::block_on), driven by that thread, and by
+//! a helper thread only for work left with no thread inside `block_on`. A connection built inside
+//! a Tokio runtime runs on it instead (the `tokio` feature), and any other runtime reaches a
+//! connection through whatever implements [`Runtime`] and is handed to [`Builder::runtime`].
+//! Implementing the trait takes a readiness registration, a timer and a task handle, all of which
+//! every async runtime already has, together with a hook for blocking work. Both built-in
+//! backends are implementations of these traits, and the polling-based runtime in zbus's
+//! integration tests is a worked example of the whole contract on a single thread.
 //!
 //! The async locks a connection holds are not part of the trait: they are zbus's own, built on
 //! `event-listener`, so a build that runs on the built-in runtime needs no extra feature and
@@ -17,6 +16,7 @@
 //! build does not carry a second lock implementation.
 //!
 //! [`Builder::runtime`]: crate::connection::Builder::runtime
+//! [zruntime]: https://docs.rs/zruntime
 
 use std::{
     future::Future,

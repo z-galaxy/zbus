@@ -661,9 +661,9 @@ A connection used to pick its executor by cargo feature, with
 `Builder::internal_executor(false)` and `Connection::executor().tick()` as the way to drive
 zbus's tasks from another runtime. That pair is gone, together with the `Executor` and `Task`
 types. A connection takes its readiness, its timers, its internal tasks and its blocking work
-from one runtime: Tokio when the `tokio` feature is on and a runtime is current, otherwise the
-runtime zbus brings along (the `builtin-runtime` feature, on by default), or whatever you pass
-to `Builder::runtime`:
+from one runtime: Tokio when the `tokio` feature is on and a runtime is current, otherwise
+[zruntime] (the `builtin-runtime` feature, on by default), or whatever you pass to
+`Builder::runtime`:
 
 ```rust,no_run
 use zbus::{Connection, Result, connection::Builder, runtime::traits::Runtime};
@@ -680,9 +680,9 @@ that name with `builtin-runtime`. Dropping the name outright instead of renaming
 connection working when the build also enables the `tokio` feature or hands a runtime to
 `Builder::runtime` — otherwise nothing supplies a backend and building a connection returns
 `Error::Unsupported`. The backend behind it changed too: 5.x's feature pulled in the `async-io`,
-`async-executor`, `async-task` and `blocking` crates, whereas `builtin-runtime` is zbus's own
-reactor and task scheduler — one runtime per thread that runs `zbus::block_on`, driven by that
-thread — and depends on none of them.
+`async-executor`, `async-task` and `blocking` crates, whereas `builtin-runtime` builds on
+[zruntime] — a reactor and task scheduler of its own, one runtime per thread that runs
+`zbus::block_on`, driven by that thread — and depends on none of the four crates above.
 
 An implementation of `zbus::runtime::traits::Runtime` supplies a readiness registration, a timer
 and task spawning; every async runtime already has all three. Every socket a connection owns goes
@@ -835,3 +835,4 @@ build; move a signature across that boundary through its string form.
 [`zbus::wire`]: https://docs.rs/zbus/latest/zbus/wire/index.html
 [`zbus::names`]: https://docs.rs/zbus/latest/zbus/names/index.html
 [zgvariant]: https://crates.io/crates/zgvariant
+[zruntime]: https://docs.rs/zruntime
