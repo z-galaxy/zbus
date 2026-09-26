@@ -35,7 +35,7 @@ jobs:
           cache-extra-identifier: ${{ runner.arch }}
           bins: cargo-codspeed
       - name: Build the benchmark target(s)
-        run: cargo codspeed build -m walltime --features zbus/p2p
+        run: cargo codspeed build -m walltime
       - name: Run the benchmarks
         uses: CodSpeedHQ/action@v5
         with:
