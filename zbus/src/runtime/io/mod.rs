@@ -216,7 +216,7 @@ pub(crate) trait SocketOps: fmt::Debug + Send + Sync + 'static {
 #[derive(Debug)]
 pub(crate) enum Registration {
     #[cfg(feature = "builtin-runtime")]
-    Builtin(super::builtin::RegisteredIoSource),
+    Builtin(super::builtin::Registration),
     #[cfg(feature = "tokio")]
     Tokio(super::tokio_rt::Registration),
     External(Box<dyn ErasedRegistration>),

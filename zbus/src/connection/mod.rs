@@ -1889,9 +1889,9 @@ mod p2p_tests {
         )
     }
 
-    // A connection built outside every Tokio context lands on the runtime zbus brings along,
-    // even where Tokio is compiled in, and carries a whole peer-to-peer conversation there. The
-    // driver is `futures_lite`, which leaves the calling thread free of a Tokio context;
+    // A connection built outside every Tokio context lands on zruntime, even where Tokio is
+    // compiled in, and carries a whole peer-to-peer conversation there. The driver is
+    // `futures_lite`, which leaves the calling thread free of a Tokio context;
     // `crate::utils::block_on` would establish one on this build and so send the builder to the
     // Tokio arm instead. The guard on the spawned task is that runtime's own timer, so the task
     // and the timer are both under test here.

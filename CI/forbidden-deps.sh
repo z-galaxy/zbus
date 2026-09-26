@@ -1,12 +1,12 @@
 #!/bin/sh
 # Fails if any crate the builtin runtime does not need shows up as a normal dependency of zbus,
-# in whichever feature set the caller passes through. The builtin runtime is zbus's own task
-# scheduler and its own poll(2)-based reactor: no build of zbus should link async-io,
+# in whichever feature set the caller passes through. The builtin runtime builds on zruntime, a
+# task scheduler and poll(2)-based reactor of its own: no build of zbus should link async-io,
 # async-executor, async-task, blocking or their private dependencies as a normal dependency,
 # whether the builtin-runtime feature, the tokio feature, both or neither is on (`-e normal`
 # already excludes dev-dependencies, so the test suite's own use of async-io does not trip
-# this). `event-listener`, which zbus's own async locks build on, is expected in every tree and
-# is deliberately not on the forbidden list.
+# this). `event-listener`, which zbus's own async locks build on, and `zruntime` itself are
+# expected in every tree that enables `builtin-runtime`, and neither is on the forbidden list.
 #
 # Usage: forbidden-deps.sh <label> [cargo tree arguments...]
 #

@@ -61,11 +61,11 @@ comms = [
 # The runtime zbus ships: one runtime per thread that runs `zbus::block_on`, driven by that
 # thread (default).
 # `tokio` adds the Tokio backend, which a connection built inside a Tokio runtime prefers.
-builtin-runtime = ["comms"]
+builtin-runtime = ["comms", "dep:zruntime"]
 tokio = ["comms", "dep:tokio"]
 # Logging through `tracing` (default). With this off, zbus emits no log events or spans, and
 # `tokio`'s own `tracing` feature is not enabled either.
-tracing = ["dep:tracing", "tokio?/tracing"]
+tracing = ["dep:tracing", "tokio?/tracing", "zruntime?/tracing"]
 vsock = ["comms", "dep:vsock"]
 # The client-side (proxy) API (default).
 proxy = ["comms", "zbus_macros/proxy"]
@@ -113,6 +113,7 @@ heapless = { workspace = true, optional = true }
 serde_bytes = { workspace = true, optional = true }
 time = { workspace = true, optional = true }
 url = { workspace = true, optional = true }
+zruntime = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = [
     "rt",
     "rt-multi-thread",
@@ -165,7 +166,7 @@ tokio = { workspace = true, features = [
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tempfile.workspace = true
-criterion = { workspace = true, features = ["async"] }
+criterion.workspace = true
 serde_json.workspace = true
 chrono = { workspace = true, features = [
     "serde",
@@ -221,16 +222,6 @@ bench = false
 name = "benchmarks"
 harness = false
 required-features = ["comms"]
-
-[[bench]]
-name = "concurrent_method_calls"
-harness = false
-required-features = ["p2p", "service"]
-
-[[bench]]
-name = "runtime"
-harness = false
-required-features = ["p2p", "service"]
 
 [[bench]]
 name = "names"

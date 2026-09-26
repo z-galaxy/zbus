@@ -86,8 +86,8 @@ Tokio's locks stand in instead.
 
 ### Built-in backends
 
-With the `builtin-runtime` cargo feature (a default feature), a connection runs on the runtime zbus
-brings along, one per thread that runs `zbus::block_on`, depending on no runtime crate at all. The
+With the `builtin-runtime` cargo feature (a default feature), a connection runs on [zruntime], one
+per thread that runs `zbus::block_on`, depending on no general-purpose async executor crate. The
 thread that drives it is the one inside `zbus::block_on`: between two polls of the future handed to
 it, that thread runs the tasks, sockets and timers of every built-in connection built in it — apart
 from a handful of blocking system calls (a DNS lookup, a nonce-file read, a peer-credential lookup)
@@ -160,6 +160,7 @@ kind is handed over as the socket it wraps, such as `into_std()` for a Tokio str
 [cob]: faq.html#how-do-i-use-zbus-from-synchronous-code
 [`Builder::runtime`]: https://docs.rs/zbus/latest/zbus/connection/struct.Builder.html#method.runtime
 [`traits::Runtime`]: https://docs.rs/zbus/latest/zbus/runtime/traits/trait.Runtime.html
+[zruntime]: https://docs.rs/zruntime
 [`PollIo::poll_io`]: https://docs.rs/zbus/latest/zbus/runtime/traits/trait.PollIo.html#tymethod.poll_io
 [`spawn_blocking`]: https://docs.rs/zbus/latest/zbus/runtime/traits/trait.Runtime.html#method.spawn_blocking
 [`Builder::unix_stream`]: https://docs.rs/zbus/latest/zbus/connection/struct.Builder.html#method.unix_stream

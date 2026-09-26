@@ -181,7 +181,7 @@ fn main() -> Result<()> {
 
 Everything shown in the other chapters works the same way inside that future, and the program
 depends on zbus alone, plus `futures-util` if it reads signals or property changes from a
-stream. With the default `builtin-runtime` feature, the same thread also runs the connection's
+stream. With the default `builtin-runtime` feature, the same thread also runs [zruntime]'s
 scheduler and I/O reactor in between polls of the future, and a program that runs `block_on` on
 several threads drives their connections in parallel; with the `tokio` feature, Tokio's runtime
 runs them instead. A handful of blocking system calls — a DNS lookup, a nonce-file read, a
@@ -201,8 +201,8 @@ Two rules follow from the connection's work running on the calling thread:
 ## Why do async tokio API calls from interface methods not work?
 
 Many of the tokio (and tokio-based) APIs assume the tokio runtime to be driving the async
-machinery, and by default a connection's tasks and I/O run on zbus's own runtime, on the thread
-inside `zbus::block_on` (the `builtin-runtime` backend), which is not a tokio runtime. So it's not
+machinery, and by default a connection's tasks and I/O run on [zruntime], on the thread inside
+`zbus::block_on` (the `builtin-runtime` backend), which is not a tokio runtime. So it's not
 possible to use these APIs from interface methods.
 
 Not to worry, though! You can enable tight integration between tokio and zbus by enabling `tokio`
@@ -215,10 +215,10 @@ zbus = { version = "6", features = ["tokio"] }
 ```
 
 With both features enabled, the backend is chosen once per connection, when it is built: Tokio when
-a Tokio runtime is current on the thread that builds it, the runtime zbus brings along otherwise.
-This keeps the features additive, so an application that relies on the built-in backend keeps
-working even when another crate in the workspace enables zbus's `tokio` feature. To leave the
-built-in backend out of the build, disable default features and list what you use instead, e.g.
+a Tokio runtime is current on the thread that builds it, [zruntime] otherwise. This keeps the
+features additive, so an application that relies on the built-in backend keeps working even when
+another crate in the workspace enables zbus's `tokio` feature. To leave the built-in backend out of
+the build, disable default features and list what you use instead, e.g.
 `default-features = false, features = ["tokio", "proxy", "service"]`.
 
 This per-connection selection only matters for a program that has an async runtime of its own. A
@@ -401,3 +401,4 @@ assert_eq!(s, "Variant2");
 [`Value`]: https://docs.rs/zbus/latest/zbus/wire/enum.Value.html
 [`OwnedValue`]: https://docs.rs/zbus/latest/zbus/wire/struct.OwnedValue.html
 [`serde_repr`]: https://crates.io/crates/serde_repr
+[zruntime]: https://docs.rs/zruntime
