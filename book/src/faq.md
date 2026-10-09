@@ -471,122 +471,12 @@ A few things to be aware of:
 ## How do I connect over VSOCK?
 
 zbus has no transport for [VSOCK], which links a virtual machine to its host, as D-Bus defines no
-address for it. A connection still runs over a VSOCK stream that you open yourself: implement
-[`Socket`] for it, which splits it into a [`ReadHalf`] and a [`WriteHalf`], and
-[`connection::Builder::socket`] builds a connection over it. Here is an implementation for any
-stream of Tokio's, the `VsockStream` of the [tokio-vsock] crate among them:
-
-```rust,noplayground
-# #[cfg(unix)]
-# mod example {
-use std::{
-    fmt::Debug,
-    io,
-    os::fd::{BorrowedFd, OwnedFd},
-};
-
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use zbus::{
-    connection::{
-        AuthMechanism,
-        socket::{ReadHalf, Socket, Split, WriteHalf},
-    },
-    export::async_trait::async_trait,
-};
-
-/// A stream of Tokio's, as a socket for a connection to run over.
-#[derive(Debug)]
-pub struct Stream<S>(pub S);
-
-impl<S> Socket for Stream<S>
-where
-    S: AsyncRead + AsyncWrite + Debug + Send + Sync + 'static,
-{
-    type ReadHalf = Reader<S>;
-    type WriteHalf = Writer<S>;
-
-    fn split(self) -> Split<Reader<S>, Writer<S>> {
-        let (read, write) = tokio::io::split(self.0);
-
-        Split::new(Reader(read), Writer(write))
-    }
-}
-
-/// The half of a `Stream` that a connection receives through.
-#[derive(Debug)]
-pub struct Reader<S>(tokio::io::ReadHalf<S>);
-
-#[async_trait]
-impl<S> ReadHalf for Reader<S>
-where
-    S: AsyncRead + Debug + Send + Sync + 'static,
-{
-    async fn recvmsg(&mut self, buffer: &mut [u8]) -> io::Result<(usize, Vec<OwnedFd>)> {
-        let read = self.0.read(buffer).await?;
-
-        // Only bytes come over the stream, never file descriptors.
-        Ok((read, vec![]))
-    }
-
-    fn auth_mechanism(&self) -> AuthMechanism {
-        // The peer has no credentials to check.
-        AuthMechanism::Anonymous
-    }
-}
-
-/// The half of a `Stream` that a connection sends through.
-#[derive(Debug)]
-pub struct Writer<S>(tokio::io::WriteHalf<S>);
-
-#[async_trait]
-impl<S> WriteHalf for Writer<S>
-where
-    S: AsyncWrite + Debug + Send + Sync + 'static,
-{
-    async fn sendmsg(&mut self, buffer: &[u8], _fds: &[BorrowedFd<'_>]) -> io::Result<usize> {
-        // There are never any file descriptors to send: neither half says it can pass them, so
-        // the connection turns away any message that carries some.
-        self.0.write(buffer).await
-    }
-
-    async fn flush(&mut self) -> io::Result<()> {
-        // zbus calls this once it has handed over a whole message, so that a stream that
-        // buffers sends it on.
-        self.0.flush().await
-    }
-
-    async fn close(&mut self) -> io::Result<()> {
-        self.0.shutdown().await
-    }
-}
-# }
-#
-# // Any stream of Tokio's carries a connection through the halves above, a buffered one too.
-# #[cfg(all(unix, feature = "p2p"))]
-# #[tokio::main]
-# async fn main() -> zbus::Result<()> {
-#     use tokio::io::BufStream;
-#     use zbus::{Guid, connection::Builder};
-#
-#     let (p0, p1) = tokio::net::UnixStream::pair()?;
-#     let (p0, p1) = (BufStream::new(p0), BufStream::new(p1));
-#     let (_client, _server) = futures_util::try_join!(
-#         Builder::socket(example::Stream(p0)).p2p().build(),
-#         Builder::socket(example::Stream(p1)).server(Guid::generate()).p2p().build(),
-#     )?;
-#
-#     Ok(())
-# }
-#
-# #[cfg(not(all(unix, feature = "p2p")))]
-# fn main() {}
-```
-
-`Builder::socket(Stream(stream))` then builds a connection over `stream`. A stream of Tokio's is
-driven by the Tokio runtime it was created in, so create the stream and build the connection
-inside that runtime; with zbus's `tokio` feature, the connection runs on that runtime as well. As
-a VSOCK peer has no credentials to check, the read half asks for the `ANONYMOUS` authentication
-mechanism, which a bus at the other end has to allow.
+address for it. A connection still runs over a VSOCK stream that you open yourself, such as the
+`VsockStream` of the [tokio-vsock] crate: implement [`Socket`] for it and hand it to
+[`connection::Builder::socket`]. The `Socket` documentation has an implementation for any stream
+of Tokio's, `VsockStream` among them. As a VSOCK peer has no credentials to check, that
+implementation asks for the `ANONYMOUS` authentication mechanism, which a bus at the other end has
+to allow.
 
 [`proxy::Builder::uncached_properties`]: https://docs.rs/zbus/latest/zbus/proxy/struct.Builder.html#method.uncached_properties
 [`proxy::Builder::cache_properties`]: https://docs.rs/zbus/latest/zbus/proxy/struct.Builder.html#method.cache_properties
@@ -606,7 +496,5 @@ mechanism, which a bus at the other end has to allow.
 [zruntime]: https://docs.rs/zruntime
 [VSOCK]: https://man7.org/linux/man-pages/man7/vsock.7.html
 [`Socket`]: https://docs.rs/zbus/latest/zbus/connection/socket/trait.Socket.html
-[`ReadHalf`]: https://docs.rs/zbus/latest/zbus/connection/socket/trait.ReadHalf.html
-[`WriteHalf`]: https://docs.rs/zbus/latest/zbus/connection/socket/trait.WriteHalf.html
 [`connection::Builder::socket`]: https://docs.rs/zbus/latest/zbus/connection/struct.Builder.html#method.socket
 [tokio-vsock]: https://docs.rs/tokio-vsock

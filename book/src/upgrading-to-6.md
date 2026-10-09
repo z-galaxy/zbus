@@ -427,12 +427,10 @@ rejects a `vsock:` address now. D-Bus never took VSOCK up, neither in its specif
 its reference implementation, so zbus no longer carries a transport of its own for it.
 
 A connection still runs over a VSOCK stream that you open yourself, such as a
-`tokio_vsock::VsockStream`: implement `Socket` for it and hand it to `Builder::socket`. A VSOCK peer
-has no credentials to check, so have the read half's `auth_mechanism` return
-`AuthMechanism::Anonymous`, the mechanism zbus's own VSOCK transport used, or set it with
-`Builder::auth_mechanism`. File descriptors cannot travel over the stream, so leave
-`can_pass_unix_fd` at its default of `false`.
-[The FAQ][vsock-socket] has such an implementation, for any stream of Tokio's.
+`tokio_vsock::VsockStream`: implement [`Socket`] for it and hand it to `Builder::socket`. The
+`Socket` documentation has such an implementation, for any stream of Tokio's. A VSOCK peer has no
+credentials to check, so that implementation authenticates with `AuthMechanism::Anonymous`, the
+mechanism zbus's own VSOCK transport used.
 
 ### The encoding context has no format
 
@@ -1069,7 +1067,7 @@ build; move a signature across that boundary through its string form.
 [flag-types]: #the-flag-types-are-bitflags-types
 [enumflags2]: #the-enumflags2-feature-is-gone
 [vsock]: #vsock-is-not-a-transport-of-zbus-anymore
-[vsock-socket]: faq.md#how-do-i-connect-over-vsock
+[`Socket`]: https://docs.rs/zbus/latest/zbus/connection/socket/trait.Socket.html
 [bit-flags]: faq.md#how-do-i-use-bit-flags
 [`zbus::wire`]: https://docs.rs/zbus/latest/zbus/wire/index.html
 [`zbus::names`]: https://docs.rs/zbus/latest/zbus/names/index.html

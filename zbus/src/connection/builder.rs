@@ -237,6 +237,10 @@ impl<'a> Builder<'a> {
     }
 
     /// Create a builder for a connection that will use the given socket.
+    ///
+    /// See [`Socket`] for when to implement a socket of your own, and how.
+    ///
+    /// [`Socket`]: crate::connection::Socket
     pub fn socket<S: Into<BoxedSplit>>(socket: S) -> Self {
         Self::new(Target::Socket(socket.into()))
     }
