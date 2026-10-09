@@ -427,12 +427,10 @@ rejects a `vsock:` address now. D-Bus never took VSOCK up, neither in its specif
 its reference implementation, so zbus no longer carries a transport of its own for it.
 
 A connection still runs over a VSOCK stream that you open yourself, such as a
-`tokio_vsock::VsockStream`: implement `Socket` for it and hand it to `Builder::socket`. A VSOCK peer
-has no credentials to check, so have the read half's `auth_mechanism` return
-`AuthMechanism::Anonymous`, the mechanism zbus's own VSOCK transport used, or set it with
-`Builder::auth_mechanism`. File descriptors cannot travel over the stream, so leave
-`can_pass_unix_fd` at its default of `false`.
-[The FAQ][vsock-socket] has such an implementation, for any stream of Tokio's.
+`tokio_vsock::VsockStream`: implement [`Socket`] for it and hand it to `Builder::socket`. The
+`Socket` documentation has such an implementation, for any stream of Tokio's. A VSOCK peer has no
+credentials to check, so that implementation authenticates with `AuthMechanism::Anonymous`, the
+mechanism zbus's own VSOCK transport used.
 
 ### The encoding context has no format
 
@@ -699,21 +697,12 @@ connection working when the build also enables the `tokio` feature or hands a ru
 [zruntime] — a reactor and task scheduler of its own, one runtime per thread that runs
 `zbus::block_on`, driven by that thread — and depends on none of the four crates above.
 
-An implementation of `zbus::runtime::traits::Runtime` supplies a readiness registration, a timer and
-task spawning; every async runtime already has all three. Every socket a connection owns goes
-through the same registration, and so do the pipes to the helper process behind a `unixexec:`,
-`ibus:` or `launchd:` address, so `async-process` is no longer a dependency. Connecting a `tcp:` or
-`unix:` socket and spawning that helper process are methods of the trait too — `connect_tcp`,
-`connect_unix` and, on unix, `spawn_process` — which a runtime implements with what it has: a
-non-blocking connect and a way to wait for a child to exit, or, for whichever of those it lacks, a
-thread for blocking work; a runtime can also look at a child at an interval on its timer, as the
-example runtime in zbus's integration tests does. A handful of calls that have no async form — a
-`tcp:` host-name lookup, a `nonce-tcp:` file read, the peer-credential group lookup — go through
-the trait's `spawn_blocking`, the one method with a default, which hands them to a thread of
-zruntime's pool for blocking work. zbus never drives the runtime, so the tasks a connection spawns
-only run while the runtime runs them. The two built-in backends are implementations of the same
-trait, picked by cargo feature, so this method is for the runtime your application already has.
-Nothing changes for connections built without `runtime`.
+The [`runtime::traits`] module documents what an implementation of
+`zbus::runtime::traits::Runtime` supplies. A connection's runtime also spawns the helper process
+behind a `unixexec:`, `ibus:` or `launchd:` address and watches the pipes to it, as it watches
+every socket the connection owns, so `async-process` is no longer a dependency. The two built-in
+backends are implementations of the same trait, picked by cargo feature, so this method is for the
+runtime your application already has. Nothing changes for connections built without `runtime`.
 
 zbus's async locks are not part of the trait: 5.x takes them from the `async-lock` crate; 6.0 has
 no dependency on it at all and takes them from zruntime, which it depends on anyway, or from Tokio
@@ -1069,7 +1058,8 @@ build; move a signature across that boundary through its string form.
 [flag-types]: #the-flag-types-are-bitflags-types
 [enumflags2]: #the-enumflags2-feature-is-gone
 [vsock]: #vsock-is-not-a-transport-of-zbus-anymore
-[vsock-socket]: faq.md#how-do-i-connect-over-vsock
+[`Socket`]: https://docs.rs/zbus/latest/zbus/connection/socket/trait.Socket.html
+[`runtime::traits`]: https://docs.rs/zbus/latest/zbus/runtime/traits/index.html
 [bit-flags]: faq.md#how-do-i-use-bit-flags
 [`zbus::wire`]: https://docs.rs/zbus/latest/zbus/wire/index.html
 [`zbus::names`]: https://docs.rs/zbus/latest/zbus/names/index.html

@@ -41,10 +41,130 @@ pub(crate) type RecvmsgResult = io::Result<usize>;
 /// A unix or TCP stream needs none of this: hand the socket itself to [`Builder::unix_stream`] or
 /// [`Builder::tcp_stream`] and the connection drives it on its own runtime. Implement this trait
 /// for a transport that is neither, such as a VSOCK stream, an in-process channel or a tunnel of
-/// your own.
+/// your own, and hand it to [`Builder::socket`] or [`Builder::authenticated_socket`].
+///
+/// # Example
+///
+/// An implementation for any stream of Tokio's, the `VsockStream` of the [tokio-vsock] crate
+/// among them:
+///
+/// ```
+/// # #[cfg(unix)]
+/// # mod example {
+/// use std::{
+///     fmt::Debug,
+///     io,
+///     os::fd::{BorrowedFd, OwnedFd},
+/// };
+///
+/// use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+/// use zbus::{
+///     connection::{
+///         AuthMechanism,
+///         socket::{ReadHalf, Socket, Split, WriteHalf},
+///     },
+///     export::async_trait::async_trait,
+/// };
+///
+/// /// A stream of Tokio's, as a socket for a connection to run over.
+/// #[derive(Debug)]
+/// pub struct Stream<S>(pub S);
+///
+/// impl<S> Socket for Stream<S>
+/// where
+///     S: AsyncRead + AsyncWrite + Debug + Send + Sync + 'static,
+/// {
+///     type ReadHalf = Reader<S>;
+///     type WriteHalf = Writer<S>;
+///
+///     fn split(self) -> Split<Reader<S>, Writer<S>> {
+///         let (read, write) = tokio::io::split(self.0);
+///
+///         Split::new(Reader(read), Writer(write))
+///     }
+/// }
+///
+/// /// The half of a `Stream` that a connection receives through.
+/// #[derive(Debug)]
+/// pub struct Reader<S>(tokio::io::ReadHalf<S>);
+///
+/// #[async_trait]
+/// impl<S> ReadHalf for Reader<S>
+/// where
+///     S: AsyncRead + Debug + Send + Sync + 'static,
+/// {
+///     async fn recvmsg(&mut self, buffer: &mut [u8]) -> io::Result<(usize, Vec<OwnedFd>)> {
+///         let read = self.0.read(buffer).await?;
+///
+///         // Only bytes come over the stream, never file descriptors.
+///         Ok((read, vec![]))
+///     }
+///
+///     fn auth_mechanism(&self) -> AuthMechanism {
+///         // The peer has no credentials to check.
+///         AuthMechanism::Anonymous
+///     }
+/// }
+///
+/// /// The half of a `Stream` that a connection sends through.
+/// #[derive(Debug)]
+/// pub struct Writer<S>(tokio::io::WriteHalf<S>);
+///
+/// #[async_trait]
+/// impl<S> WriteHalf for Writer<S>
+/// where
+///     S: AsyncWrite + Debug + Send + Sync + 'static,
+/// {
+///     async fn sendmsg(&mut self, buffer: &[u8], _fds: &[BorrowedFd<'_>]) -> io::Result<usize> {
+///         // There are never any file descriptors to send: neither half says it can pass them,
+///         // so the connection turns away any message that carries some.
+///         self.0.write(buffer).await
+///     }
+///
+///     async fn flush(&mut self) -> io::Result<()> {
+///         // zbus calls this once it has handed over a whole message, so that a stream that
+///         // buffers sends it on.
+///         self.0.flush().await
+///     }
+///
+///     async fn close(&mut self) -> io::Result<()> {
+///         self.0.shutdown().await
+///     }
+/// }
+/// # }
+/// #
+/// # // Any stream of Tokio's carries a connection through the halves above, a buffered one too.
+/// # #[cfg(all(unix, feature = "p2p"))]
+/// # #[tokio::main]
+/// # async fn main() -> zbus::Result<()> {
+/// #     use tokio::io::BufStream;
+/// #     use zbus::{Guid, connection::Builder};
+/// #
+/// #     let (p0, p1) = tokio::net::UnixStream::pair()?;
+/// #     let (p0, p1) = (BufStream::new(p0), BufStream::new(p1));
+/// #     let (_client, _server) = futures_util::try_join!(
+/// #         Builder::socket(example::Stream(p0)).p2p().build(),
+/// #         Builder::socket(example::Stream(p1)).server(Guid::generate()).p2p().build(),
+/// #     )?;
+/// #
+/// #     Ok(())
+/// # }
+/// #
+/// # #[cfg(not(all(unix, feature = "p2p")))]
+/// # fn main() {}
+/// ```
+///
+/// `Builder::socket(Stream(stream))` then builds a connection over `stream`. A stream of Tokio's
+/// is driven by the Tokio runtime it was created in, so create the stream and build the
+/// connection inside that runtime; with the `tokio` feature, the connection runs on that runtime
+/// as well. As the peer on such a stream has no credentials to check, the read half asks for the
+/// `ANONYMOUS` authentication mechanism, which a bus at the other end has to allow.
 ///
 /// [`Builder::unix_stream`]: crate::connection::Builder::unix_stream
 /// [`Builder::tcp_stream`]: crate::connection::Builder::tcp_stream
+/// [`Builder::socket`]: crate::connection::Builder::socket
+/// [`Builder::authenticated_socket`]: crate::connection::Builder::authenticated_socket
+/// [tokio-vsock]: https://docs.rs/tokio-vsock
 pub trait Socket {
     type ReadHalf: ReadHalf;
     type WriteHalf: WriteHalf;

@@ -163,12 +163,13 @@ pub trait Runtime: Send + Sync + 'static {
     /// A runtime that can wait for a child to exit without a thread, through a pidfd, a kqueue or
     /// a handler for `SIGCHLD`, does so. One that cannot waits for the child with a blocking
     /// `wait` on a thread for blocking work, which it holds for as long as the process runs: a
-    /// `unixexec:` program runs until its input ends, so one that ignores the end of its input
-    /// keeps the thread. Or it looks at the child at an interval on its timer, as the example
-    /// runtime in zbus's integration tests does, which holds no thread but finds the exit only at
-    /// the next look. The future outlives the borrow of `self`, so a wait it starts later goes
-    /// through something it owns: a handle of the runtime's that it keeps, or a pool of threads it
-    /// reaches without one, such as the pool behind zruntime's `unblock`.
+    /// `unixexec:` program runs until its input ends, which closing the connection does, so one
+    /// that ignores the end of its input keeps the thread. Or it looks at the child at an interval
+    /// on its timer, as the example runtime in zbus's integration tests does, which holds no thread
+    /// but finds the exit only at the next look. The future outlives the borrow of `self`, so a
+    /// wait it starts later goes through something it owns: a handle of the runtime's that it
+    /// keeps, or a pool of threads it reaches without one, such as the pool behind zruntime's
+    /// `unblock`.
     #[cfg(unix)]
     fn spawn_process(
         &self,
