@@ -464,6 +464,25 @@ values that implement `Try`", pointing straight at the call site to clean up. A 
 after `MatchRule::builder()...build()` fails the opposite way, with a type mismatch between
 `MatchRule` and whatever type the rest of the function expected. Both are one-line fixes.
 
+Holding on to the error makes `message::Builder` and `match_rule::Builder` carry a
+`zbus::Error`, which is neither `UnwindSafe` nor `RefUnwindSafe`: its I/O and `DBusError`
+variants can hold a payload of any type behind a trait object. So these two builders no longer
+implement either trait, and code that moved one into a `catch_unwind` closure stops compiling.
+The error a builder holds comes from converting the arguments passed to its setters. Strings
+and zbus's own types only ever fail with zbus's own validation errors, which hold no such
+payload, so unless a setter receives a type with a conversion of your own, wrap the closure in
+`AssertUnwindSafe`:
+
+```rust,noplayground
+use std::panic::{AssertUnwindSafe, catch_unwind};
+
+use zbus::Message;
+
+let builder = Message::method_call("/org/zbus/Test", "Test").destination("org.zbus.Test");
+catch_unwind(AssertUnwindSafe(|| builder.build(&()))).unwrap()?;
+# Ok::<(), zbus::Error>(())
+```
+
 ### Property methods use Serde traits
 
 Property APIs now use the same Serde traits and `Type` bounds as regular methods. Client-side
