@@ -11,6 +11,8 @@ mod issue_1478;
 mod issue_173;
 #[cfg(all(feature = "proxy", feature = "object-manager"))]
 mod issue_1916;
+#[cfg(all(feature = "proxy", feature = "service"))]
+mod issue_2076;
 #[cfg(feature = "proxy")]
 mod issue_260;
 #[cfg(feature = "proxy")]

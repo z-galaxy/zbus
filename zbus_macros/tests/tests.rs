@@ -590,3 +590,61 @@ fn interface_property_setter_with_serde() {
 
     assert_eq!(Thermostat::name(), "org.freedesktop.Thermostat");
 }
+
+#[test]
+fn interface_args_with_lifetimes() {
+    use serde::{Deserialize, Deserializer};
+    use std::marker::PhantomData;
+    use zbus::{ObjectPath, OwnedObjectPath, Signature, Type, object_server::Interface};
+
+    // A string, typed with anything, such as a type declaring lifetimes of its own.
+    struct Marker<F>(PhantomData<F>);
+
+    impl<F> Type for Marker<F> {
+        const SIGNATURE: &'static Signature = &Signature::Str;
+    }
+
+    impl<'de, F> Deserialize<'de> for Marker<F> {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            <&str>::deserialize(deserializer).map(|_| Marker(PhantomData))
+        }
+    }
+
+    struct Lifetimes;
+
+    #[interface(name = "org.freedesktop.Lifetimes")]
+    impl Lifetimes {
+        // The lifetimes that a binder in the type declares stay.
+        fn binder(&self, _marker: &Marker<for<'a> fn(&'a str)>) {}
+
+        #[zbus(property)]
+        fn marker(&self) -> String {
+            String::new()
+        }
+
+        #[zbus(property)]
+        fn set_marker(&self, _marker: Marker<for<'a> fn(&'a str)>) {}
+
+        // The lifetime parameters of a setter aren't in scope where its value is deserialized.
+        #[zbus(property)]
+        fn path(&self) -> OwnedObjectPath {
+            ObjectPath::from_static_str_unchecked("/").into()
+        }
+
+        #[zbus(property)]
+        fn set_path<'a>(&self, _path: ObjectPath<'a>) {}
+
+        #[zbus(property)]
+        fn borrowed_path(&self) -> OwnedObjectPath {
+            ObjectPath::from_static_str_unchecked("/").into()
+        }
+
+        #[zbus(property)]
+        fn set_borrowed_path<'a>(&self, _path: &ObjectPath<'a>) {}
+    }
+
+    assert_eq!(Lifetimes::name(), "org.freedesktop.Lifetimes");
+}
