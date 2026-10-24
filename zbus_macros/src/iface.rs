@@ -2,11 +2,11 @@ use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote, quote_spanned};
 use std::collections::BTreeMap;
 use syn::{
-    AngleBracketedGenericArguments, Attribute, Error, Expr, ExprLit, FnArg, Ident, ImplItem,
-    ImplItemFn, ItemImpl,
+    AngleBracketedGenericArguments, Attribute, BoundLifetimes, Error, Expr, ExprLit, FnArg,
+    GenericParam, Ident, ImplItem, ImplItemFn, ItemImpl,
     Lit::Str,
-    Meta, MetaNameValue, PatType, PathArguments, ReturnType, Signature, Token, Type, TypePath,
-    TypeReference, Visibility,
+    Meta, MetaNameValue, PatType, PathArguments, ReturnType, Signature, Token, TraitBound, Type,
+    TypeFnPtr, TypePath, TypeReference, Visibility,
     fold::Fold,
     parse::{Parse, ParseStream},
     parse_quote, parse_str,
@@ -566,12 +566,16 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, mut input: ItemImpl) -> syn::Re
                                 },
                             )
                         }
-                        None => (
-                            quote! { #value_ty },
-                            quote! {
-                                let #value_param_name = #storage;
-                            },
-                        ),
+                        None => {
+                            let value_ty = elide_lifetimes(value_ty);
+
+                            (
+                                quote! { #value_ty },
+                                quote! {
+                                    let #value_param_name = #storage;
+                                },
+                            )
+                        }
                     };
                     // Each arm yields `Result<(), BoxDBusError>`. A getter's failure inside the
                     // `*_changed` helper is carried by `Error::DBus`, which the conversion boxes
@@ -1133,12 +1137,65 @@ fn borrow_ref_arg(ty: &Type, storage: &Ident) -> Option<TokenStream> {
     let Type::Reference(reference) = pointee else {
         return None;
     };
-    let pointee = &reference.elem;
+    let pointee = elide_lifetimes(&reference.elem);
 
     // The span makes the compiler point at the argument if no implementation applies.
     Some(quote_spanned! {ty.span()=>
         (&&&__ZbusRefArgOf::<#pointee>(::std::marker::PhantomData)).__zbus_ref_arg(&#storage)
     })
+}
+
+/// `ty` with its free lifetimes, other than `'static`, elided.
+///
+/// The generated code names the types of the arguments outside of the methods and setters taking
+/// them, where the lifetime parameters of those aren't declared. The lifetimes that a `for<..>`
+/// binder in `ty` declares are kept, as they're declared within `ty`.
+fn elide_lifetimes(ty: &Type) -> Type {
+    /// The lifetimes the binders around the current node declare.
+    struct ElideLifetimes(Vec<Ident>);
+
+    impl ElideLifetimes {
+        /// Fold `node` with the lifetimes `binder` declares kept.
+        fn within<T>(
+            &mut self,
+            binder: Option<&BoundLifetimes>,
+            node: T,
+            fold: impl FnOnce(&mut Self, T) -> T,
+        ) -> T {
+            let len = self.0.len();
+            let declared = binder.into_iter().flat_map(|binder| &binder.lifetimes);
+            self.0.extend(declared.filter_map(|param| match param {
+                GenericParam::Lifetime(param) => Some(param.lifetime.ident.clone()),
+                _ => None,
+            }));
+            let node = fold(self, node);
+            self.0.truncate(len);
+
+            node
+        }
+    }
+
+    impl Fold for ElideLifetimes {
+        fn fold_type_fn_ptr(&mut self, node: TypeFnPtr) -> TypeFnPtr {
+            let binder = node.lifetimes.clone();
+            self.within(binder.as_ref(), node, syn::fold::fold_type_fn_ptr)
+        }
+
+        fn fold_trait_bound(&mut self, node: TraitBound) -> TraitBound {
+            let binder = node.lifetimes.clone();
+            self.within(binder.as_ref(), node, syn::fold::fold_trait_bound)
+        }
+
+        fn fold_lifetime(&mut self, lifetime: syn::Lifetime) -> syn::Lifetime {
+            if lifetime.ident == "static" || self.0.contains(&lifetime.ident) {
+                return lifetime;
+            }
+
+            syn::Lifetime::new("'_", lifetime.span())
+        }
+    }
+
+    ElideLifetimes(vec![]).fold_type(ty.clone())
 }
 
 fn get_args_from_inputs(
