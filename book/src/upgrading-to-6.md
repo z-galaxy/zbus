@@ -335,8 +335,9 @@ All of these but `#[zbus(signal_context)]` warned in 5.19:
   `Context::new(LE, 0)`, `Signature::alignment(format)` is `alignment_dbus()` and
   `Basic::alignment(format)` is `alignment()`.
 * **`StructureSeed` has no lifetime parameter.**
-* **`PropertiesProxy::set` takes a `&Variant`.** `#[interface]` methods accept references to any
-  sized type as arguments now, but a slice such as `&[u8]` no longer compiles; take a `Vec<u8>`.
+* **`PropertiesProxy::set` takes a `&Variant`.** `#[interface]` methods and property setters
+  accept references to any deserializable type, such as `&Variant<'_>`, and to any slice of one,
+  such as `&[u32]`, as arguments now.
 * **`DBusProxy::start_service_by_name` returns a `StartServiceReply`** instead of a `u32`.
 * **Name types validate when converted from a `Variant`**, failing with `Error::InvalidName`.
 * **`Optional<T>` compares with the null value before converting**, so the empty string reads back
