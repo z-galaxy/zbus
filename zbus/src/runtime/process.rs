@@ -25,15 +25,16 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(feature = "unixexec")]
+use super::io::Reader;
 use super::{
     Runtime,
     io::{PipeOps, RegisteredIo, registered},
 };
-use crate::connection::socket::ReadHalf;
 #[cfg(feature = "unixexec")]
 use crate::{
     Message,
-    connection::socket::{BoxedSplit, Split, WriteHalf},
+    connection::socket::{BoxedSplit, ReadHalf, Split, WriteHalf},
     fdo::ConnectionCredentials,
 };
 
@@ -74,13 +75,13 @@ pub(crate) fn spawn(runtime: &Runtime, command: Command) -> io::Result<Child> {
 /// runtime to collect as it sees fit.
 #[cfg(any(feature = "ibus", target_os = "macos"))]
 pub(crate) async fn stdout(runtime: &Runtime, command: Command) -> io::Result<Vec<u8>> {
-    let (mut pipe, child_stdout) = pipe_from(runtime)?;
+    let (pipe, child_stdout) = pipe_from(runtime)?;
     let exit = runtime.spawn_process(command, Stdio::null(), child_stdout, Stdio::null())?;
 
     let mut collected = Vec::new();
     let mut buffer = [0; 4096];
     loop {
-        let (read, _) = ReadHalf::recvmsg(&mut pipe, &mut buffer).await?;
+        let (read, _) = pipe.recv(&mut buffer).await?;
         if read == 0 {
             break;
         }
@@ -119,7 +120,7 @@ impl Child {
         let Self { stdin, stdout } = self;
 
         Split::new(
-            Box::new(stdout) as Box<dyn ReadHalf>,
+            Box::new(Reader::new(stdout)) as Box<dyn ReadHalf>,
             Box::new(Stdin { pipe: Some(stdin) }) as Box<dyn WriteHalf>,
         )
     }

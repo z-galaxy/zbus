@@ -5,6 +5,7 @@
 
 #[cfg(unix)]
 use std::{
+    collections::VecDeque,
     io::IoSlice,
     os::{
         fd::{AsFd, BorrowedFd, OwnedFd},
@@ -25,16 +26,19 @@ use socket2::{Domain, SockRef, Socket, Type};
 
 #[cfg(all(unix, any(feature = "default-rt", feature = "tokio")))]
 use super::unix_socket_address;
-use super::{RegisteredIo, TcpOps};
 #[cfg(unix)]
-use super::{SocketOps, UnixOps};
+use super::{Reader, SocketOps, UnixOps};
+use super::{RegisteredIo, TcpOps};
 #[cfg(unix)]
 use crate::runtime::{Runtime, test_runtime::TestRuntime};
 #[cfg(unix)]
-use crate::{Fd, connection::socket::RecvmsgResult};
+use crate::{
+    Fd,
+    connection::socket::{ReadHalf, RecvmsgResult},
+};
 use crate::{
     Message,
-    connection::socket::{ReadHalf, WriteHalf},
+    connection::socket::WriteHalf,
     runtime::{IoSource, test_runtime::under_every_runtime},
 };
 
@@ -64,7 +68,7 @@ fn file_descriptors_cross_a_unix_socket() {
     under_every_runtime(|runtime| async move {
         let (left, right) = UnixStream::pair().unwrap();
         let mut sender = half(&runtime, left, UnixOps);
-        let mut receiver = half(&runtime, right, UnixOps);
+        let receiver = half(&runtime, right, UnixOps);
 
         let (read_end, mut write_end) = std::io::pipe().unwrap();
         write_end.write_all(b"through the pipe").unwrap();
@@ -78,7 +82,7 @@ fn file_descriptors_cross_a_unix_socket() {
         assert_eq!(written, 1);
 
         let mut byte = [0; 1];
-        let (read, mut fds) = receiver.recvmsg(&mut byte).await.unwrap();
+        let (read, mut fds) = receiver.recv(&mut byte).await.unwrap();
         assert_eq!(read, 1);
         assert_eq!(&byte, b"!");
         assert_eq!(fds.len(), 1, "the descriptor did not come with the byte");
@@ -103,7 +107,7 @@ fn a_message_with_descriptors_starts_a_write_of_its_own() {
         let ops = Recording::default();
         let writes = ops.writes.clone();
         let mut sender = half(&runtime, left, ops);
-        let mut receiver = half(&runtime, right, UnixOps);
+        let mut receiver = Reader::new(half(&runtime, right, UnixOps));
         // More messages without descriptors than a write takes, then one with, one without, and
         // another with.
         let (read_end, _write_end) = std::io::pipe().unwrap();
@@ -152,7 +156,7 @@ fn a_write_ends_with_the_message_that_brings_it_to_16_kib() {
         let ops = Recording::default();
         let writes = ops.writes.clone();
         let mut sender = half(&runtime, left, ops);
-        let mut receiver = half(&runtime, right, UnixOps);
+        let mut receiver = Reader::new(half(&runtime, right, UnixOps));
         let msgs: Vec<_> = [10, 4, 4, 10, 20, 20, 1]
             .into_iter()
             .map(|kib| {
@@ -194,7 +198,7 @@ fn a_batch_larger_than_the_send_buffer_goes_through_in_order() {
         let (left, right) = UnixStream::pair().unwrap();
         rustix::net::sockopt::set_socket_send_buffer_size(&left, 4096).unwrap();
         let mut sender = half(&runtime, left, UnixOps);
-        let mut receiver = half(&runtime, right, UnixOps);
+        let mut receiver = Reader::new(half(&runtime, right, UnixOps));
         let msgs: Vec<_> = (0..40u8)
             .map(|i| {
                 Message::method_call("/", "Test")
@@ -218,6 +222,416 @@ fn a_batch_larger_than_the_send_buffer_goes_through_in_order() {
     });
 }
 
+/// Messages that are in the socket together come in with one read.
+#[cfg(unix)]
+#[test]
+#[timeout(15000)]
+fn messages_in_the_socket_together_come_in_with_one_read() {
+    under_every_runtime(|runtime| async move {
+        let (left, right) = UnixStream::pair().unwrap();
+        let mut sender = half(&runtime, left, UnixOps);
+        let ops = Trickle::default();
+        let reads = ops.reads.clone();
+        let mut receiver = Reader::new(half(&runtime, right, ops));
+        let msgs: Vec<_> = (0..10u32)
+            .map(|i| Message::method_call("/", "Test").build(&i).unwrap())
+            .collect();
+
+        sender.send_messages(&msgs).await.unwrap();
+
+        for (seq, sent) in msgs.iter().enumerate() {
+            let received = receiver
+                .receive_message(seq as u64, &mut vec![], &mut vec![])
+                .await
+                .unwrap();
+            assert_eq!(&received.data()[..], &sent.data()[..]);
+        }
+        assert_eq!(
+            *reads.lock().unwrap(),
+            1,
+            "the messages took more than one read"
+        );
+    });
+}
+
+/// Messages come out whole and in order however the reads split them: through the middle of a
+/// primary header, across the end of the buffer, or a few bytes at a time through a message that
+/// is longer than the buffer.
+#[cfg(unix)]
+#[test]
+#[timeout(15000)]
+fn messages_come_out_whole_however_the_reads_split_them() {
+    under_every_runtime(|runtime| async move {
+        let (left, right) = UnixStream::pair().unwrap();
+        let mut sender = half(&runtime, left, UnixOps);
+        let mut receiver = Reader::new(half(
+            &runtime,
+            right,
+            Trickle::with_sizes(&[1, 7, 30, 1000]),
+        ));
+        let msgs: Vec<_> = [0, 1000, 3, 5000, 200, 4000, 20_000, 1]
+            .into_iter()
+            .map(|len| {
+                Message::method_call("/", "Test")
+                    .build(&vec![len as u8; len])
+                    .unwrap()
+            })
+            .collect();
+
+        let receive = async {
+            for (seq, sent) in msgs.iter().enumerate() {
+                let received = receiver
+                    .receive_message(seq as u64, &mut vec![], &mut vec![])
+                    .await
+                    .unwrap();
+                assert_eq!(&received.data()[..], &sent.data()[..]);
+            }
+        };
+        let (sent, ()) = futures_util::join!(sender.send_messages(&msgs), receive);
+
+        sent.unwrap();
+    });
+}
+
+/// A message takes the file descriptors that came with it, and only those, whether a read brings
+/// them along with the messages before it, or the messages after it that the same write carried.
+#[cfg(unix)]
+#[test]
+#[timeout(15000)]
+fn a_message_takes_its_own_descriptors_however_the_reads_split_them() {
+    for sizes in [&[usize::MAX][..], &[1, 7, 30]] {
+        under_every_runtime(|runtime| async move {
+            let (left, right) = UnixStream::pair().unwrap();
+            let mut sender = half(&runtime, left, UnixOps);
+            let mut receiver = Reader::new(half(&runtime, right, Trickle::with_sizes(sizes)));
+            let pipes: Vec<_> = (0..3).map(|i| pipe_with(&format!("pipe {i}"))).collect();
+            // The writes are [0], [1, 2, 3] with the descriptor of pipe 0, and [4, 5] with those
+            // of pipes 1 and 2.
+            let msgs: Vec<_> = (0..6u32)
+                .map(|i| {
+                    let builder = Message::method_call("/", "Test");
+                    match i {
+                        1 => builder.build(&(i, Fd::from(pipes[0].as_fd()))),
+                        4 => builder.build(&(
+                            i,
+                            Fd::from(pipes[1].as_fd()),
+                            Fd::from(pipes[2].as_fd()),
+                        )),
+                        _ => builder.build(&i),
+                    }
+                    .unwrap()
+                })
+                .collect();
+
+            sender.send_messages(&msgs).await.unwrap();
+
+            let mut received_from = vec![];
+            for (seq, sent) in msgs.iter().enumerate() {
+                let received = receiver
+                    .receive_message(seq as u64, &mut vec![], &mut vec![])
+                    .await
+                    .unwrap();
+                assert_eq!(&received.data()[..], &sent.data()[..]);
+                received_from.push(
+                    received
+                        .data()
+                        .fds()
+                        .iter()
+                        .map(|fd| read_from(fd.as_fd()))
+                        .collect::<Vec<_>>(),
+                );
+            }
+            let none: [&str; 0] = [];
+            assert_eq!(
+                received_from,
+                [
+                    &none[..],
+                    &["pipe 0"],
+                    &none,
+                    &none,
+                    &["pipe 1", "pipe 2"],
+                    &none
+                ],
+                "the descriptors went with other messages than their own",
+            );
+        });
+    }
+}
+
+/// A message takes the file descriptors that came with it however the kernel splits the writes
+/// of the peer into reads. On Linux, the read that returns the descriptors may start with the data
+/// written before them, and ends with the data written along with them, if not before. BSD-derived
+/// kernels start that read with the data written along with them, and may go on with the data
+/// written after it. A write may also carry messages without any after the one that they came
+/// with, as `WriteHalf::send_messages` does.
+#[cfg(unix)]
+#[test]
+#[timeout(15000)]
+fn a_message_takes_its_own_descriptors_whichever_way_the_kernel_splits_the_writes() {
+    // Each run of the script reads the same pipes, which are told apart by their inodes.
+    let names = ["a", "b", "c"];
+    let pipes = names.map(pipe_with);
+    let inodes = pipes.each_ref().map(inode);
+    // Message 1 comes with the descriptor of pipe a, and message 3 with those of pipes b and c.
+    let msgs: Vec<_> = (0..4u32)
+        .map(|i| {
+            let builder = Message::method_call("/", "Test");
+            match i {
+                1 => builder.build(&(i, Fd::from(pipes[0].as_fd()))),
+                3 => builder.build(&(i, Fd::from(pipes[1].as_fd()), Fd::from(pipes[2].as_fd()))),
+                _ => builder.build(&i),
+            }
+            .unwrap()
+        })
+        .collect();
+    let bytes = |range: std::ops::Range<usize>| -> Vec<u8> {
+        msgs[range]
+            .iter()
+            .flat_map(|msg| msg.data().to_vec())
+            .collect()
+    };
+    let (head, tail) = msgs[3].data().split_at(10);
+    // Each read, as its bytes and the pipes whose descriptors come with it.
+    let splits = [
+        // Linux, with each message in a write of its own.
+        vec![
+            (bytes(0..2), &[0][..]),
+            ([&bytes(2..3)[..], head].concat(), &[1, 2]),
+            (tail.to_vec(), &[]),
+        ],
+        // BSD-derived kernels, with each message in a write of its own.
+        vec![
+            (bytes(0..1), &[][..]),
+            (bytes(1..3), &[0]),
+            (head.to_vec(), &[1, 2]),
+            (tail.to_vec(), &[]),
+        ],
+        // Linux, with messages 1 and 2 in one write.
+        vec![(bytes(0..3), &[0][..]), (bytes(3..4), &[1, 2])],
+    ];
+
+    for reads in &splits {
+        under_every_runtime(|runtime| {
+            let reads = reads
+                .iter()
+                .map(|(bytes, of)| {
+                    let fds = of.iter().map(|i| pipes[*i].try_clone().unwrap());
+
+                    (bytes.clone(), fds.collect())
+                })
+                .collect();
+            let msgs = &msgs;
+
+            async move {
+                let (left, mut right) = UnixStream::pair().unwrap();
+                // The reads don't take this byte, so the socket stays readable for any runtime
+                // that waits for it to be before each read.
+                right.write_all(b"!").unwrap();
+                let mut receiver = Reader::new(half(&runtime, left, Scripted(Mutex::new(reads))));
+
+                let mut received_from = vec![];
+                for (seq, sent) in msgs.iter().enumerate() {
+                    let received = receiver
+                        .receive_message(seq as u64, &mut vec![], &mut vec![])
+                        .await
+                        .unwrap();
+                    assert_eq!(&received.data()[..], &sent.data()[..]);
+                    received_from.push(
+                        received
+                            .data()
+                            .fds()
+                            .iter()
+                            .map(|fd| names[inodes.iter().position(|i| *i == inode(fd)).unwrap()])
+                            .collect::<Vec<_>>(),
+                    );
+                }
+                let none: [&str; 0] = [];
+                assert_eq!(
+                    received_from,
+                    [&none[..], &["a"], &none, &["b", "c"]],
+                    "the descriptors went with other messages than their own",
+                );
+            }
+        });
+    }
+}
+
+/// A message takes its file descriptors whichever of its bytes they come with, which the D-Bus
+/// specification leaves to the sender, from the first to the last. The write that they come with
+/// may even start with the end of the message before, which a read that ends with that message
+/// takes in along with them.
+#[cfg(unix)]
+#[test]
+#[timeout(15000)]
+fn a_message_takes_descriptors_that_come_with_any_of_its_bytes() {
+    // Each run reads the same pipes, which are told apart by their inodes.
+    let names = ["a", "b"];
+    let pipes = names.map(pipe_with);
+    let inodes = pipes.each_ref().map(inode);
+    // Message 0 is longer than the buffer of a reader, message 1 comes with the descriptor of
+    // pipe a, and message 2 with that of pipe b.
+    let msgs = [
+        Message::method_call("/", "Test")
+            .build(&vec![0u8; 6000])
+            .unwrap(),
+        Message::method_call("/", "Test")
+            .build(&(1u32, Fd::from(pipes[0].as_fd())))
+            .unwrap(),
+        Message::method_call("/", "Test")
+            .build(&(2u32, Fd::from(pipes[1].as_fd())))
+            .unwrap(),
+    ];
+    let (start, end) = msgs[0].data().split_at(5000);
+    let (header, body) = msgs[2].data().split_at(20);
+    // Each write, as its bytes and the pipe whose descriptor comes with it: that of message 1
+    // with the end of message 0, and that of message 2 with its body.
+    let writes = [
+        (start.to_vec(), None),
+        ([end, &msgs[1].data()[..]].concat(), Some(0)),
+        (header.to_vec(), None),
+        (body.to_vec(), Some(1)),
+    ];
+
+    under_every_runtime(|runtime| {
+        let reads = writes
+            .iter()
+            .map(|(bytes, pipe)| {
+                let fds = pipe.iter().map(|i| pipes[*i].try_clone().unwrap());
+
+                (bytes.clone(), fds.collect())
+            })
+            .collect();
+        let msgs = &msgs;
+
+        async move {
+            let (left, mut right) = UnixStream::pair().unwrap();
+            // The reads don't take this byte, so the socket stays readable for any runtime that
+            // waits for it to be before each read.
+            right.write_all(b"!").unwrap();
+            let mut receiver = Reader::new(half(&runtime, left, Scripted(Mutex::new(reads))));
+
+            let mut received_from = vec![];
+            for (seq, sent) in msgs.iter().enumerate() {
+                let received = receiver
+                    .receive_message(seq as u64, &mut vec![], &mut vec![])
+                    .await
+                    .unwrap();
+                assert_eq!(&received.data()[..], &sent.data()[..]);
+                received_from.push(
+                    received
+                        .data()
+                        .fds()
+                        .iter()
+                        .map(|fd| names[inodes.iter().position(|i| *i == inode(fd)).unwrap()])
+                        .collect::<Vec<_>>(),
+                );
+            }
+            let none: [&str; 0] = [];
+            assert_eq!(
+                received_from,
+                [&none[..], &["a"], &["b"]],
+                "the descriptors went with other messages than their own",
+            );
+        }
+    });
+}
+
+/// File descriptors that no header counts wait for the messages after them to take them, but no
+/// more than those of three reads, which is the most that a sender that counts them could have
+/// wait.
+#[cfg(unix)]
+#[test]
+#[timeout(15000)]
+fn too_many_descriptors_that_no_header_counts_are_an_error() {
+    let msg = Message::method_call("/", "Test")
+        .build(&vec![0u8; 6000])
+        .unwrap();
+
+    for writes in [3, 4] {
+        under_every_runtime(|runtime| {
+            // The message is longer than the buffer of a reader, and comes in writes that each
+            // come with a descriptor that its header doesn't count.
+            let reads = msg
+                .data()
+                .chunks(msg.data().len().div_ceil(writes))
+                .map(|bytes| (bytes.to_vec(), vec![pipe_with("")]))
+                .collect();
+            let msg = &msg;
+
+            async move {
+                let (left, mut right) = UnixStream::pair().unwrap();
+                // The reads don't take this byte, so the socket stays readable for any runtime
+                // that waits for it to be before each read.
+                right.write_all(b"!").unwrap();
+                let mut receiver = Reader::new(half(&runtime, left, Scripted(Mutex::new(reads))));
+
+                let received = receiver.receive_message(0, &mut vec![], &mut vec![]).await;
+
+                match writes {
+                    3 => assert_eq!(&received.unwrap().data()[..], &msg.data()[..]),
+                    _ => assert!(received.is_err(), "the fourth set of descriptors was taken"),
+                }
+            }
+        });
+    }
+}
+
+/// What the handshake read past its end comes out first, and the rest from the socket after it,
+/// even where it is more than the buffer holds.
+#[cfg(unix)]
+#[test]
+#[timeout(15000)]
+fn what_the_handshake_read_comes_out_first() {
+    for lens in [[10, 20, 30], [3000, 3000, 3000]] {
+        under_every_runtime(|runtime| async move {
+            let (left, mut right) = UnixStream::pair().unwrap();
+            let mut receiver = Reader::new(half(&runtime, left, UnixOps));
+            let msgs: Vec<_> = lens
+                .into_iter()
+                .map(|len| {
+                    Message::method_call("/", "Test")
+                        .build(&vec![0u8; len])
+                        .unwrap()
+                })
+                .collect();
+            let bytes: Vec<u8> = msgs.iter().flat_map(|msg| msg.data().to_vec()).collect();
+            // The handshake read up to halfway through the last message.
+            let (handshake, socket) = bytes.split_at(bytes.len() - msgs[2].data().len() / 2);
+            let mut already_received = handshake.to_vec();
+            right.write_all(socket).unwrap();
+
+            for (seq, sent) in msgs.iter().enumerate() {
+                let received = receiver
+                    .receive_message(seq as u64, &mut already_received, &mut vec![])
+                    .await
+                    .unwrap();
+                assert_eq!(&received.data()[..], &sent.data()[..]);
+                assert!(already_received.is_empty());
+            }
+        });
+    }
+}
+
+/// A socket that ends partway through a message ends its receipt with an error.
+#[cfg(unix)]
+#[test]
+#[timeout(15000)]
+fn a_socket_that_ends_in_a_message_is_an_error() {
+    under_every_runtime(|runtime| async move {
+        let (left, mut right) = UnixStream::pair().unwrap();
+        let mut receiver = Reader::new(half(&runtime, left, UnixOps));
+        let msg = Message::method_call("/", "Test").build(&0u32).unwrap();
+
+        right.write_all(&msg.data()[..20]).unwrap();
+        drop(right);
+
+        receiver
+            .receive_message(0, &mut vec![], &mut vec![])
+            .await
+            .unwrap_err();
+    });
+}
+
 #[cfg(unix)]
 #[test]
 #[timeout(15000)]
@@ -228,10 +642,10 @@ fn readiness_written_before_registration_is_seen() {
         // registration has to find them whether it tries the read first or waits for a readiness
         // that has already happened.
         right.write_all(b"early").unwrap();
-        let mut socket = half(&runtime, left, UnixOps);
+        let socket = half(&runtime, left, UnixOps);
 
         let mut buffer = [0; 5];
-        let (read, _fds) = socket.recvmsg(&mut buffer).await.unwrap();
+        let (read, _fds) = socket.recv(&mut buffer).await.unwrap();
 
         assert_eq!(&buffer[..read], b"early");
     });
@@ -314,7 +728,7 @@ fn a_connected_socket_carries_traffic_once_registered() {
 
         accepted.write_all(b"ping").unwrap();
         let mut buffer = [0; 4];
-        let received = socket.recvmsg(&mut buffer).await.unwrap();
+        let received = socket.recv(&mut buffer).await.unwrap();
         // Only unix sockets bring file descriptors along.
         #[cfg(unix)]
         let (received, _fds) = received;
@@ -682,6 +1096,130 @@ impl SocketOps for Recording {
     }
 }
 
+/// The operations of a unix socket, which count the reads that bring anything and limit each to
+/// the next of a cycle of sizes.
+#[cfg(unix)]
+#[derive(Debug)]
+struct Trickle {
+    sizes: &'static [usize],
+    reads: Arc<Mutex<usize>>,
+}
+
+#[cfg(unix)]
+impl Trickle {
+    /// Reads that are limited to each of `sizes` in turn.
+    fn with_sizes(sizes: &'static [usize]) -> Self {
+        Self {
+            sizes,
+            reads: Arc::default(),
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Default for Trickle {
+    /// Reads that are limited to nothing but the room they are given.
+    fn default() -> Self {
+        Self::with_sizes(&[usize::MAX])
+    }
+}
+
+#[cfg(unix)]
+impl SocketOps for Trickle {
+    fn recv(&self, source: &IoSource, buffer: &mut [u8]) -> RecvmsgResult {
+        let mut reads = self.reads.lock().unwrap();
+        let len = buffer.len().min(self.sizes[*reads % self.sizes.len()]);
+        let received = UnixOps.recv(source, &mut buffer[..len])?;
+        *reads += 1;
+
+        Ok(received)
+    }
+
+    fn send(
+        &self,
+        source: &IoSource,
+        buffers: &[IoSlice<'_>],
+        fds: &[BorrowedFd<'_>],
+    ) -> std::io::Result<usize> {
+        UnixOps.send(source, buffers, fds)
+    }
+
+    fn can_pass_unix_fd(&self) -> bool {
+        true
+    }
+}
+
+/// The operations of a unix socket that hand out the reads of a script, as the kernel could have
+/// split the writes of the peer into them, rather than reading the socket.
+///
+/// A read that has less room than the next one of the script takes in what it has room for, and
+/// leaves the rest for the next, which no descriptors come with: the kernel hands them over with
+/// the first read that takes in any of the bytes that they came with.
+#[cfg(unix)]
+#[derive(Debug)]
+struct Scripted(Mutex<VecDeque<(Vec<u8>, Vec<OwnedFd>)>>);
+
+#[cfg(unix)]
+impl SocketOps for Scripted {
+    fn recv(&self, _source: &IoSource, buffer: &mut [u8]) -> RecvmsgResult {
+        let mut reads = self.0.lock().unwrap();
+        let Some((bytes, fds)) = reads.pop_front() else {
+            return Ok((0, vec![]));
+        };
+        let len = bytes.len().min(buffer.len());
+        buffer[..len].copy_from_slice(&bytes[..len]);
+        if len < bytes.len() {
+            reads.push_front((bytes[len..].to_vec(), vec![]));
+        }
+
+        Ok((len, fds))
+    }
+
+    fn send(
+        &self,
+        source: &IoSource,
+        buffers: &[IoSlice<'_>],
+        fds: &[BorrowedFd<'_>],
+    ) -> std::io::Result<usize> {
+        UnixOps.send(source, buffers, fds)
+    }
+
+    fn can_pass_unix_fd(&self) -> bool {
+        true
+    }
+}
+
+/// The read end of a pipe that holds `contents`, and nothing after them.
+#[cfg(unix)]
+fn pipe_with(contents: &str) -> OwnedFd {
+    let (read_end, mut write_end) = std::io::pipe().unwrap();
+    write_end.write_all(contents.as_bytes()).unwrap();
+
+    read_end.into()
+}
+
+/// The inode of the file that `fd` is open on.
+#[cfg(unix)]
+fn inode(fd: &impl AsFd) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+
+    std::fs::File::from(fd.as_fd().try_clone_to_owned().unwrap())
+        .metadata()
+        .unwrap()
+        .ino()
+}
+
+/// Everything there is to read from the pipe whose read end is `fd`.
+#[cfg(unix)]
+fn read_from(fd: BorrowedFd<'_>) -> String {
+    let mut contents = String::new();
+    std::fs::File::from(fd.try_clone_to_owned().unwrap())
+        .read_to_string(&mut contents)
+        .unwrap();
+
+    contents
+}
+
 /// A runtime whose registrations keep no source of their own.
 ///
 /// That is what lets a test see when the source a [`RegisteredIo`] holds is released: the peer of
@@ -800,7 +1338,11 @@ impl Drop for WatchingRegistration {
 fn a_group_lookup_reaches_the_runtime_only_where_there_is_one() {
     let counting = TestRuntime::new();
     let (left, _peer) = UnixStream::pair().unwrap();
-    let mut socket = half(&Runtime::from_external(counting.clone()), left, UnixOps);
+    let mut socket = Reader::new(half(
+        &Runtime::from_external(counting.clone()),
+        left,
+        UnixOps,
+    ));
 
     futures_lite::future::block_on(ReadHalf::peer_credentials(&mut socket)).unwrap();
 
