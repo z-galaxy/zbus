@@ -55,7 +55,16 @@ jobs:
       # The features the bench targets need between them beyond the default ones, as their
       # `required-features` say, and `bus-impl`, which `benchmarks` measures the bus API of where
       # it's enabled; each job builds its own targets only.
+      #
+      # Each function starts on a cache line of 64 bytes of its own. The simulation counts cache
+      # misses, so the lines that the code of a function spans move the numbers of the benchmarks
+      # that run it, and a change that grows or shrinks one function would otherwise move others
+      # to other offsets in their lines, and the numbers of code that it doesn't touch with them.
+      # This covers what cargo builds, but not the prebuilt standard library. cargo-codspeed adds
+      # its own flags to these.
       - name: Build the benchmark target(s)
+        env:
+          RUSTFLAGS: -C llvm-args=-align-all-functions=6
         run: cargo codspeed build -m ${{ matrix.mode }} --features zbus/bus-impl ${{ matrix.benches }}
       - name: Run the benchmarks
         uses: CodSpeedHQ/action@v5
