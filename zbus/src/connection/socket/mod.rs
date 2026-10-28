@@ -11,7 +11,7 @@ pub use channel::Channel;
 mod split;
 pub use split::{BoxedSplit, Split};
 
-use std::{io, mem};
+use std::io;
 
 use crate::{
     Message,
@@ -29,7 +29,10 @@ use crate::{
     },
 };
 #[cfg(unix)]
-use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use std::{
+    mem,
+    os::fd::{AsFd, BorrowedFd, OwnedFd},
+};
 
 #[cfg(unix)]
 pub(crate) type RecvmsgResult = io::Result<(usize, Vec<OwnedFd>)>;
@@ -213,64 +216,40 @@ pub trait ReadHalf: std::fmt::Debug + Send + Sync + 'static {
     ) -> crate::Result<Message> {
         #[cfg(unix)]
         let mut fds = vec![];
-        let mut bytes = if already_received_bytes.len() < MIN_MESSAGE_SIZE {
-            let mut bytes = vec![];
-            if !already_received_bytes.is_empty() {
-                mem::swap(already_received_bytes, &mut bytes);
-            }
-            let mut pos = bytes.len();
-            bytes.resize(MIN_MESSAGE_SIZE, 0);
-            // We don't have enough data to make a proper message header yet.
-            // Some partial read may be in raw_in_buffer, so we try to complete it
-            // until we have MIN_MESSAGE_SIZE bytes
-            //
-            // Given that MIN_MESSAGE_SIZE is 16, this codepath is actually extremely unlikely
-            // to be taken more than once
-            while pos < MIN_MESSAGE_SIZE {
-                let res = self.recvmsg(&mut bytes[pos..]).await?;
-                let len = {
-                    #[cfg(unix)]
-                    {
-                        fds.extend(res.1);
-                        res.0
-                    }
-                    #[cfg(not(unix))]
-                    {
-                        res
-                    }
-                };
-                pos += len;
-                if len == 0 {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::UnexpectedEof,
-                        "failed to receive message",
-                    )
-                    .into());
+        // The primary header says how long the whole message is, so it is read on its own first,
+        // and the message gets an allocation of its exact length once it is in.
+        let mut header = [0; MIN_MESSAGE_SIZE];
+        let mut pos = already_received_bytes.len().min(MIN_MESSAGE_SIZE);
+        header[..pos].copy_from_slice(&already_received_bytes[..pos]);
+        already_received_bytes.drain(..pos);
+        while pos < MIN_MESSAGE_SIZE {
+            let res = self.recvmsg(&mut header[pos..]).await?;
+            let len = {
+                #[cfg(unix)]
+                {
+                    fds.extend(res.1);
+                    res.0
                 }
+                #[cfg(not(unix))]
+                {
+                    res
+                }
+            };
+            pos += len;
+            if len == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "failed to receive message",
+                )
+                .into());
             }
-
-            bytes
-        } else {
-            already_received_bytes.drain(..MIN_MESSAGE_SIZE).collect()
-        };
-
-        let (primary_header, fields_len) = PrimaryHeader::read(&bytes)?;
-        let header_len = MIN_MESSAGE_SIZE + fields_len as usize;
-        let body_padding = padding_for_8_bytes(header_len);
-        let body_len = primary_header.body_len() as usize;
-        let total_len = header_len + body_padding + body_len;
-        if total_len > MAX_MESSAGE_SIZE {
-            return Err(crate::Error::ExcessData);
         }
 
-        // By this point we have a full primary header, so we know the exact length of the complete
-        // message.
-        if !already_received_bytes.is_empty() {
-            // still have some bytes buffered.
-            let pending = total_len - bytes.len();
-            let to_take = std::cmp::min(pending, already_received_bytes.len());
-            bytes.extend(already_received_bytes.drain(..to_take));
-        }
+        let (primary_header, total_len) = read_primary_header(&header)?;
+        let mut bytes = Vec::with_capacity(total_len);
+        bytes.extend_from_slice(&header);
+        let to_take = std::cmp::min(total_len - bytes.len(), already_received_bytes.len());
+        bytes.extend(already_received_bytes.drain(..to_take));
         let mut pos = bytes.len();
         bytes.resize(total_len, 0);
 
@@ -305,7 +284,7 @@ pub trait ReadHalf: std::fmt::Debug + Send + Sync + 'static {
 
         #[cfg(unix)]
         if !already_received_fds.is_empty() {
-            let (_, _, fields) = crate::message::parser::parse(&bytes[..header_len])?;
+            let (_, _, fields) = crate::message::parser::parse(&bytes)?;
             let num_required_fds = fields.unix_fds().unwrap_or(0) as usize;
             let num_pending = num_required_fds
                 .checked_sub(fds.len())
@@ -478,6 +457,22 @@ pub trait WriteHalf: std::fmt::Debug + Send + Sync + 'static {
     async fn peer_credentials(&mut self) -> io::Result<ConnectionCredentials> {
         Ok(ConnectionCredentials::default())
     }
+}
+
+/// The primary header that `bytes` start with, and the length of the whole message it opens.
+///
+/// A message longer than the D-Bus specification allows is an error.
+pub(crate) fn read_primary_header(bytes: &[u8]) -> crate::Result<(PrimaryHeader, usize)> {
+    let (primary_header, fields_len) = PrimaryHeader::read(bytes)?;
+    let header_len = MIN_MESSAGE_SIZE + fields_len as usize;
+    let body_padding = padding_for_8_bytes(header_len);
+    let body_len = primary_header.body_len() as usize;
+    let total_len = header_len + body_padding + body_len;
+    if total_len > MAX_MESSAGE_SIZE {
+        return Err(crate::Error::ExcessData);
+    }
+
+    Ok((primary_header, total_len))
 }
 
 #[async_trait::async_trait]

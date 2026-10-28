@@ -12,6 +12,9 @@ mod unix;
 #[cfg(all(unix, any(feature = "unixexec", feature = "ibus", target_os = "macos")))]
 mod pipe;
 
+mod reader;
+pub(crate) use reader::Reader;
+
 mod tcp;
 
 // A blocking connect is what reaches a unix-domain socket through the zruntime backend on
@@ -51,7 +54,7 @@ use super::{Interest, IoSource, Runtime, erased::ErasedRegistration, traits};
 use crate::{
     Message,
     conn::AuthMechanism,
-    connection::socket::{ReadHalf, RecvmsgResult, Socket, Split, WriteHalf},
+    connection::socket::{RecvmsgResult, Socket, Split, WriteHalf},
     fdo::ConnectionCredentials,
     log::trace,
 };
@@ -81,6 +84,12 @@ where
             runtime: runtime.clone(),
             ops,
         })
+    }
+
+    /// Receives bytes, and on a unix socket the file descriptors that came with them, as soon as
+    /// the socket has any.
+    pub(crate) async fn recv(&self, buffer: &mut [u8]) -> RecvmsgResult {
+        self.read_with(|| self.ops.recv(&self.source, buffer)).await
     }
 
     /// Runs `operation` as soon as the socket is readable.
@@ -163,12 +172,14 @@ type Owned = std::os::windows::io::OwnedSocket;
 /// `WouldBlock`. That is why this is not a second [`ReadHalf`]/[`WriteHalf`]. Those are the
 /// public, async, split halves of a socket; this is what differs between the families underneath
 /// them, which is how bytes and descriptors move and what can be asked about the peer.
-/// `RegisteredIo<O>` implements the public halves once for every family by wrapping these
-/// attempts in the readiness loop.
+/// `RegisteredIo<O>` and its [`Reader`] implement the public halves once for every family by
+/// wrapping these attempts in the readiness loop.
 ///
 /// The questions the public halves ask that only the family can answer, such as whether
 /// descriptors can travel or which mechanism to authenticate with, are forwarded to it from there
 /// rather than answered twice.
+///
+/// [`ReadHalf`]: crate::connection::socket::ReadHalf
 pub(crate) trait SocketOps: fmt::Debug + Send + Sync + 'static {
     /// Receives bytes, and on a unix socket the file descriptors that came with them.
     fn recv(&self, source: &IoSource, buffer: &mut [u8]) -> RecvmsgResult;
@@ -260,32 +271,6 @@ impl Registration {
                 traits::PollIo::poll_io(registration, cx, interest, operation)
             }
         }
-    }
-}
-
-#[async_trait::async_trait]
-impl<O> ReadHalf for Arc<RegisteredIo<O>>
-where
-    O: SocketOps,
-{
-    async fn recvmsg(&mut self, buf: &mut [u8]) -> RecvmsgResult {
-        let socket = &**self;
-
-        socket
-            .read_with(|| socket.ops.recv(&socket.source, buf))
-            .await
-    }
-
-    fn can_pass_unix_fd(&self) -> bool {
-        self.ops.can_pass_unix_fd()
-    }
-
-    async fn peer_credentials(&mut self) -> io::Result<ConnectionCredentials> {
-        self.ops.peer_credentials(&self.source, &self.runtime).await
-    }
-
-    fn auth_mechanism(&self) -> AuthMechanism {
-        self.ops.auth_mechanism()
     }
 }
 
@@ -436,13 +421,13 @@ impl<O> Socket for RegisteredIo<O>
 where
     O: SocketOps,
 {
-    type ReadHalf = Arc<Self>;
+    type ReadHalf = Reader<O>;
     type WriteHalf = Arc<Self>;
 
-    fn split(self) -> Split<Arc<Self>, Arc<Self>> {
+    fn split(self) -> Split<Reader<O>, Arc<Self>> {
         let socket = Arc::new(self);
 
-        Split::new(socket.clone(), socket)
+        Split::new(Reader::new(socket.clone()), socket)
     }
 }
 
