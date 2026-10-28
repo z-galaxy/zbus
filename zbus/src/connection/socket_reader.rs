@@ -157,8 +157,9 @@ impl SocketReader {
     async fn read_socket(&mut self) -> crate::Result<Message> {
         self.socket_status.activity_event.notify(usize::MAX);
         let seq = self.prev_seq + 1;
-        let msg = self
-            .socket
+        // Through the socket itself rather than through the `Box`, whose own implementation would
+        // box the future of the call a second time.
+        let msg = (*self.socket)
             .receive_message(
                 seq,
                 &mut self.already_received_bytes,
