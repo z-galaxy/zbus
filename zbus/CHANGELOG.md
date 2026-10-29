@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 6.2.0 - 2026-10-29
+
+### ✨ Added
+- Add Connection::send_all. #2078
+- Add WriteHalf::send_messages.
+
+### ♻️ Changed
+- Hand several buffers to each send of a runtime's socket.
+
+### 🐛 Fixed
+- Limit nesting for each signature, and count dict entries. #2087
+- Reject a received message whose path field isn't an object path.
+- Accept references to unsized types as interface args again. #2076
+
+### ⚙️ Other
+- 🦺 Reject a header with an unended string or a repeated field.
+- 🦺 Let a connection check the body of each message it receives.
+- 🦺 Add Body::validate, for a bus to check bodies with.
+- 🦺 Check a received message as a whole, not only its fields.
+
+### ⚡️ Performance
+- Call the read half itself rather than through its Box.
+- Read ahead of each message on the sockets that zbus drives. #2085
+- Allocate a received message once, at its exact length.
+- Leave the maybe type of GVariant to the signature parser.
+- Add Message::with_sender, for a bus to set senders with.
+- Leave room for None in where a header field lies.
+- Parse message headers with winnow rather than serde. #2080
+- Read the header fields of a message without checking them again.
+
+### ✅ Testing
+- Hold deserializing to the nesting that Body::validate allows.
+- Benchmark parsing and checking short signatures.
+- Fuzz the parser of message headers against serde.
+- Benchmark decoding a received message.
+
 ## 6.1.0 - 2026-10-22
 
 ### ✨ Added

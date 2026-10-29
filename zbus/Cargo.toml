@@ -1,6 +1,6 @@
 [package]
 name = "zbus"
-version = "6.1.0"
+version = "6.2.0"
 authors = ["Zeeshan Ali Khan <zeeshanak@gnome.org>"]
 edition = { workspace = true }
 rust-version = { workspace = true }
@@ -99,10 +99,10 @@ p2p = ["comms", "uuid?/v4"]
 bus-impl = ["p2p"]
 
 [dependencies]
-zbus_macros = { path = "../zbus_macros", version = "6.1.0", default-features = false }
+zbus_macros = { path = "../zbus_macros", version = "6.2.0", default-features = false }
 zcheapstr.workspace = true
 endi.workspace = true
-zbus_utils = { path = "../zbus_utils", version = "6.0.0" }
+zbus_utils = { path = "../zbus_utils", version = "6.1.0" }
 
 serde.workspace = true
 serde_repr = { workspace = true, optional = true }
