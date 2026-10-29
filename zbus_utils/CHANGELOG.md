@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 6.1.0 - 2026-10-29
+
+### ⚙️ Other
+- 🦺 Take only a basic type for the key of a dict.
+
+### ⚡️ Performance
+- Count the fields of a structure before allocating them. #2082
+- Point the basic children of a parsed signature at static ones.
+- Pick the parser of each type of a signature by its first byte.
+- Check each name and object path in a single loop.
+
 ## 6.0.0 - 2026-10-16
 
 zvariant_utils is renamed to zbus_utils. The changes below are relative to 4.2.0, its last release

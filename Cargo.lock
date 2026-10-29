@@ -1966,7 +1966,7 @@ dependencies = [
 
 [[package]]
 name = "zbus"
-version = "6.1.0"
+version = "6.2.0"
 dependencies = [
  "arrayvec",
  "async-executor",
@@ -2015,7 +2015,7 @@ dependencies = [
 
 [[package]]
 name = "zbus_macros"
-version = "6.1.0"
+version = "6.2.0"
 dependencies = [
  "futures-util",
  "proc-macro2",
@@ -2037,7 +2037,7 @@ dependencies = [
 
 [[package]]
 name = "zbus_utils"
-version = "6.0.0"
+version = "6.1.0"
 dependencies = [
  "proc-macro2",
  "quote",
