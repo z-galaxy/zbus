@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "rust";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-94c411a4.js";
+            window.path_to_searchindex_js = "searchindex-fb408b48.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-0eac0ed4.js"></script>
@@ -1673,8 +1673,9 @@ either. On Windows, a Tokio connection can’t use unix sockets.</li>
 <code>Context::new(LE, 0)</code>, <code>Signature::alignment(format)</code> is <code>alignment_dbus()</code> and
 <code>Basic::alignment(format)</code> is <code>alignment()</code>.</li>
 <li><strong><code>StructureSeed</code> has no lifetime parameter.</strong></li>
-<li><strong><code>PropertiesProxy::set</code> takes a <code>&amp;Variant</code>.</strong> <code>#[interface]</code> methods accept references to any
-sized type as arguments now, but a slice such as <code>&amp;[u8]</code> no longer compiles; take a <code>Vec&lt;u8&gt;</code>.</li>
+<li><strong><code>PropertiesProxy::set</code> takes a <code>&amp;Variant</code>.</strong> <code>#[interface]</code> methods and property setters
+accept references to any deserializable type, such as <code>&amp;Variant&lt;'_&gt;</code>, and to any slice of one,
+such as <code>&amp;[u32]</code>, as arguments now.</li>
 <li><strong><code>DBusProxy::start_service_by_name</code> returns a <code>StartServiceReply</code></strong> instead of a <code>u32</code>.</li>
 <li><strong>Name types validate when converted from a <code>Variant</code></strong>, failing with <code>Error::InvalidName</code>.</li>
 <li><strong><code>Optional&lt;T&gt;</code> compares with the null value before converting</strong>, so the empty string reads back
