@@ -1,0 +1,109 @@
+# Releases with release-plz, built from the fork at https://github.com/zeenix/release-plz.
+#
+# - Running this workflow manually opens the release PR, so that its changelog entries can be
+#   edited, and the packages that need no release dropped, before it's merged. Running it again
+#   regenerates the PR, without the edits made to it.
+# - Merging the release PR publishes the packages whose version isn't on crates.io yet, and tags
+#   them and creates their GitHub releases. The merge is told apart from the other pushes to `main`
+#   by the changelogs it changes, which only release PRs do, and by the 🔖 of its commits. Running
+#   this workflow manually with the `release` command releases too.
+#
+# release-plz works on GitHub with the token in the `RELEASE_PLZ_TOKEN` secret, which needs write
+# access to the contents and the pull requests of the repository. `GITHUB_TOKEN` won't do, as
+# nothing it does triggers workflows: CI wouldn't run on the release PR, nor would the workflows
+# that run on tags and releases.
+#
+# Packages are published with the crates.io token in the `CARGO_REGISTRY_TOKEN` secret or, if
+# there's none, through crates.io's trusted publishing.
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths: ["**/CHANGELOG.md"]
+  workflow_dispatch:
+    inputs:
+      command:
+        description: The release-plz command to run
+        type: choice
+        options: [release-pr, release]
+        default: release-pr
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    if: >-
+      github.repository == 'z-galaxy/zbus' &&
+      ((github.event_name == 'push' && contains(join(github.event.commits.*.message), '🔖')) ||
+      (inputs.command == 'release' && github.ref == 'refs/heads/main'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # For crates.io's trusted publishing.
+      id-token: write
+    concurrency: release-plz-release
+    steps:
+      - &check-token
+        name: Check the token
+        env:
+          GIT_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+        run: |
+          if [ -z "$GIT_TOKEN" ]; then
+            echo "::error::The RELEASE_PLZ_TOKEN secret isn't set."
+            exit 1
+          fi
+      - &checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - &toolchain
+        uses: dtolnay/rust-toolchain@stable
+      # The latest revision of the fork, which the build of release-plz is cached for.
+      - &release-plz-rev
+        name: Look up the revision of release-plz
+        id: release-plz
+        run: |
+          rev=$(git ls-remote --exit-code https://github.com/zeenix/release-plz refs/heads/main)
+          echo "rev=${rev%%[[:space:]]*}" >> "$GITHUB_OUTPUT"
+      - &release-plz
+        name: Install release-plz
+        uses: taiki-e/cache-cargo-install-action@v3
+        with:
+          tool: release-plz
+          git: https://github.com/zeenix/release-plz
+          rev: ${{ steps.release-plz.outputs.rev }}
+      - name: Release
+        env:
+          GIT_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          CRATES_IO_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          # Even set to an empty string, `CARGO_REGISTRY_TOKEN` rules out trusted publishing.
+          if [ -n "$CRATES_IO_TOKEN" ]; then
+            export CARGO_REGISTRY_TOKEN="$CRATES_IO_TOKEN"
+          fi
+          release-plz release
+
+  release-pr:
+    if: >-
+      github.repository == 'z-galaxy/zbus' && inputs.command == 'release-pr' &&
+      github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    concurrency: release-plz-pr
+    steps:
+      - *check-token
+      - *checkout
+      - *toolchain
+      - *release-plz-rev
+      - *release-plz
+      # For the `semver_check` set in `release-plz.toml`.
+      - name: Install cargo-semver-checks
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-semver-checks
+      - name: Open the release PR
+        env:
+          GIT_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+        run: release-plz release-pr
