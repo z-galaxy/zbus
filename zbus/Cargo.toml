@@ -225,6 +225,11 @@ harness = false
 required-features = ["p2p"]
 
 [[bench]]
+name = "connection"
+harness = false
+required-features = ["default-rt", "bus-impl", "serde_bytes"]
+
+[[bench]]
 name = "names"
 harness = false
 

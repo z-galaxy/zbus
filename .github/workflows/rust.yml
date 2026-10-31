@@ -126,6 +126,9 @@ jobs:
             --features default-rt,proxy,service,ibus
           cargo --locked clippy -p zbus --no-default-features --all-targets \
             --features proxy,service,ibus
+          # The bus API, which benchmarks of what checking bodies and receiving messages cost a bus
+          # measure, `connection`'s with byte arrays.
+          cargo --locked clippy -p zbus --all-targets --features bus-impl,serde_bytes
           # The external-runtime-only build: neither the default-rt nor the tokio feature.
           EXT=proxy,service,object-manager,unixexec,ibus,tracing,p2p
           cargo --locked clippy -p zbus --no-default-features --all-targets --features $EXT

@@ -20,6 +20,9 @@ jobs:
   benchmarks:
     name: Run benchmarks (${{ matrix.mode }})
     runs-on: ${{ matrix.runner }}
+    # The clock's job takes a few minutes, most of them building: one that takes longer than 30 is
+    # stuck, and would hold the macro runner until GitHub's own limit of 6 hours.
+    timeout-minutes: ${{ matrix.timeout-minutes }}
     strategy:
       matrix:
         # Every bench target of the workspace goes in exactly one of the two lists: CodSpeed puts
@@ -33,6 +36,8 @@ jobs:
           - mode: simulation
             runner: ubuntu-latest
             benches: --bench benchmarks --bench names --bench wire
+            features: zbus/bus-impl
+            timeout-minutes: 360
           # What waits on timers, sockets or other threads: in the kernel, which the simulation
           # leaves out, so measured by the clock. On a bare-metal CodSpeed macro runner, given to
           # this job alone, so that the numbers move with the code rather than with the load of
@@ -40,7 +45,9 @@ jobs:
           # comparable when measured on the same machine.
           - mode: walltime
             runner: codspeed-macro-arm64-graviton-ubuntu-22-04
-            benches: --bench runtime
+            benches: --bench runtime --bench connection
+            features: zbus/bus-impl,zbus/serde_bytes
+            timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - name: Setup rust toolchain, cache and cargo-codspeed binary
@@ -52,9 +59,11 @@ jobs:
           # find the cache the x86_64 one saved under the same key, and never save its own.
           cache-extra-identifier: ${{ runner.arch }}
           bins: cargo-codspeed
-      # The features the bench targets need between them beyond the default ones, as their
-      # `required-features` say, and `bus-impl`, which `benchmarks` measures the bus API of where
-      # it's enabled; each job builds its own targets only.
+      # The features that the bench targets of each job need between them beyond the default ones,
+      # as their `required-features` say (`connection` needs `bus-impl` and `serde_bytes`), and
+      # `bus-impl`, which `benchmarks` measures the bus API of where it's enabled; each job builds
+      # its own targets only, with features of its own, so that `serde_bytes` turns on no more of
+      # the benchmarks of the simulation, such as those of byte arrays in `wire`.
       #
       # Each function starts on a cache line of 64 bytes of its own. The simulation counts cache
       # misses, so the lines that the code of a function spans move the numbers of the benchmarks
@@ -65,7 +74,9 @@ jobs:
       - name: Build the benchmark target(s)
         env:
           RUSTFLAGS: -C llvm-args=-align-all-functions=6
-        run: cargo codspeed build -m ${{ matrix.mode }} --features zbus/bus-impl ${{ matrix.benches }}
+        run: >-
+          cargo codspeed build -m ${{ matrix.mode }} --features ${{ matrix.features }}
+          ${{ matrix.benches }}
       - name: Run the benchmarks
         uses: CodSpeedHQ/action@v5
         with:
