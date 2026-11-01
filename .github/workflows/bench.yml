@@ -163,7 +163,7 @@ jobs:
   benchmarks:
     name: Build benchmarks (walltime)
     needs: changes
-    runs-on: ubuntu-22.04-arm
+    runs-on: ubuntu-26.04-arm
     if: >-
       ${{ needs.changes.outputs.measured == 'true' && !github.event.pull_request.draft &&
       !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'release-plz-')) &&
