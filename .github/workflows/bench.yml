@@ -21,7 +21,7 @@ jobs:
   # puts the results of the two together into one report, and takes each benchmark's from one. A
   # `--bench` picks the target of that name in every package that has one, so `benchmarks` picks
   # both zbus's and zbus_xml's. They are jobs of their own, rather than the entries of a matrix, as
-  # only the walltime one skips releases, which a job's `if` can't tell apart by its matrix entry.
+  # only the walltime ones skip releases, which a job's `if` can't tell apart by its matrix entry.
   #
   # Each job builds the features that its targets need between them beyond the default ones, as
   # their `required-features` say (`connection` needs `bus-impl` and `serde_bytes`), and
@@ -83,22 +83,27 @@ jobs:
   # out, so measured by the clock. On a bare-metal CodSpeed macro runner, given to this job alone,
   # so that the numbers move with the code rather than with the load of whoever shares a hosted
   # runner's host. Keep the job on this one label: two runs are only comparable when measured on
-  # the same machine. Its id stays `benchmarks`, which the walltime entry of a matrix had before,
-  # as setup-rust's cache key hashes the id, so that it keeps finding the cache that it saved.
+  # the same machine.
+  #
+  # The benchmarks are built on a GitHub-hosted runner of the same architecture and the same
+  # release of Ubuntu as the macro runner, which costs nothing, and only run on the macro runner,
+  # so that the minutes of the macro runner go to running them rather than to building them.
   #
   # A release changes nothing that the benchmarks measure: its pull request, which release-plz
   # opens from a branch of its own, only bumps versions and changelogs, and so does its merge,
   # which `release.yml` tells apart by the release emoji of its commits, as this does. CodSpeed
   # then takes the results of the walltime ids from the run that the release is compared with.
+  #
+  # The id of the build stays `benchmarks`, which the walltime entry of a matrix had before, as
+  # setup-rust's cache key hashes the id: on the same architecture and release of Ubuntu as the
+  # macro runner, the build goes on from the cache that the macro runner saved.
   benchmarks:
-    name: Run benchmarks (walltime)
-    runs-on: codspeed-macro-arm64-graviton-ubuntu-22-04
+    name: Build benchmarks (walltime)
+    runs-on: ubuntu-22.04-arm
     if: >-
       ${{ !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'release-plz-')) &&
       !(github.event_name == 'push' && contains(join(github.event.commits.*.message), '🔖')) }}
-    # The job takes a few minutes, most of them building: one that takes longer than 15 is stuck,
-    # and would hold the macro runner until GitHub's own limit of 6 hours.
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - *checkout
       - *setup-rust
@@ -107,6 +112,43 @@ jobs:
         run: >-
           cargo codspeed build -m walltime --features zbus/bus-impl,zbus/serde_bytes
           --bench runtime --bench connection
+      # cargo-codspeed goes along, as the macro runner would otherwise install it too. A tarball
+      # keeps the executable bits, which an artifact drops.
+      - name: Pack the benchmarks
+        run: tar -czf walltime.tar.gz target/codspeed/walltime -C ~/.cargo/bin cargo-codspeed
+      - uses: actions/upload-artifact@v4
+        with:
+          name: walltime-benchmarks
+          path: walltime.tar.gz
+          retention-days: 1
+  walltime:
+    name: Run benchmarks (walltime)
+    needs: benchmarks
+    runs-on: codspeed-macro-arm64-graviton-ubuntu-22-04
+    # The job takes a minute or two: one that takes longer than 15 is stuck, and would hold the
+    # macro runner until GitHub's own limit of 6 hours.
+    timeout-minutes: 15
+    steps:
+      # cargo-codspeed reads the workspace with `cargo metadata`, and the benchmarks name their
+      # sources by their paths in it.
+      - *checkout
+      # The cargo of the runner's image, 1.81, can't read a workspace of the 2024 edition. Nothing
+      # is built here, so the cache, which holds what the build of the benchmarks needs, is left
+      # out.
+      - name: Setup rust toolchain
+        uses: moonrepo/setup-rust@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          channel: stable
+          cache: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: walltime-benchmarks
+      - name: Unpack the benchmarks
+        run: |
+          tar -xzf walltime.tar.gz
+          install -m 755 cargo-codspeed ~/.cargo/bin/
       - name: Run the benchmarks
         uses: CodSpeedHQ/action@v5
         with:
