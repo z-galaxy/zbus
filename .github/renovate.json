@@ -25,6 +25,23 @@
       "commitMessageAction": "⬆️  micro: Update",
       "automerge": true,
       "rebaseWhen": "conflicted"
+    },
+    {
+      "description": [
+        "The container that the walltime benchmarks are built in stays on the release of Ubuntu",
+        "of the CodSpeed macro runner that runs them: built on a later one, they are linked",
+        "against a later glibc, whose symbols the macro runner lacks."
+      ],
+      "matchFileNames": [
+        ".github/workflows/bench.yml"
+      ],
+      "matchDepTypes": [
+        "container"
+      ],
+      "matchDepNames": [
+        "ubuntu"
+      ],
+      "enabled": false
     }
   ]
 }
