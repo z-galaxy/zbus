@@ -5,6 +5,8 @@ on:
     branches:
       - "main" # or "master"
   pull_request:
+    # `ready_for_review` too, as a draft runs no walltime benchmarks until then.
+    types: [opened, synchronize, reopened, ready_for_review]
   # `workflow_dispatch` allows CodSpeed to trigger backtest
   # performance analysis in order to generate initial data.
   workflow_dispatch:
@@ -79,6 +81,64 @@ jobs:
           run: cargo codspeed run -m simulation --bench benchmarks --bench names --bench wire
           token: ${{ secrets.CODSPEED_TOKEN }} # optional for public repos
 
+  # Whether the walltime benchmarks are worth the macro runner for this run: they are not for a
+  # change that touches nothing that they build or run. A job of its own, on a GitHub-hosted runner,
+  # so that a run that skips them builds nothing for them, and waits for no macro runner. The
+  # simulation runs whatever changes, as CodSpeed's check, which the branch protection of main
+  # requires, needs its upload.
+  changes:
+    name: Look for what the walltime benchmarks measure
+    runs-on: ubuntu-latest
+    outputs:
+      measured: ${{ steps.look.outputs.measured }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # A pull request is checked out as its merge into the base branch, whose first parent is
+          # the base: what the two differ in is what the pull request changes.
+          fetch-depth: 2
+      - id: look
+        name: Look at what changed
+        env:
+          BEFORE: ${{ github.event.before }}
+          # What can't change what the walltime benchmarks measure, nor how they run:
+          # documentation and images, the repository's settings, the other workflows, the files of
+          # the other CI jobs, the tests, the examples and the fuzzing of each package, and the
+          # packages that the walltime targets don't use.
+          UNMEASURED: |-
+            \.md$
+            \.(png|gif|svg)$
+            ^LICENSE(-MIT)?$
+            ^\.github/
+            ^\.githooks/
+            ^(book|docs|CI|test_fixtures)/
+            ^[^/]+/tests/
+            ^zbus/(examples|fuzz)/
+            ^zbus_xml(gen)?/
+            ^release-plz\.toml$
+            ^\.(codespellrc|commitlintrc\.mjs|editorconfig|gitignore|mailmap)$
+        run: |
+          case "$GITHUB_EVENT_NAME" in
+            pull_request) base=HEAD^1 ;;
+            push)
+              git fetch --quiet --depth=1 origin "$BEFORE"
+              base=$BEFORE
+              ;;
+            *)
+              echo measured=true >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+          changed=$(git diff --name-only "$base" HEAD)
+          # A file that matches none of the patterns of `UNMEASURED`, one to a line, is measured.
+          if grep -qvE -f <(printf '%s\n' "$UNMEASURED") <<< "$changed" ||
+            grep -qx '\.github/workflows/bench\.yml' <<< "$changed"; then
+            echo measured=true >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Nothing that the walltime benchmarks measure changed: they don't run."
+            echo measured=false >> "$GITHUB_OUTPUT"
+          fi
+
   # What waits on timers, sockets or other threads: in the kernel, which the simulation leaves
   # out, so measured by the clock. On a bare-metal CodSpeed macro runner, given to this job alone,
   # so that the numbers move with the code rather than with the load of whoever shares a hosted
@@ -89,19 +149,24 @@ jobs:
   # release of Ubuntu as the macro runner, which costs nothing, and only run on the macro runner,
   # so that the minutes of the macro runner go to running them rather than to building them.
   #
-  # A release changes nothing that the benchmarks measure: its pull request, which release-plz
-  # opens from a branch of its own, only bumps versions and changelogs, and so does its merge,
-  # which `release.yml` tells apart by the release emoji of its commits, as this does. CodSpeed
-  # then takes the results of the walltime ids from the run that the release is compared with.
+  # Nor are they worth it for a draft, which is pushed to again and again: they run once it is
+  # marked as ready for review, and for each push after that. A release changes nothing that they
+  # measure either: its pull request, which release-plz opens from a branch of its own, only bumps
+  # versions and changelogs, and so does its merge, which `release.yml` tells apart by the release
+  # emoji of its commits, as this does. Wherever they don't run, CodSpeed takes the results of the
+  # walltime ids from the run that it compares this one with, and the job that runs them, which
+  # needs this one, is skipped with it.
   #
   # The id of the build stays `benchmarks`, which the walltime entry of a matrix had before, as
   # setup-rust's cache key hashes the id: on the same architecture and release of Ubuntu as the
   # macro runner, the build goes on from the cache that the macro runner saved.
   benchmarks:
     name: Build benchmarks (walltime)
+    needs: changes
     runs-on: ubuntu-22.04-arm
     if: >-
-      ${{ !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'release-plz-')) &&
+      ${{ needs.changes.outputs.measured == 'true' && !github.event.pull_request.draft &&
+      !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'release-plz-')) &&
       !(github.event_name == 'push' && contains(join(github.event.commits.*.message), '🔖')) }}
     timeout-minutes: 30
     steps:
