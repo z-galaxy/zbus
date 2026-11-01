@@ -181,7 +181,7 @@ jobs:
       # keeps the executable bits, which an artifact drops.
       - name: Pack the benchmarks
         run: tar -czf walltime.tar.gz target/codspeed/walltime -C ~/.cargo/bin cargo-codspeed
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: walltime-benchmarks
           path: walltime.tar.gz
