@@ -97,14 +97,17 @@ fn value<O: ByteOrder>(
         // An array of numbers of a fixed size, as most of the bulk of bodies is, takes no more
         // than its length and its padding. Its elements are a level deeper than it, even if there
         // are none, as GLib has them.
-        b'a' if let Some(size) = rest.first().and_then(|code| fixed_size(*code)) => {
-            deeper(depth)?;
-            fixed_array::<O>(input, size)?;
-            *signature = &rest[1..];
+        b'a' => match rest.first().and_then(|code| fixed_size(*code)) {
+            Some(size) => {
+                deeper(depth)?;
+                fixed_array::<O>(input, size)?;
+                *signature = &rest[1..];
 
-            return Ok(());
-        }
-        b'a' | b'(' => return container::<O>(input, signature, depth, fds),
+                return Ok(());
+            }
+            None => return container::<O>(input, signature, depth, fds),
+        },
+        b'(' => return container::<O>(input, signature, depth, fds),
         _ => basic::<O>(input, code, fds)?,
     }
     *signature = rest;
