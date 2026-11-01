@@ -446,7 +446,7 @@ dependencies = [
 
 [[package]]
 name = "zbus"
-version = "6.2.0"
+version = "6.2.1"
 dependencies = [
  "async-trait",
  "bitflags",
@@ -472,7 +472,7 @@ dependencies = [
 
 [[package]]
 name = "zbus_macros"
-version = "6.2.0"
+version = "6.2.1"
 dependencies = [
  "proc-macro2",
  "quote",
