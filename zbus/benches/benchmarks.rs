@@ -1,4 +1,6 @@
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "bus-impl")]
+use std::collections::BTreeMap;
 use std::{collections::HashMap, hint::black_box, vec};
 use zbus::Message;
 
@@ -96,6 +98,44 @@ fn msg_validate(c: &mut Criterion) {
     g.bench_function("big", |b| {
         b.iter(|| black_box(&msg).body().validate().unwrap())
     });
+
+    // The properties of an object, as `GetManagedObjects` and `InterfacesAdded` carry them: 100
+    // variants, each with a signature of its own to check before its value can be. busd's `dicts`
+    // benchmarks make their method calls with this body.
+    let msg = Message::method_call("/org/freedesktop/DBus/Something", "Ping")
+        .build(&object_properties())
+        .unwrap();
+    g.bench_function("dicts", |b| {
+        b.iter(|| black_box(&msg).body().validate().unwrap())
+    });
+}
+
+/// The properties of an object, by the name of their interface, `a{sa{sv}}`: 10 interfaces of 10
+/// properties each, whose values cycle through a number, a string, a boolean and an array of
+/// strings, as the properties of real objects mix them.
+#[cfg(feature = "bus-impl")]
+fn object_properties() -> BTreeMap<String, BTreeMap<String, Variant<'static>>> {
+    (0..10u32)
+        .map(|i| {
+            let properties = (0..10u32)
+                .map(|j| {
+                    let value: Variant<'static> = match j % 4 {
+                        0 => (i * 10 + j).into(),
+                        1 => format!("value {i}.{j}").into(),
+                        2 => (i < 5).into(),
+                        _ => (0..3)
+                            .map(|k| format!("item {i}.{j}.{k}"))
+                            .collect::<Vec<_>>()
+                            .into(),
+                    };
+
+                    (format!("Property{j}"), value)
+                })
+                .collect();
+
+            (format!("org.dbus2.benchmark.Interface{i}"), properties)
+        })
+        .collect()
 }
 
 /// Setting the sender of messages, as a bus does to those of peers that leave it out.
