@@ -17,69 +17,107 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  benchmarks:
-    name: Run benchmarks (${{ matrix.mode }})
-    runs-on: ${{ matrix.runner }}
-    # The clock's job takes a few minutes, most of them building: one that takes longer than 30 is
-    # stuck, and would hold the macro runner until GitHub's own limit of 6 hours.
-    timeout-minutes: ${{ matrix.timeout-minutes }}
-    strategy:
-      matrix:
-        # Every bench target of the workspace goes in exactly one of the two lists: CodSpeed puts
-        # the results of the two jobs together into one report, and takes each benchmark's from
-        # one. A `--bench` picks the target of that name in every package that has one, so
-        # `benchmarks` picks both zbus's and zbus_xml's.
-        include:
-          # What runs on one thread and waits on no timer or socket: measured by simulating the
-          # CPU it runs on, which counts the same instructions and cache misses on every run, on
-          # any runner, so a GitHub-hosted one does.
-          - mode: simulation
-            runner: ubuntu-latest
-            benches: --bench benchmarks --bench names --bench wire
-            features: zbus/bus-impl
-            timeout-minutes: 360
-          # What waits on timers, sockets or other threads: in the kernel, which the simulation
-          # leaves out, so measured by the clock. On a bare-metal CodSpeed macro runner, given to
-          # this job alone, so that the numbers move with the code rather than with the load of
-          # whoever shares a hosted runner's host. Keep the job on this one label: two runs are only
-          # comparable when measured on the same machine.
-          - mode: walltime
-            runner: codspeed-macro-arm64-graviton-ubuntu-22-04
-            benches: --bench runtime --bench connection
-            features: zbus/bus-impl,zbus/serde_bytes
-            timeout-minutes: 30
+  # Every bench target of the workspace goes in exactly one of the two jobs that run them: CodSpeed
+  # puts the results of the two together into one report, and takes each benchmark's from one. A
+  # `--bench` picks the target of that name in every package that has one, so `benchmarks` picks
+  # both zbus's and zbus_xml's. They are jobs of their own, rather than the entries of a matrix, as
+  # only the walltime one skips releases, which a job's `if` can't tell apart by its matrix entry.
+  #
+  # Each job builds the features that its targets need between them beyond the default ones, as
+  # their `required-features` say (`connection` needs `bus-impl` and `serde_bytes`), and
+  # `bus-impl`, which `benchmarks` measures the bus API of where it's enabled, so that
+  # `serde_bytes` turns on none of the benchmarks of the simulation, such as those of byte arrays
+  # in `wire`.
+  #
+  # Each function starts on a cache line of 64 bytes of its own. The simulation counts cache
+  # misses, so the lines that the code of a function spans move the numbers of the benchmarks that
+  # run it, and a change that grows or shrinks one function would otherwise move others to other
+  # offsets in their lines, and the numbers of code that it doesn't touch with them. This covers
+  # what cargo builds, but not the prebuilt standard library. cargo-codspeed adds its own flags to
+  # these. The walltime builds keep the flag too, so that they build the same code as before.
+  #
+  # What runs on one thread and waits on no timer or socket: measured by simulating the CPU it runs
+  # on, which counts the same instructions and cache misses on every run, on any runner, so a
+  # GitHub-hosted one does.
+  simulation:
+    name: Run benchmarks (simulation)
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
     steps:
-      - uses: actions/checkout@v7
-      - name: Setup rust toolchain, cache and cargo-codspeed binary
+      - &checkout
+        uses: actions/checkout@v7
+      - &setup-rust
+        name: Setup rust toolchain, cache and cargo-codspeed binary
         uses: moonrepo/setup-rust@v1
+        env:
+          # cargo-binstall looks the release of each binary up on GitHub's API, which limits
+          # requests without a token: a lookup that hit the limit once stalled a job for 8 minutes.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           channel: stable
           cache-target: release
+          # Only main saves the cache, which pull requests restore: the cache of a pull request
+          # could only be restored by the later runs of that pull request, and would count against
+          # the repository's limit, which could push main's out.
+          cache-base: main
           # setup-rust's cache key leaves the architecture out: without this, the arm64 job would
           # find the cache the x86_64 one saved under the same key, and never save its own.
           cache-extra-identifier: ${{ runner.arch }}
-          bins: cargo-codspeed
-      # The features that the bench targets of each job need between them beyond the default ones,
-      # as their `required-features` say (`connection` needs `bus-impl` and `serde_bytes`), and
-      # `bus-impl`, which `benchmarks` measures the bus API of where it's enabled; each job builds
-      # its own targets only, with features of its own, so that `serde_bytes` turns on no more of
-      # the benchmarks of the simulation, such as those of byte arrays in `wire`.
-      #
-      # Each function starts on a cache line of 64 bytes of its own. The simulation counts cache
-      # misses, so the lines that the code of a function spans move the numbers of the benchmarks
-      # that run it, and a change that grows or shrinks one function would otherwise move others
-      # to other offsets in their lines, and the numbers of code that it doesn't touch with them.
-      # This covers what cargo builds, but not the prebuilt standard library. cargo-codspeed adds
-      # its own flags to these.
-      - name: Build the benchmark target(s)
-        env:
+          # The major version of cargo-codspeed goes with that of codspeed-criterion-compat, which
+          # Cargo.lock pins: the two are bumped together.
+          bins: cargo-codspeed@6.0.0
+      - name: Build the benchmark targets
+        env: &rustflags
           RUSTFLAGS: -C llvm-args=-align-all-functions=6
         run: >-
-          cargo codspeed build -m ${{ matrix.mode }} --features ${{ matrix.features }}
-          ${{ matrix.benches }}
+          cargo codspeed build -m simulation --features zbus/bus-impl
+          --bench benchmarks --bench names --bench wire
       - name: Run the benchmarks
         uses: CodSpeedHQ/action@v5
         with:
-          mode: ${{ matrix.mode }}
-          run: cargo codspeed run -m ${{ matrix.mode }} ${{ matrix.benches }}
+          mode: simulation
+          run: cargo codspeed run -m simulation --bench benchmarks --bench names --bench wire
+          token: ${{ secrets.CODSPEED_TOKEN }} # optional for public repos
+
+  # What waits on timers, sockets or other threads: in the kernel, which the simulation leaves
+  # out, so measured by the clock. On a bare-metal CodSpeed macro runner, given to this job alone,
+  # so that the numbers move with the code rather than with the load of whoever shares a hosted
+  # runner's host. Keep the job on this one label: two runs are only comparable when measured on
+  # the same machine. Its id stays `benchmarks`, which the walltime entry of a matrix had before,
+  # as setup-rust's cache key hashes the id, so that it keeps finding the cache that it saved.
+  #
+  # A release changes nothing that the benchmarks measure: its pull request, which release-plz
+  # opens from a branch of its own, only bumps versions and changelogs, and so does its merge,
+  # which `release.yml` tells apart by the release emoji of its commits, as this does. CodSpeed
+  # then takes the results of the walltime ids from the run that the release is compared with.
+  benchmarks:
+    name: Run benchmarks (walltime)
+    runs-on: codspeed-macro-arm64-graviton-ubuntu-22-04
+    if: >-
+      ${{ !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'release-plz-')) &&
+      !(github.event_name == 'push' && contains(join(github.event.commits.*.message), '🔖')) }}
+    # The job takes a few minutes, most of them building: one that takes longer than 15 is stuck,
+    # and would hold the macro runner until GitHub's own limit of 6 hours.
+    timeout-minutes: 15
+    steps:
+      - *checkout
+      - *setup-rust
+      - name: Build the benchmark targets
+        env: *rustflags
+        run: >-
+          cargo codspeed build -m walltime --features zbus/bus-impl,zbus/serde_bytes
+          --bench runtime --bench connection
+      - name: Run the benchmarks
+        uses: CodSpeedHQ/action@v5
+        with:
+          mode: walltime
+          # Nothing is ever saved to the cache of CodSpeed's instruments on the macro runner.
+          cache-instruments: false
+          # criterion's warm-up of 3 s and measurement of 5 s for each id give way to 1 s and 2 s:
+          # the numbers spread far more from one run to the next, on the machines of the macro
+          # runner, than within a run, so the longer ones bought little but minutes. No plots are
+          # drawn, as nothing reads them.
+          run: >-
+            cargo codspeed run -m walltime --bench runtime --bench connection --
+            --warm-up-time 1 --measurement-time 2 --noplot
           token: ${{ secrets.CODSPEED_TOKEN }} # optional for public repos
