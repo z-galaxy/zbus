@@ -42,8 +42,8 @@ jobs:
             --target x86_64-pc-windows-gnu
           cargo --locked check -p zbus --no-default-features --features $EXT \
             --target x86_64-apple-darwin
-        # This would be nice but some optional deps (e.g `time`) move very fast wrt to MSRV.
-        # cargo --locked check --all-features
+          # Every feature, `bus-impl` included, which none of the builds above enables.
+          cargo --locked check --all-features
 
   fmt:
     runs-on: ubuntu-latest
