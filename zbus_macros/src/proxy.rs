@@ -577,83 +577,78 @@ fn gen_proxy_property(
     let signature = &m.sig;
     if signature.inputs.len() > 1 {
         let value = pat_ident(typed_arg(signature.inputs.last().unwrap()).unwrap()).unwrap();
-        Ok(quote! {
+        return Ok(quote! {
             #(#other_attrs)*
             #[allow(clippy::needless_question_mark)]
             pub async #signature {
                 ::std::result::Result::Ok(self.0.set_property(#property_name, #value).await?)
             }
-        })
+        });
+    }
+
+    // The body should fail to compile only if the return type is wrong, so use that as its span.
+    let body_span = if let ReturnType::Type(_, ty) = &signature.output {
+        ty.span()
     } else {
-        // Check for object attribute to return a proxy instead of OwnedObjectPath
-        let proxy_object = resolve_proxy_type_name(method_attrs, m.span())?;
+        signature.span()
+    };
 
+    // With the `object` attribute, the getter returns a proxy for the object at the path that the
+    // property holds (or a proxy for each path, with `object_vec`), rather than the path itself.
+    // The cached getter and the change stream don't make sense for proxies, so they're skipped.
+    if let Some(proxy_path_str) = resolve_proxy_type_name(method_attrs, m.span())? {
+        let proxy_path: Path = parse_str(&proxy_path_str).unwrap();
         let proxy_vec = method_attrs.object_vec;
-
-        // This should fail to compile only if the return type is wrong,
-        // so use that as the span.
-        let body_span = if let ReturnType::Type(_, ty) = &signature.output {
-            ty.span()
+        let method_name = Ident::new(rust_method_name, m.sig.ident.span());
+        let inputs = &signature.inputs;
+        let ok_type = if proxy_vec {
+            quote!(Vec<#proxy_path<'p>>)
         } else {
-            signature.span()
+            quote!(#proxy_path<'p>)
+        };
+        let property_get = quote! {
+            self.0.get_property(#property_name).await?
+        };
+        let proxy_build = quote! {
+            #proxy_path::builder(&self.0.connection())
+                .destination(self.0.destination().to_owned())
+                .path(object_path)
+                .build()
+                .await
+        };
+        let body = if proxy_vec {
+            quote_spanned! {body_span =>
+                let object_paths: Vec<#zbus::OwnedObjectPath> =
+                    #property_get;
+
+                let mut proxies = Vec::with_capacity(object_paths.len());
+                for object_path in object_paths {
+                    let proxy = #proxy_build?;
+                    proxies.push(proxy);
+                }
+
+                Ok(proxies)
+            }
+        } else {
+            quote_spanned! {body_span =>
+                let object_path: #zbus::OwnedObjectPath =
+                    #property_get;
+                #proxy_build
+            }
         };
 
+        Ok(quote! {
+            #(#other_attrs)*
+            #[allow(clippy::needless_question_mark)]
+            pub async fn #method_name(#inputs) -> #zbus::Result<#ok_type> {
+                #body
+            }
+        })
+    } else {
         let ret_type = if let ReturnType::Type(_, ty) = &signature.output {
             Some(ty)
         } else {
             None
-        };
-
-        // Generate the getter body - either returning a proxy object or the raw property value
-        let (body, custom_signature) = if let Some(proxy_path_str) = proxy_object {
-            let proxy_path: Path = parse_str(&proxy_path_str).unwrap();
-            let method_name = Ident::new(rust_method_name, m.sig.ident.span());
-            let inputs = &signature.inputs;
-            let custom_sig = if proxy_vec {
-                quote! {
-                    fn #method_name(#inputs) -> #zbus::Result<Vec<#proxy_path<'p>>>
-                }
-            } else {
-                quote! {
-                    fn #method_name(#inputs) -> #zbus::Result<#proxy_path<'p>>
-                }
-            };
-            let property_get = quote! {
-                self.0.get_property(#property_name).await?
-            };
-            let proxy_build = quote! {
-                #proxy_path::builder(&self.0.connection())
-                    .destination(self.0.destination().to_owned())
-                    .path(object_path)
-                    .build()
-                    .await
-            };
-            let body = if proxy_vec {
-                quote_spanned! {body_span =>
-                    let object_paths: Vec<#zbus::OwnedObjectPath> =
-                        #property_get;
-
-                    let mut proxies = Vec::with_capacity(object_paths.len());
-                    for object_path in object_paths {
-                        let proxy = #proxy_build?;
-                        proxies.push(proxy);
-                    }
-
-                    Ok(proxies)
-                }
-            } else {
-                quote_spanned! {body_span =>
-                    let object_path: #zbus::OwnedObjectPath =
-                        #property_get;
-                    #proxy_build
-                }
-            };
-            (body, Some(custom_sig))
-        } else {
-            let body = quote_spanned! {body_span =>
-                ::std::result::Result::Ok(self.0.get_property(#property_name).await?)
-            };
-            (body, None)
         };
 
         let prop_stream = quote! { #zbus::proxy::PropertyStream };
@@ -708,28 +703,19 @@ fn gen_proxy_property(
             PropertyEmitsChangedSignal::False => quote! {},
         };
 
-        // When object attribute is used, we use a custom signature and skip cached/receive methods
-        // since those don't make sense for proxy objects
-        let (sig, extra_methods) = if let Some(sig) = custom_signature {
-            (sig, quote! {})
-        } else {
-            (
-                quote! { #signature },
-                quote! {
-                    #cached_getter_method
-                    #receive_method
-                },
-            )
+        let body = quote_spanned! {body_span =>
+            ::std::result::Result::Ok(self.0.get_property(#property_name).await?)
         };
 
         Ok(quote! {
             #(#other_attrs)*
             #[allow(clippy::needless_question_mark)]
-            pub async #sig {
+            pub async #signature {
                 #body
             }
 
-            #extra_methods
+            #cached_getter_method
+            #receive_method
         })
     }
 }
