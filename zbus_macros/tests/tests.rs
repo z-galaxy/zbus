@@ -466,9 +466,12 @@ async fn proxy_object_list() {
         ],
     };
 
-    fn check_return(list: Vec<ObjectListProxy<'_>>) {
+    // The proxies must be for the peer that returned their paths, not for the `default_service` of
+    // their type.
+    fn check_return(list: Vec<ObjectListProxy<'_>>, destination: &str) {
         for (correct, returned) in OBJECT_LIST.paths.iter().zip(list) {
             assert!(returned.inner().path() == correct);
+            assert_eq!(returned.inner().destination().as_str(), destination);
         }
     }
 
@@ -486,8 +489,8 @@ async fn proxy_object_list() {
         .await
         .unwrap();
 
-    check_return(proxy.get_test_objects().await.unwrap());
-    check_return(proxy.objects().await.unwrap());
+    check_return(proxy.get_test_objects().await.unwrap(), &destination);
+    check_return(proxy.objects().await.unwrap(), &destination);
 }
 
 // `proxy_type_name` and its `async_object` alias must both resolve the same method's return
@@ -530,6 +533,34 @@ fn method_object_proxy_type_name_and_its_alias() {
 
         let alias = UsesAsyncObjectAliasProxy::new(&connection).await.unwrap();
         let result: zbus::Result<ProxyTypeNameTargetProxy<'_>> = alias.get_target().await;
+        assert!(result.is_err());
+    });
+}
+
+// Methods and properties named by raw identifiers return proxies just like the others.
+#[test]
+fn object_with_raw_identifier() {
+    #[zbus_macros::proxy(
+        interface = "org.freedesktop.zbus_macros.RawIdentifier",
+        default_service = "org.freedesktop.zbus_macros",
+        default_path = "/org/freedesktop/zbus_macros/raw_identifier"
+    )]
+    trait RawIdentifier {
+        #[zbus(object = "RawIdentifier")]
+        fn r#match(&self);
+
+        #[zbus(property, object = "RawIdentifier")]
+        fn r#type(&self);
+    }
+
+    block_on(async move {
+        let connection = zbus::Connection::session().await.unwrap();
+        let proxy = RawIdentifierProxy::new(&connection).await.unwrap();
+
+        // Nothing replies, but the point of the calls is their return types, checked below.
+        let result: zbus::Result<RawIdentifierProxy<'_>> = proxy.r#match().await;
+        assert!(result.is_err());
+        let result: zbus::Result<RawIdentifierProxy<'_>> = proxy.r#type().await;
         assert!(result.is_err());
     });
 }

@@ -399,7 +399,7 @@ fn gen_proxy_method_call(
         .filter_map(pat_ident)
         .collect();
 
-    let proxy_object = resolve_proxy_type_name(&method_attrs, m.span())?;
+    let proxy_object = resolve_proxy_type(&method_attrs, m.span())?;
     let proxy_vec = method_attrs.object_vec;
 
     let method_flags = [
@@ -456,7 +456,6 @@ fn gen_proxy_method_call(
     let (_, ty_generics, where_clause) = generics.split_for_impl();
 
     if let Some(proxy_path) = proxy_object {
-        let proxy_path = parse_str::<Path>(&proxy_path)?;
         let ok_type = if proxy_vec {
             quote!(Vec<#proxy_path<'p>>)
         } else {
@@ -469,6 +468,7 @@ fn gen_proxy_method_call(
 
         let proxy_build = quote! {
             #proxy_path::builder(&self.0.connection())
+                .destination(self.0.destination().to_owned())
                 .path(object_path)
                 .build()
                 .await
@@ -596,10 +596,9 @@ fn gen_proxy_property(
     // With the `object` attribute, the getter returns a proxy for the object at the path that the
     // property holds (or a proxy for each path, with `object_vec`), rather than the path itself.
     // The cached getter and the change stream don't make sense for proxies, so they're skipped.
-    if let Some(proxy_path_str) = resolve_proxy_type_name(method_attrs, m.span())? {
-        let proxy_path: Path = parse_str(&proxy_path_str).unwrap();
+    if let Some(proxy_path) = resolve_proxy_type(method_attrs, m.span())? {
         let proxy_vec = method_attrs.object_vec;
-        let method_name = Ident::new(rust_method_name, m.sig.ident.span());
+        let method_name = &signature.ident;
         let inputs = &signature.inputs;
         let ok_type = if proxy_vec {
             quote!(Vec<#proxy_path<'p>>)
@@ -737,22 +736,25 @@ impl Fold for SetLifetimeS {
 /// The proxy type to build from the `ObjectPath` an `object`-attributed method or property
 /// returns: `proxy_type_name` if given, its `async_object` alias if given, or `<object>Proxy`
 /// derived from the `object` attribute's value when neither is given.
-fn resolve_proxy_type_name(
-    method_attrs: &MethodAttributes,
-    span: Span,
-) -> Result<Option<String>, Error> {
+fn resolve_proxy_type(method_attrs: &MethodAttributes, span: Span) -> Result<Option<Path>, Error> {
     let Some(object) = &method_attrs.object else {
         return Ok(None);
     };
 
-    match (&method_attrs.proxy_type_name, &method_attrs.async_object) {
-        (Some(_), Some(_)) => Err(Error::new(
-            span,
-            "`proxy_type_name` and `async_object` name the same thing; use `proxy_type_name`",
-        )),
-        (Some(name), None) | (None, Some(name)) => Ok(Some(name.clone())),
-        (None, None) => Ok(Some(format!("{object}Proxy"))),
-    }
+    let name = match (&method_attrs.proxy_type_name, &method_attrs.async_object) {
+        (Some(_), Some(_)) => {
+            return Err(Error::new(
+                span,
+                "`proxy_type_name` and `async_object` name the same thing; use `proxy_type_name`",
+            ));
+        }
+        (Some(name), None) | (None, Some(name)) => name.clone(),
+        (None, None) => format!("{object}Proxy"),
+    };
+
+    parse_str(&name)
+        .map(Some)
+        .map_err(|e| Error::new(span, format!("invalid proxy type `{name}`: {e}")))
 }
 
 fn gen_proxy_signal(
@@ -1094,6 +1096,38 @@ mod tests {
 
             let error = expand(args, input).unwrap_err();
             assert_eq!(error.to_string(), expected);
+        }
+    }
+
+    /// A proxy type that isn't a valid path is an error, whether a method or a property names it.
+    #[test]
+    fn invalid_proxy_types_are_rejected() {
+        let methods = [
+            quote! {
+                #[zbus(object = "Thing", proxy_type_name = "Not A Path")]
+                fn thing(&self);
+            },
+            quote! {
+                #[zbus(property, object = "Thing", proxy_type_name = "Not A Path")]
+                fn thing(&self);
+            },
+        ];
+
+        for method in methods {
+            let args = Punctuated::<Meta, Token![,]>::parse_terminated
+                .parse2(quote! { interface = "org.freedesktop.Test" })
+                .unwrap();
+            let input: ItemTrait = parse_quote! {
+                trait Test {
+                    #method
+                }
+            };
+
+            let error = expand(args, input).unwrap_err().to_string();
+            assert!(
+                error.starts_with("invalid proxy type `Not A Path`: "),
+                "unexpected error: {error}",
+            );
         }
     }
 
