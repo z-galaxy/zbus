@@ -466,9 +466,12 @@ async fn proxy_object_list() {
         ],
     };
 
-    fn check_return(list: Vec<ObjectListProxy<'_>>) {
+    // The proxies must be for the peer that returned their paths, not for the `default_service` of
+    // their type.
+    fn check_return(list: Vec<ObjectListProxy<'_>>, destination: &str) {
         for (correct, returned) in OBJECT_LIST.paths.iter().zip(list) {
             assert!(returned.inner().path() == correct);
+            assert_eq!(returned.inner().destination().as_str(), destination);
         }
     }
 
@@ -486,8 +489,8 @@ async fn proxy_object_list() {
         .await
         .unwrap();
 
-    check_return(proxy.get_test_objects().await.unwrap());
-    check_return(proxy.objects().await.unwrap());
+    check_return(proxy.get_test_objects().await.unwrap(), &destination);
+    check_return(proxy.objects().await.unwrap(), &destination);
 }
 
 // `proxy_type_name` and its `async_object` alias must both resolve the same method's return

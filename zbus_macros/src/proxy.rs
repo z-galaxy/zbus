@@ -469,6 +469,7 @@ fn gen_proxy_method_call(
 
         let proxy_build = quote! {
             #proxy_path::builder(&self.0.connection())
+                .destination(self.0.destination().to_owned())
                 .path(object_path)
                 .build()
                 .await

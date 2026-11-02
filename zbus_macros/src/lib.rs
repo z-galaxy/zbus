@@ -91,7 +91,8 @@ mod utils;
 ///
 /// * `object` - methods or properties that return an [`ObjectPath`] can be annotated with the
 ///   `object` attribute to specify the proxy object to be constructed from the returned
-///   [`ObjectPath`].
+///   [`ObjectPath`]. The constructed proxy has the same destination as the proxy that returned the
+///   path.
 ///
 /// * `proxy_type_name` - if the assumptions made by `object` attribute about naming of the proxy
 ///   type, don't fit your bill, you can use this to specify its exact name.
