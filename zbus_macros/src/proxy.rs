@@ -598,7 +598,7 @@ fn gen_proxy_property(
     // The cached getter and the change stream don't make sense for proxies, so they're skipped.
     if let Some(proxy_path) = resolve_proxy_type(method_attrs, m.span())? {
         let proxy_vec = method_attrs.object_vec;
-        let method_name = Ident::new(rust_method_name, m.sig.ident.span());
+        let method_name = &signature.ident;
         let inputs = &signature.inputs;
         let ok_type = if proxy_vec {
             quote!(Vec<#proxy_path<'p>>)

@@ -537,6 +537,34 @@ fn method_object_proxy_type_name_and_its_alias() {
     });
 }
 
+// Methods and properties named by raw identifiers return proxies just like the others.
+#[test]
+fn object_with_raw_identifier() {
+    #[zbus_macros::proxy(
+        interface = "org.freedesktop.zbus_macros.RawIdentifier",
+        default_service = "org.freedesktop.zbus_macros",
+        default_path = "/org/freedesktop/zbus_macros/raw_identifier"
+    )]
+    trait RawIdentifier {
+        #[zbus(object = "RawIdentifier")]
+        fn r#match(&self);
+
+        #[zbus(property, object = "RawIdentifier")]
+        fn r#type(&self);
+    }
+
+    block_on(async move {
+        let connection = zbus::Connection::session().await.unwrap();
+        let proxy = RawIdentifierProxy::new(&connection).await.unwrap();
+
+        // Nothing replies, but the point of the calls is their return types, checked below.
+        let result: zbus::Result<RawIdentifierProxy<'_>> = proxy.r#match().await;
+        assert!(result.is_err());
+        let result: zbus::Result<RawIdentifierProxy<'_>> = proxy.r#type().await;
+        assert!(result.is_err());
+    });
+}
+
 // This crate has no `zvariant` dependency, so the path `signature!` expands to has to resolve
 // through the `zbus` re-export.
 #[test]
