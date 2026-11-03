@@ -96,12 +96,12 @@ fn file_descriptors_cross_a_unix_socket() {
 }
 
 /// A batch of messages goes in writes of several, each of which starts at a message, and a
-/// message with file descriptors starts one of its own, which they go with. Each message comes out
-/// of the other end in order, with its own descriptors and no others.
+/// message with file descriptors goes in one of its own, which they go with. Each message comes
+/// out of the other end in order, with its own descriptors and no others.
 #[cfg(unix)]
 #[test]
 #[timeout(15000)]
-fn a_message_with_descriptors_starts_a_write_of_its_own() {
+fn a_message_with_descriptors_goes_in_a_write_of_its_own() {
     under_every_runtime(|runtime| async move {
         let (left, right) = UnixStream::pair().unwrap();
         let ops = Recording::default();
@@ -126,7 +126,7 @@ fn a_message_with_descriptors_starts_a_write_of_its_own() {
 
         assert_eq!(
             *writes.lock().unwrap(),
-            [(16, 0), (2, 0), (2, 1), (1, 1)],
+            [(16, 0), (2, 0), (1, 1), (1, 0), (1, 1)],
             "the writes were not split as expected, as (messages, descriptors)",
         );
         for (seq, sent) in msgs.iter().enumerate() {

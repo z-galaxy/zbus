@@ -382,9 +382,10 @@ pub trait WriteHalf: std::fmt::Debug + Send + Sync + 'static {
     /// over with fewer writes than it takes to send them one by one.
     ///
     /// The default implementation sends them one by one with `send_message`. Implementers that can
-    /// write several messages at once should override it. File descriptors travel with the first
-    /// byte of the write they are sent with, so a message with file descriptors has to start a
-    /// write of its own, and the write sends them along.
+    /// write several messages at once should override it. File descriptors travel with the write
+    /// they are sent with, so a message with file descriptors has to go in a write of its own,
+    /// which sends them along: a bus such as dbus-broker gives the file descriptors that come with
+    /// a read to the message that the read ends in.
     ///
     /// If this fails, the messages before the one that it failed on have been sent in full, and
     /// that one may have been sent in part.

@@ -279,26 +279,36 @@ impl<O> WriteHalf for Arc<RegisteredIo<O>>
 where
     O: SocketOps,
 {
-    // `msgs` go with as few writes as the socket takes. Each write starts at a message, and sends
-    // its file descriptors, if any, which travel with the first byte of the write. It takes the
-    // messages after that one that carry no file descriptors, up to `MESSAGES_PER_WRITE` in all,
-    // until it has `BYTES_PER_WRITE` or more. Whatever part of it the socket doesn't take goes in
-    // the next write, without the descriptors.
+    // `msgs` go with as few writes as the socket takes. Each write starts at a message, and takes
+    // the messages after it that carry no file descriptors, up to `MESSAGES_PER_WRITE` in all,
+    // until it has `BYTES_PER_WRITE` or more. A message with file descriptors goes in a write of
+    // its own, which sends them with its first byte. Whatever part of a write the socket doesn't
+    // take goes in the next write, without the descriptors.
+    //
+    // The write of its own is for dbus-broker, which gives the descriptors that a read returns to
+    // the message that the read ends in. Linux ends a read that returns descriptors with the data
+    // of the write that they came with, if not sooner, so that is a byte of their message only if
+    // the write holds nothing but their message. dbus-broker disconnects a peer whose message
+    // comes without the descriptors that its header counts.
     async fn send_messages(&mut self, mut msgs: &[Message]) -> crate::Result<()> {
         let socket = &**self;
 
         while !msgs.is_empty() {
             let mut bytes = msgs[0].data().len();
-            let len = 1 + msgs[1..]
-                .iter()
-                .take(MESSAGES_PER_WRITE - 1)
-                .take_while(|msg| {
-                    let joins = bytes < BYTES_PER_WRITE && !carries_fds(msg);
-                    bytes += msg.data().len();
+            let len = if carries_fds(&msgs[0]) {
+                1
+            } else {
+                1 + msgs[1..]
+                    .iter()
+                    .take(MESSAGES_PER_WRITE - 1)
+                    .take_while(|msg| {
+                        let joins = bytes < BYTES_PER_WRITE && !carries_fds(msg);
+                        bytes += msg.data().len();
 
-                    joins
-                })
-                .count();
+                        joins
+                    })
+                    .count()
+            };
             let (write, rest) = msgs.split_at(len);
             let mut buffers = [IoSlice::new(&[]); MESSAGES_PER_WRITE];
             for (buffer, msg) in buffers.iter_mut().zip(write) {
