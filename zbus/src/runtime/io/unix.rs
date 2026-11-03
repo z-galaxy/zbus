@@ -435,30 +435,45 @@ impl GroupLookup {
         }
 
         let username = unsafe { std::ffi::CStr::from_ptr((*result).pw_name) };
-        let mut ngroups = 64i32;
-        let mut groups = vec![0u32; ngroups as usize];
+        let mut groups = vec![0u32; INITIAL_GROUPS];
+        loop {
+            let mut ngroups = libc::c_int::try_from(groups.len()).unwrap_or(libc::c_int::MAX);
+            // SAFETY: `username` ends with a 0, and `groups` has room for the `ngroups` groups that
+            // `getgrouplist` is given.
+            let found = unsafe {
+                libc::getgrouplist(
+                    username.as_ptr(),
+                    gid,
+                    groups.as_mut_ptr() as *mut libc::gid_t,
+                    &mut ngroups,
+                )
+            };
+            let ngroups = usize::try_from(ngroups).unwrap_or(0);
+            if found >= 0 {
+                groups.truncate(ngroups);
 
-        let found = unsafe {
-            libc::getgrouplist(
-                username.as_ptr(),
-                gid,
-                groups.as_mut_ptr() as *mut libc::gid_t,
-                &mut ngroups,
-            )
-        };
-        if found < 0 {
-            debug!("Group lookup failed for user {:?}", username);
+                break;
+            }
+            // The user has more groups than there is room for, and `ngroups` is how many it has.
+            // Anything else is a failure, which leaves the groups out, as they must be complete.
+            if ngroups <= groups.len() {
+                debug!("Group lookup failed for user {:?}", username);
 
-            return vec![];
+                return vec![];
+            }
+            groups.resize(ngroups, 0);
         }
-
-        groups.truncate(ngroups as usize);
         groups.sort();
         groups.dedup();
 
         groups
     }
 }
+
+/// How many groups a lookup of the groups of a peer makes room for at first, which is enough for
+/// most users: it makes room for more if the user has more.
+#[cfg(any(target_os = "android", target_os = "linux"))]
+const INITIAL_GROUPS: usize = 64;
 
 /// Sends the zero byte that opens the `EXTERNAL` handshake as an `SCM_CREDS` message of its own.
 ///
