@@ -236,14 +236,15 @@ fn socket_credentials(fd: BorrowedFd<'_>) -> io::Result<(ConnectionCredentials, 
 
     #[cfg(any(target_os = "android", target_os = "linux"))]
     {
-        use rustix::net::sockopt::socket_peercred;
-
-        let ucred = socket_peercred(fd)?;
-        uid = ucred.uid.as_raw();
-        gid = ucred.gid.as_raw();
-        let pid = ucred.pid.as_raw_nonzero().get() as u32;
-
-        creds = creds.set_unix_user_id(uid).set_process_id(pid);
+        let ucred = peer_ucred(fd)?;
+        uid = ucred.uid;
+        gid = ucred.gid;
+        creds = creds.set_unix_user_id(uid);
+        // The kernel gives 0 for a peer whose process has no ID in the PID namespace of the caller,
+        // which names no process here. Its process descriptor, below, still does.
+        if let Some(pid) = u32::try_from(ucred.pid).ok().filter(|&pid| pid != 0) {
+            creds = creds.set_process_id(pid);
+        }
 
         #[cfg(target_os = "linux")]
         {
@@ -316,6 +317,38 @@ fn socket_credentials(fd: BorrowedFd<'_>) -> io::Result<(ConnectionCredentials, 
             gid,
         },
     ))
+}
+
+/// The credentials that the peer of the socket `fd` had as it connected, from `SO_PEERCRED`.
+///
+/// rustix has this call, but it holds the process ID in a type that has no 0, which the kernel
+/// gives for a peer in another PID namespace, and fails for such a peer.
+#[cfg(any(target_os = "android", target_os = "linux"))]
+fn peer_ucred(fd: BorrowedFd<'_>) -> io::Result<libc::ucred> {
+    use std::os::fd::AsRawFd;
+
+    let mut ucred = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: `ucred` has room for the `len` bytes that `SO_PEERCRED` fills in, and `fd` stays open
+    // for as long as the call lasts.
+    let ret = unsafe {
+        libc::getsockopt(
+            fd.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            std::ptr::from_mut(&mut ucred).cast(),
+            &mut len,
+        )
+    };
+    if ret < 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    Ok(ucred)
 }
 
 /// The identity a peer's supplementary groups are looked up from.
