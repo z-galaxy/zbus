@@ -1346,8 +1346,8 @@ fn a_group_lookup_reaches_the_runtime_only_where_there_is_one() {
 
     futures_lite::future::block_on(ReadHalf::peer_credentials(&mut socket)).unwrap();
 
-    // zbus looks supplementary groups up on Linux and Android only, and one call is what that
-    // takes.
-    let expected = usize::from(cfg!(any(target_os = "android", target_os = "linux")));
+    // zbus looks supplementary groups up in NSS on Android only, and one call is what that takes.
+    // On Linux, the socket tells them, as it does from Linux 4.13 on.
+    let expected = usize::from(cfg!(target_os = "android"));
     assert_eq!(counting.blocking_calls(), expected);
 }
