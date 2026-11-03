@@ -376,6 +376,18 @@ impl_basic_with_repr!(
     chrono::Weekday => str,
 );
 
+#[cfg(feature = "jiff")]
+impl_basic_with_repr!(
+    jiff::civil::Date => str,
+    jiff::civil::DateTime => str,
+    jiff::civil::ISOWeekDate => str,
+    jiff::civil::Time => str,
+    jiff::Span => str,
+    jiff::SignedDuration => str,
+    jiff::Timestamp => str,
+    jiff::Zoned => str,
+);
+
 #[cfg(test)]
 mod tests {
     use static_assertions::assert_impl_all;
@@ -415,6 +427,23 @@ mod tests {
     assert_impl_all!(chrono::NaiveTime: Basic);
     #[cfg(feature = "chrono")]
     assert_impl_all!(chrono::Weekday: Basic);
+
+    #[cfg(feature = "jiff")]
+    assert_impl_all!(jiff::civil::Date: Basic);
+    #[cfg(feature = "jiff")]
+    assert_impl_all!(jiff::civil::DateTime: Basic);
+    #[cfg(feature = "jiff")]
+    assert_impl_all!(jiff::civil::ISOWeekDate: Basic);
+    #[cfg(feature = "jiff")]
+    assert_impl_all!(jiff::civil::Time: Basic);
+    #[cfg(feature = "jiff")]
+    assert_impl_all!(jiff::Span: Basic);
+    #[cfg(feature = "jiff")]
+    assert_impl_all!(jiff::SignedDuration: Basic);
+    #[cfg(feature = "jiff")]
+    assert_impl_all!(jiff::Timestamp: Basic);
+    #[cfg(feature = "jiff")]
+    assert_impl_all!(jiff::Zoned: Basic);
 
     #[cfg(feature = "comms")]
     assert_impl_all!(crate::fdo::RequestNameFlags: Basic);

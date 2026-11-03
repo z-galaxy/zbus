@@ -190,3 +190,140 @@ impl_type_with_repr! {
         }
     }
 }
+
+#[cfg(feature = "jiff")]
+impl_type_with_repr! {
+    jiff::civil::Date => &str {
+        jiff_date {
+            samples = [
+                jiff::civil::Date::MIN,
+                jiff::civil::Date::ZERO,
+                jiff::civil::Date::MAX
+            ],
+            repr(d) = &d.to_string(),
+        }
+    }
+}
+
+#[cfg(feature = "jiff")]
+impl_type_with_repr! {
+    jiff::civil::DateTime => &str {
+        jiff_datetime {
+            samples = [
+                jiff::civil::DateTime::MIN,
+                jiff::civil::DateTime::ZERO,
+                jiff::civil::DateTime::MAX
+            ],
+            repr(dt) = &dt.to_string(),
+        }
+    }
+}
+
+#[cfg(feature = "jiff")]
+impl_type_with_repr! {
+    jiff::civil::ISOWeekDate => &str {
+        jiff_iso_week_date {
+            samples = [
+                jiff::civil::ISOWeekDate::MIN,
+                jiff::civil::ISOWeekDate::ZERO,
+                jiff::civil::ISOWeekDate::MAX
+            ],
+            repr(date) = &date.to_string(),
+        }
+    }
+}
+
+#[cfg(feature = "jiff")]
+impl_type_with_repr! {
+    jiff::civil::Time => &str {
+        jiff_time {
+            samples = [
+                jiff::civil::Time::MIN,
+                jiff::civil::Time::MAX
+            ],
+            repr(time) = &time.to_string(),
+        }
+    }
+}
+
+#[cfg(feature = "jiff")]
+impl crate::Type for jiff::Span {
+    const SIGNATURE: &'static crate::Signature = <str>::SIGNATURE;
+}
+
+#[cfg(feature = "jiff")]
+impl_type_with_repr! {
+    jiff::SignedDuration => &str {
+        jiff_signed_duration {
+            samples = [
+                jiff::SignedDuration::MIN,
+                jiff::SignedDuration::ZERO,
+                jiff::SignedDuration::MAX,
+                jiff::SignedDuration::new(42, 123456789)
+            ],
+            repr(duration) = &duration.to_string(),
+        }
+    }
+}
+
+#[cfg(feature = "jiff")]
+impl_type_with_repr! {
+    jiff::Timestamp => &str {
+        jiff_timestamp {
+            samples = [
+                jiff::Timestamp::MIN,
+                jiff::Timestamp::UNIX_EPOCH,
+                jiff::Timestamp::MAX
+            ],
+            repr(timestamp) = &timestamp.to_string(),
+        }
+    }
+}
+
+#[cfg(feature = "jiff")]
+impl_type_with_repr! {
+    jiff::Zoned => &str {
+        jiff_zoned {
+            samples = [
+                jiff::Zoned::UNIX_EPOCH,
+                jiff::Zoned::UNIX_EPOCH.with_time_zone(
+                    jiff::tz::TimeZone::fixed(jiff::tz::Offset::constant(2))
+                )
+            ],
+            repr(zoned) = &zoned.to_string(),
+        }
+    }
+}
+
+#[cfg(all(test, feature = "jiff"))]
+mod tests {
+    use endi::LE;
+    use jiff::Span;
+
+    use crate::wire::{serialized::Context, to_bytes};
+
+    #[test]
+    fn jiff_span_roundtrip() {
+        let samples = [Span::new(), Span::new().days(3).hours(1).minutes(4)];
+        let ctx = Context::new(LE, 0);
+
+        for sample in samples {
+            let encoded = to_bytes(ctx, &sample).unwrap();
+            let (decoded, _): (Span, _) = encoded.deserialize().unwrap();
+            assert_eq!(sample.fieldwise(), decoded.fieldwise());
+        }
+    }
+
+    #[test]
+    fn jiff_span_repr_roundtrip() {
+        let samples = [Span::new(), Span::new().days(3).hours(1).minutes(4)];
+        let ctx = Context::new(LE, 0);
+
+        for sample in samples {
+            let repr = sample.to_string();
+            let encoded = to_bytes(ctx, &repr).unwrap();
+            let (decoded, _): (Span, _) = encoded.deserialize().unwrap();
+            assert_eq!(repr, decoded.to_string());
+        }
+    }
+}
