@@ -26,6 +26,7 @@ arrayvec = ["dep:arrayvec"]
 camino = ["dep:camino"]
 chrono = ["dep:chrono"]
 heapless = ["dep:heapless"]
+jiff = ["dep:jiff"]
 # Enables ser/de of `Option<T>` as an array of 0 or 1 elements.
 option-as-array = []
 serde_bytes = ["dep:serde_bytes"]
@@ -126,6 +127,7 @@ arrayvec = { workspace = true, optional = true }
 camino = { workspace = true, optional = true }
 chrono = { workspace = true, optional = true }
 heapless = { workspace = true, optional = true }
+jiff = { workspace = true, optional = true }
 serde_bytes = { workspace = true, optional = true }
 time = { workspace = true, optional = true }
 url = { workspace = true, optional = true }
