@@ -14,10 +14,12 @@ use uds_windows::UnixStream;
 
 #[cfg(any(feature = "bus-impl", feature = "handover"))]
 use crate::MessageStream;
+#[cfg(all(feature = "handover", any(unix, windows)))]
+use crate::runtime::IoSource;
 #[cfg(any(unix, windows))]
 use crate::runtime::io::UnixOps;
 use crate::{
-    Connection, Error, Guid, OwnedGuid, Result, address,
+    Connection, Error, Guid, OwnedGuid, Result,
     address::Address,
     fdo::RequestNameFlags,
     message::Message,
@@ -35,6 +37,8 @@ use crate::{
     object_server::{ArcInterface, Interface},
 };
 
+#[cfg(all(feature = "handover", any(unix, windows)))]
+use super::handover::SocketKind;
 use super::{
     DEFAULT_MAX_QUEUED,
     handshake::{AuthMechanism, Authenticated},
@@ -102,6 +106,10 @@ pub struct Builder<'a> {
     // `None` unless the caller picked a runtime, in which case the connection runs on that one
     // instead of the default for the build.
     runtime: Option<Runtime>,
+    // The socket that the connection runs over, once connected, if zbus drives it and so can give
+    // a descriptor of it for a hand-over.
+    #[cfg(all(feature = "handover", any(unix, windows)))]
+    io_source: Option<(IoSource, SocketKind)>,
     error: Option<Error>,
 }
 
@@ -543,6 +551,13 @@ impl<'a> Builder<'a> {
     ///
     /// To get the [`Connection`] out of the returned stream, use `Connection::from(&stream)` —
     /// this is cheap (an `Arc` clone).
+    #[cfg_attr(
+        feature = "handover",
+        doc = "",
+        doc = "The stream has had every message of the connection, from the first, so the \
+               connection can be handed over through it \
+               ([`MessageStream::hand_over`](crate::MessageStream::hand_over))."
+    )]
     ///
     /// This method is only available when the `bus-impl` or the `handover` feature is enabled.
     ///
@@ -640,7 +655,15 @@ impl<'a> Builder<'a> {
         #[cfg(unix)]
         let already_received_fds = mem::take(&mut auth.already_received_fds);
 
-        let mut conn = Connection::new(auth, is_bus_conn, runtime, self.method_timeout).await?;
+        let mut conn = Connection::new(
+            auth,
+            #[cfg(all(feature = "handover", any(unix, windows)))]
+            self.io_source.take(),
+            is_bus_conn,
+            runtime,
+            self.method_timeout,
+        )
+        .await?;
         conn.set_max_queued(self.max_queued.unwrap_or(DEFAULT_MAX_QUEUED));
 
         #[cfg(feature = "service")]
@@ -715,6 +738,8 @@ impl<'a> Builder<'a> {
             method_timeout: None,
             user_id: None,
             runtime: None,
+            #[cfg(all(feature = "handover", any(unix, windows)))]
+            io_source: None,
             error,
         }
     }
@@ -815,7 +840,15 @@ impl<'a> Builder<'a> {
         // `build` returns before it gets here, and this method is only called once.
         let split = match self.target.take().unwrap() {
             #[cfg(unix)]
-            Target::UnixStream(stream) => registered(runtime, stream, UnixOps)?.into(),
+            Target::UnixStream(stream) => {
+                let socket = registered(runtime, stream, UnixOps)?;
+                #[cfg(feature = "handover")]
+                {
+                    self.io_source = Some((socket.source().clone(), SocketKind::Unix));
+                }
+
+                socket.into()
+            }
             #[cfg(windows)]
             Target::UnixStream(stream) => {
                 // `uds_windows` is the one stream a connection is built from that hands its
@@ -823,18 +856,32 @@ impl<'a> Builder<'a> {
                 // stream close the handle it came with.
                 let socket =
                     std::os::windows::io::AsSocket::as_socket(&stream).try_clone_to_owned()?;
+                let socket = registered(runtime, socket, UnixOps)?;
+                #[cfg(feature = "handover")]
+                {
+                    self.io_source = Some((socket.source().clone(), SocketKind::Unix));
+                }
 
-                registered(runtime, socket, UnixOps)?.into()
+                socket.into()
             }
-            Target::TcpStream(stream) => registered(runtime, stream, TcpOps)?.into(),
+            Target::TcpStream(stream) => {
+                let socket = registered(runtime, stream, TcpOps)?;
+                #[cfg(all(feature = "handover", any(unix, windows)))]
+                {
+                    self.io_source = Some((socket.source().clone(), SocketKind::Tcp));
+                }
+
+                socket.into()
+            }
             Target::Address(address) => {
                 guid = address.guid().map(|g| g.to_owned().into());
-                match address.connect(runtime).await? {
-                    address::transport::Stream::Unix(split) => split,
-                    #[cfg(all(unix, feature = "unixexec"))]
-                    address::transport::Stream::Unixexec(split) => split,
-                    address::transport::Stream::Tcp(split) => split,
+                let stream = address.connect(runtime).await?;
+                #[cfg(all(feature = "handover", any(unix, windows)))]
+                {
+                    self.io_source = stream.source();
                 }
+
+                stream.into_split()
             }
             Target::Socket(stream) => stream,
             Target::AuthenticatedSocket(stream) => {

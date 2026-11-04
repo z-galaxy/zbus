@@ -88,6 +88,12 @@ where
         })
     }
 
+    /// The socket itself, which a connection that is handed over gives a descriptor of.
+    #[cfg(all(feature = "handover", any(unix, windows)))]
+    pub(crate) fn source(&self) -> &IoSource {
+        &self.source
+    }
+
     /// Receives bytes, and on a unix socket the file descriptors that came with them, as soon as
     /// the socket has any.
     pub(crate) async fn recv(&self, buffer: &mut [u8]) -> RecvmsgResult {

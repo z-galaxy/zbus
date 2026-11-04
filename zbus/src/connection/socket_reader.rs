@@ -6,8 +6,17 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
+#[cfg(feature = "handover")]
+use std::{
+    future::{Future, poll_fn},
+    mem,
+    pin::{Pin, pin},
+    task::Poll,
+};
 
 use zruntime::Event;
+#[cfg(feature = "handover")]
+use zruntime::EventListener;
 
 use crate::{
     Message, OwnedMatchRule,
@@ -17,11 +26,14 @@ use crate::{
     runtime::{Runtime, Task, locks::Mutex},
 };
 
+#[cfg(feature = "handover")]
+use super::handover::{ReadParts, ReaderEnd, StopStatus, ends_input, stopped_error};
 use super::socket::ReadHalf;
 
 #[derive(Debug)]
 pub(crate) struct SocketReader {
-    socket: Box<dyn ReadHalf>,
+    /// The read half of the socket, until the reader stops and leaves it to the connection.
+    socket: Option<Box<dyn ReadHalf>>,
     senders: Arc<Mutex<HashMap<Option<OwnedMatchRule>, MsgBroadcaster>>>,
     pending_method_calls: PendingMethodCalls,
     already_received_bytes: Vec<u8>,
@@ -45,7 +57,7 @@ impl SocketReader {
         #[cfg(feature = "bus-impl")] validate_bodies: bool,
     ) -> Self {
         Self {
-            socket,
+            socket: Some(socket),
             senders,
             pending_method_calls,
             already_received_bytes,
@@ -62,14 +74,24 @@ impl SocketReader {
         runtime.spawn("socket reader", self.receive_msg())
     }
 
-    // Keep receiving messages and put them on the queue.
+    // Keep receiving messages and put them on the queue, until reading fails or the connection
+    // stops reading for a hand-over.
     #[cfg_attr(
         feature = "tracing",
         tracing::instrument(name = "socket reader", skip(self), level = "trace")
     )]
     async fn receive_msg(mut self) {
+        // Armed once, before the flag is first looked at: a stop asked for from now on is seen, by
+        // the flag before a read or by the listener during one.
+        #[cfg(feature = "handover")]
+        let mut stop = self.socket_status.stop.listener();
         loop {
             trace!("Waiting for message on the socket..");
+            #[cfg(feature = "handover")]
+            let Some(msg) = self.read_unless_stopped(&mut stop).await else {
+                return self.stop().await;
+            };
+            #[cfg(not(feature = "handover"))]
             let msg = self.read_socket().await;
             match &msg {
                 Ok(msg) => {
@@ -119,8 +141,29 @@ impl SocketReader {
             trace!("Broadcasted to all streams: {:?}", msg);
 
             if msg.is_err() {
+                // At the end of the input, the read half and what was read are left for a
+                // hand-over, as they are when the connection stops reading. The peer closed its
+                // end, which takes nothing away from what the connection read, and the connection
+                // that takes over comes to the same end. Nothing waits from here on, so the reader
+                // can't be let go of with them.
+                #[cfg(feature = "handover")]
+                {
+                    let end = match &msg {
+                        Err(e) if stop.is_some() && ends_input(e) => {
+                            ReaderEnd::Ended(ReadParts::new(
+                                self.socket.take().expect("the reader ends only once"),
+                                mem::take(&mut self.already_received_bytes),
+                                #[cfg(unix)]
+                                mem::take(&mut self.already_received_fds),
+                            ))
+                        }
+                        _ => ReaderEnd::Failed,
+                    };
+                    // Before the connection is closed, which a hand-over may wait for.
+                    self.socket_status.stop.end_reading(end);
+                }
                 // Closed before the streams end, so that a stream that ended finds the connection
-                // closed.
+                // closed, which tells that end apart from a stop.
                 self.socket_status.closed.store(true, Ordering::Release);
                 self.socket_status.closed_event.notify(usize::MAX);
                 senders.clear();
@@ -129,6 +172,56 @@ impl SocketReader {
                 return;
             }
         }
+    }
+
+    /// Read the next message off the socket, unless the connection is asked to stop reading
+    /// before one comes in whole, which gives the read up wherever it waits.
+    ///
+    /// A read that comes to a message in the same poll as the stop still yields it. A connection
+    /// that can't stop has no `stop` listener, and reads on.
+    #[cfg(feature = "handover")]
+    async fn read_unless_stopped(
+        &mut self,
+        stop: &mut Option<EventListener>,
+    ) -> Option<crate::Result<Message>> {
+        let Some(stop) = stop else {
+            return Some(self.read_socket().await);
+        };
+        // A message that is whole in what was read already is left unread too.
+        if self.socket_status.stop.asked() {
+            return None;
+        }
+        let mut read = pin!(self.read_socket());
+
+        poll_fn(|cx| match read.as_mut().poll(cx) {
+            Poll::Ready(msg) => Poll::Ready(Some(msg)),
+            Poll::Pending => Pin::new(&mut *stop).poll(cx).map(|()| None),
+        })
+        .await
+    }
+
+    /// Stop reading, and leave the read half, with what was read off the socket but is yet to
+    /// make a message, for the connection to hand over.
+    ///
+    /// The reader only gets here between messages, so each message that it read whole has gone to
+    /// every stream that it was due to by now. Nothing is done to the socket itself.
+    #[cfg(feature = "handover")]
+    async fn stop(mut self) {
+        // Each stream yields what is queued for it, then ends. This is the only wait, so a reader
+        // let go of here still holds the read half, and ends the connection as one that failed.
+        self.senders.lock().await.clear();
+        let parts = ReadParts::new(
+            self.socket.take().expect("the reader stops only once"),
+            mem::take(&mut self.already_received_bytes),
+            #[cfg(unix)]
+            mem::take(&mut self.already_received_fds),
+        );
+        // The replies to the calls that wait for them can no longer come in through this reader.
+        self.pending_method_calls.fail_all(stopped_error());
+        self.socket_status
+            .stop
+            .end_reading(ReaderEnd::Stopped(parts));
+        trace!("Socket reading task stopped, as the connection stopped reading");
     }
 
     fn dispatch_pending_reply(&self, msg: &Message) {
@@ -161,7 +254,11 @@ impl SocketReader {
         let seq = self.prev_seq + 1;
         // Through the socket itself rather than through the `Box`, whose own implementation would
         // box the future of the call a second time.
-        let msg = (*self.socket)
+        let socket = self
+            .socket
+            .as_deref_mut()
+            .expect("the reader reads only until it stops");
+        let msg = socket
             .receive_message(
                 seq,
                 &mut self.already_received_bytes,
@@ -179,19 +276,30 @@ impl SocketReader {
     }
 }
 
-/// Ends the connection whenever the reader stops, however it stopped.
+/// Ends the connection whenever the reader ends, however it ended, unless it left the read half
+/// for a hand-over.
 ///
 /// A runtime is free to drop or abort a task it was handed, and one that does would otherwise
 /// leave [`Connection::closed`], every pending method call and every [`MessageStream`] waiting
 /// for a reader that is never coming back. Running this from `Drop` covers every way out,
 /// including a future dropped before it was ever polled. The reader's own error path does the
 /// same for the errors it sees, and doing it a second time here changes nothing: the connection
-/// is already closed and there are no calls left to fail.
+/// is already closed and there are no calls left to fail. A reader that left the read half to the
+/// connection, as it stopped for a hand-over or came to the end of the input, is through with all
+/// of that: the connection is still open in the first case, and was closed by the reader itself in
+/// the second.
 ///
 /// [`Connection::closed`]: super::Connection::closed
 /// [`MessageStream`]: crate::MessageStream
 impl Drop for SocketReader {
     fn drop(&mut self) {
+        #[cfg(feature = "handover")]
+        {
+            if self.socket.is_none() {
+                return;
+            }
+            self.socket_status.stop.end_reading(ReaderEnd::Failed);
+        }
         self.socket_status.closed.store(true, Ordering::Release);
         self.socket_status.closed_event.notify(usize::MAX);
         self.fail_pending_method_calls(crate::Error::from(io::Error::other(
@@ -206,6 +314,9 @@ pub(super) struct SocketStatus {
     pub activity_event: Event,
     pub closed: AtomicBool,
     pub closed_event: Event,
+    /// Whether the reader is to stop, or did, for the connection to be handed over.
+    #[cfg(feature = "handover")]
+    pub stop: StopStatus,
 }
 
 #[cfg(all(test, feature = "p2p"))]

@@ -7,7 +7,7 @@ use std::{
     sync::Arc,
 };
 
-use super::encode_percents;
+use super::{Stream, encode_percents};
 use crate::{
     Address, Error, Result,
     connection::socket::{BoxedSplit, WriteHalf},
@@ -133,7 +133,7 @@ impl Tcp {
     }
 
     /// Connects to this address, passing the nonce it names along where there is one.
-    pub(super) async fn connect(&self, address: &Address, runtime: &Runtime) -> Result<BoxedSplit> {
+    pub(super) async fn connect(&self, address: &Address, runtime: &Runtime) -> Result<Stream> {
         let nonce = match self.nonce_file() {
             Some(path) => Some(read_nonce(path, runtime).await?),
             None => None,
@@ -144,12 +144,18 @@ impl Tcp {
         for socket_address in addresses {
             match runtime.connect_tcp(socket_address).await {
                 Ok(source) => {
+                    #[cfg(all(feature = "handover", any(unix, windows)))]
+                    let kept = source.clone();
                     let mut split = BoxedSplit::from(RegisteredIo::new(runtime, source, TcpOps)?);
                     if let Some(nonce) = nonce.as_deref() {
                         write_all(split.write_mut(), nonce).await?;
                     }
 
-                    return Ok(split);
+                    return Ok(Stream::Tcp {
+                        split,
+                        #[cfg(all(feature = "handover", any(unix, windows)))]
+                        source: kept,
+                    });
                 }
                 Err(e) => error = Error::Connection(Arc::new(e), Box::new(address.clone())),
             }

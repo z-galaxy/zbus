@@ -20,6 +20,8 @@ use zruntime::{
 use crate::ObjectServer;
 #[cfg(feature = "service")]
 use crate::log::debug;
+#[cfg(all(feature = "handover", any(unix, windows)))]
+use crate::runtime::IoSource;
 use crate::{
     DBusError, Error, MatchRule, ObjectPath, OwnedGuid, OwnedMatchRule, Result,
     fdo::{ConnectionCredentials, ReleaseNameReply, RequestNameFlags, RequestNameReply},
@@ -38,6 +40,15 @@ pub use builder::Builder;
 
 pub mod socket;
 pub use socket::Socket;
+
+#[cfg(feature = "handover")]
+pub mod handover;
+#[cfg(all(feature = "handover", any(unix, windows)))]
+use handover::SocketKind;
+#[cfg(feature = "handover")]
+pub use handover::{Handover, HandoverSocket};
+#[cfg(feature = "handover")]
+use handover::{SocketWrite, StopStatus};
 
 mod socket_reader;
 use socket_reader::{SocketReader, SocketStatus};
@@ -63,7 +74,7 @@ pub(crate) struct ConnectionInner {
     registered_names: Mutex<HashMap<WellKnownName<'static>, NameStatus>>,
 
     socket_status: Arc<SocketStatus>,
-    socket_write: Mutex<Box<dyn socket::WriteHalf>>,
+    socket_write: Mutex<SocketWrite>,
 
     // Socket reader task
     #[allow(unused)]
@@ -117,6 +128,10 @@ impl Drop for ConnectionInner {
         self.drop_event.notify(usize::MAX);
     }
 }
+
+/// What a connection writes its socket through.
+#[cfg(not(feature = "handover"))]
+type SocketWrite = Box<dyn socket::WriteHalf>;
 
 type Subscriptions = HashMap<OwnedMatchRule, (u64, InactiveReceiver<Result<Message>>)>;
 
@@ -431,6 +446,10 @@ impl Connection {
             Ok(None)
         } else {
             let pending_call = self.inner.pending_method_calls.register_call(serial)?;
+            // The reader fails the calls that wait for their replies once it stops, which can be
+            // a while after it was asked to, but a call made since is not to go out at all.
+            #[cfg(feature = "handover")]
+            self.inner.socket_status.stop.ensure_reading()?;
             self.send(&msg).await?;
 
             Ok(Some(pending_call))
@@ -1115,6 +1134,10 @@ impl Connection {
     ) -> Result<Receiver<Result<Message>>> {
         use std::collections::hash_map::Entry;
 
+        // A connection asked to stop reading makes no more streams, though its reader may be yet
+        // to stop and close the channels of the others.
+        #[cfg(feature = "handover")]
+        self.inner.socket_status.stop.ensure_reading()?;
         if self.inner.msg_senders.lock().await.is_empty() {
             return Err(self.reader_ended_error());
         }
@@ -1136,7 +1159,7 @@ impl Connection {
                     )
                     .await?;
                 }
-                // The reader may have ended in the meantime, and closed the channels of
+                // The reader may have ended or stopped in the meantime, and closed the channels of
                 // the others. The subscription is only recorded once its channel is in place.
                 {
                     let mut senders = self.inner.msg_senders.lock().await;
@@ -1165,6 +1188,11 @@ impl Connection {
 
     /// The error of a stream that can't be made, as the reader closed the channels of the others.
     fn reader_ended_error(&self) -> Error {
+        #[cfg(feature = "handover")]
+        if let Err(e) = self.inner.socket_status.stop.ensure_reading() {
+            return e;
+        }
+
         // The reader ended on an error.
         Error::InputOutput(Arc::new(io::Error::new(
             io::ErrorKind::BrokenPipe,
@@ -1224,6 +1252,10 @@ impl Connection {
 
     pub(crate) async fn new(
         auth: Authenticated,
+        #[cfg(all(feature = "handover", any(unix, windows)))] source: Option<(
+            IoSource,
+            SocketKind,
+        )>,
         #[allow(unused)] bus_connection: bool,
         runtime: Runtime,
         method_timeout: Option<Duration>,
@@ -1248,6 +1280,14 @@ impl Connection {
         let msg_senders = Arc::new(Mutex::new(msg_senders));
         let pending_method_calls = PendingMethodCalls::default();
         let subscriptions = Mutex::new(HashMap::new());
+        #[cfg(feature = "handover")]
+        let socket_write = SocketWrite::new(
+            auth.socket_write,
+            #[cfg(any(unix, windows))]
+            source,
+        );
+        #[cfg(not(feature = "handover"))]
+        let socket_write = auth.socket_write;
 
         let connection = Self {
             inner: Arc::new(ConnectionInner {
@@ -1255,8 +1295,10 @@ impl Connection {
                     activity_event: Event::new(),
                     closed: AtomicBool::new(false),
                     closed_event: Event::new(),
+                    #[cfg(feature = "handover")]
+                    stop: StopStatus::new(),
                 }),
-                socket_write: Mutex::new(auth.socket_write),
+                socket_write: Mutex::new(socket_write),
                 server_guid: auth.server_guid,
                 #[cfg(unix)]
                 cap_unix_fd,
@@ -1313,6 +1355,11 @@ impl Connection {
     ///
     /// A connection is considered closed either when the remote peer disconnects, an I/O error
     /// occurs on the socket, or [`Connection::close`] is called.
+    #[cfg_attr(
+        feature = "handover",
+        doc = "It is also closed once it was handed over \
+               ([`MessageStream::hand_over`](crate::MessageStream::hand_over))."
+    )]
     pub fn is_closed(&self) -> bool {
         self.inner.is_closed()
     }
@@ -1321,6 +1368,11 @@ impl Connection {
     ///
     /// A connection is considered closed either when the remote peer disconnects, an I/O error
     /// occurs on the socket, or [`Connection::close`] is called.
+    #[cfg_attr(
+        feature = "handover",
+        doc = "It is also closed once it was handed over \
+               ([`MessageStream::hand_over`](crate::MessageStream::hand_over))."
+    )]
     ///
     /// Returns immediately if the connection is already closed.
     pub async fn closed(&self) {
@@ -1372,6 +1424,13 @@ impl Connection {
     /// Close the connection.
     ///
     /// After this call, all reading and writing operations will fail.
+    #[cfg_attr(
+        feature = "handover",
+        doc = "",
+        doc = "On a connection that was handed over \
+               ([`MessageStream::hand_over`](crate::MessageStream::hand_over)), this does nothing \
+               to the socket, which is no longer the connection's."
+    )]
     pub async fn close(self) -> Result<()> {
         self.inner.socket_status.activity_event.notify(usize::MAX);
         let result = self
@@ -1456,6 +1515,12 @@ impl Connection {
         #[cfg(feature = "bus-impl")] validate_bodies: bool,
     ) {
         let inner = &self.inner;
+        #[cfg(feature = "handover")]
+        inner
+            .socket_status
+            .stop
+            .can_stop
+            .store(socket_read.can_take_unread(), Ordering::Release);
         inner
             .socket_reader_task
             .set(

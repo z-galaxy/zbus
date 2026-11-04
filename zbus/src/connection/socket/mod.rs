@@ -216,7 +216,13 @@ pub trait ReadHalf: std::fmt::Debug + Send + Sync + 'static {
     /// - `already_received_fds`: Same goes for file descriptors belonging to first messages.
     ///
     /// # Cancellation
-    ///
+    #[cfg_attr(
+        feature = "handover",
+        doc = "A hand-over ([`MessageStream::hand_over`](crate::MessageStream::hand_over)) stops \
+               the connection reading by dropping the future of this method wherever it waits, if \
+               [`ReadHalf::can_take_unread`] says that it can.",
+        doc = ""
+    )]
     /// The default implementation keeps what it read of a message in `already_received_bytes`
     /// and `already_received_fds`, and never reads past the end of the message. So a call that is
     /// dropped while it waits loses nothing, as long as a call to `recvmsg` that is dropped while
@@ -317,9 +323,10 @@ pub trait ReadHalf: std::fmt::Debug + Send + Sync + 'static {
     }
 
     /// Whether this half can take out what it read off the socket and is yet to return in a
-    /// message, through [`ReadHalf::take_unread`], for its connection to be handed over.
+    /// message, through [`ReadHalf::take_unread`], for its connection to be handed over
+    /// ([`MessageStream::hand_over`]).
     ///
-    /// A half that returns `true` promises three things:
+    /// A half that returns `true` promises four things:
     ///
     /// * [`ReadHalf::receive_message`] is cancel-safe. Its connection drops the future of a call
     ///   wherever it waits, and whatever the call read off the socket by then has to be kept,
@@ -329,24 +336,36 @@ pub trait ReadHalf: std::fmt::Debug + Send + Sync + 'static {
     ///   anything that it reads, or fails on them if it can't make messages of them, rather than
     ///   leave them behind. That is how a connection that takes over gets what the other one left
     ///   unread.
+    /// * `receive_message` fails with an I/O error of kind
+    ///   [`UnexpectedEof`](io::ErrorKind::UnexpectedEof) at the end of the input, once the peer
+    ///   closed its end of the socket, as the default implementation does, and with no error of
+    ///   that kind otherwise. A connection that comes to that end can still be handed over, with
+    ///   what it read, as the peer took nothing away from that, while one that ends on any other
+    ///   error can't.
     /// * Nothing underneath the half holds on to bytes of the socket that `take_unread` can't take
     ///   out, as a buffered stream does.
     ///
     /// A half that implements [`ReadHalf::recvmsg`] so that a call dropped while it waits loses
-    /// nothing (see the cancellation section of [`ReadHalf::receive_message`]), and leaves
-    /// `receive_message` to the default implementation, keeps the first two promises, and holds
-    /// nothing for `take_unread` to take out.
+    /// nothing (see the cancellation section of [`ReadHalf::receive_message`]), and that reads
+    /// nothing at the end of the input, and leaves `receive_message` to the default
+    /// implementation, keeps the first three promises, and holds nothing for `take_unread` to take
+    /// out.
     ///
     /// The read half of a
     #[cfg_attr(feature = "p2p", doc = "[`Channel`]")]
     #[cfg_attr(not(feature = "p2p"), doc = "`Channel`")]
     /// returns `true`. A channel carries whole messages, so it takes back the whole messages that
     /// a connection over a channel leaves unread, and fails on part of one, which can only come
-    /// from a connection over some other socket.
+    /// from a connection over some other socket. The end of its input is the other end of the
+    /// channel being closed.
     ///
-    /// The default implementation returns `false`.
+    /// The default implementation returns `false`. Then [`MessageStream::hand_over`] fails with
+    /// [`Error::Unsupported`] for a connection over this half.
     ///
     /// This method is only available when the `handover` feature is enabled.
+    ///
+    /// [`Error::Unsupported`]: crate::Error::Unsupported
+    /// [`MessageStream::hand_over`]: crate::MessageStream::hand_over
     #[cfg(feature = "handover")]
     fn can_take_unread(&self) -> bool {
         false
@@ -356,17 +375,19 @@ pub trait ReadHalf: std::fmt::Debug + Send + Sync + 'static {
     /// `bytes`. Move the file descriptors that came in with it, and that no message took, to the
     /// end of `fds`. Both go in the order that they came in.
     ///
-    /// A connection calls this once, as it stops reading, if [`ReadHalf::can_take_unread`] says
-    /// that it can. That comes after its last call to [`ReadHalf::receive_message`], which it may
-    /// have dropped while that call waited. `bytes` and `fds` then hold the
-    /// `already_received_bytes` and `already_received_fds` that the connection kept for its next
-    /// call.
+    /// A connection calls this once, as it stops reading for a hand-over
+    /// ([`MessageStream::hand_over`]), if [`ReadHalf::can_take_unread`] says that it can. That
+    /// comes after its last call to [`ReadHalf::receive_message`], which it may have dropped while
+    /// that call waited. `bytes` and `fds` then hold the `already_received_bytes` and
+    /// `already_received_fds` that the connection kept for its next call.
     ///
     /// The default implementation moves nothing. That suits a half that keeps nothing of its own
     /// from one call of `receive_message` to the next, such as one that leaves `receive_message`
     /// to the default implementation.
     ///
     /// This method is only available when the `handover` feature is enabled.
+    ///
+    /// [`MessageStream::hand_over`]: crate::MessageStream::hand_over
     #[cfg(feature = "handover")]
     fn take_unread(&mut self, bytes: &mut Vec<u8>, #[cfg(unix)] fds: &mut Vec<OwnedFd>) {
         let _ = bytes;

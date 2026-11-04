@@ -10,6 +10,8 @@ use futures_core::stream::{self, FusedStream};
 use ordered_stream::{OrderedStream, PollResult};
 use zruntime::{EventListener, broadcast::Receiver as ActiveReceiver};
 
+#[cfg(feature = "handover")]
+use crate::connection::{Handover, handover::Backlog};
 use crate::{
     AsyncDrop, Connection, MatchRule, OwnedMatchRule, Result,
     connection::ConnectionInner,
@@ -32,6 +34,14 @@ use crate::{
 /// yielded. That holds however the connection closed: a [`Connection::close`] of your own, the
 /// remote peer going away, an I/O error on the socket, or the runtime taking away the task that
 /// reads it.
+#[cfg_attr(
+    feature = "handover",
+    doc = "",
+    doc = "The stream also ends once a hand-over of its connection through another stream \
+           ([`MessageStream::hand_over`]) stops the connection reading, after everything that the \
+           connection read before it stopped and queued for the stream. Its `None` then comes \
+           with no error before it."
+)]
 #[derive(Debug)]
 #[must_use = "streams do nothing unless polled"]
 pub struct MessageStream {
@@ -42,6 +52,10 @@ pub struct MessageStream {
     // Whether this stream has already yielded its `None`. The channel below cannot be asked:
     // a cancelled reader never gets to close it, so it stays open past the stream's end.
     terminated: bool,
+    // What a hand-over through this stream took off its queue and the stream is yet to yield,
+    // which it yields first.
+    #[cfg(feature = "handover")]
+    backlog: Backlog,
 }
 
 impl Clone for MessageStream {
@@ -52,6 +66,8 @@ impl Clone for MessageStream {
             // listener when it first needs one and runs to its own end.
             closed_listener: None,
             terminated: false,
+            #[cfg(feature = "handover")]
+            backlog: self.backlog.clone(),
         }
     }
 }
@@ -202,6 +218,148 @@ impl MessageStream {
         self.inner.msg_receiver.set_capacity(max_queued);
     }
 
+    /// Hand the connection of this stream over, for a connection in this process or in another
+    /// one to go on from where it stopped.
+    ///
+    /// [The module of the hand-over](crate::connection::handover) tells how it goes. The stream is
+    /// to be one that has had every message of its connection, from the first, as the one that
+    /// [`Builder::build_message_stream`] builds along with the connection has. Stop taking
+    /// messages off it, and finish what you do with those that you took, before you call this.
+    ///
+    /// This method is only available when the `handover` feature is enabled.
+    ///
+    /// This proceeds in order:
+    ///
+    /// 1. It stops the connection reading, wherever it is, even in the middle of a message.
+    /// 2. It waits for the connection to have stopped. Meanwhile, it takes the messages queued on
+    ///    this stream off it, as a connection that waits for room in the stream to queue a message
+    ///    there gets that room before it stops.
+    /// 3. It waits for a message that is being sent, if any, to have gone.
+    /// 4. It commits. From then on nothing is written to the socket through the connection or any
+    ///    clone of it: sends fail, and [`Connection::close`] does nothing to the socket. The
+    ///    connection is closed, as [`Connection::is_closed`] and [`Connection::closed`] tell. The
+    ///    socket is neither shut down nor closed, so the peer sees nothing but a pause.
+    ///
+    /// The `unread_bytes` of the [`Handover`] that it gives are those of the messages that were
+    /// queued on this stream and that it did not yield, oldest first, followed by what the
+    /// connection read off the socket after them and made no message of yet.
+    #[cfg_attr(
+        unix,
+        doc = "Its `unread_fds` are the file descriptors of those messages, in their order, followed \
+               by those that came in with the rest."
+    )]
+    /// The stream then ends: it yields `None`, as it has nothing left to yield.
+    ///
+    /// # The messages of the stream
+    ///
+    /// What the hand-over takes off the queue of this stream stays with the stream, not with the
+    /// future of the hand-over, until the hand-over commits, so none of what the stream is yet to
+    /// yield is lost, whatever comes of the hand-over:
+    ///
+    /// * Once the hand-over commits, all of it is in the [`Handover`].
+    /// * If the hand-over fails, or its future is dropped, the stream yields what the hand-over
+    ///   took off its queue, oldest first, then what is still queued. As the connection stopped
+    ///   reading, unless the hand-over failed before it stopped it, the stream then ends.
+    /// * A later hand-over through this stream goes on from where the one before it stopped, with
+    ///   all of that. It hands the connection over if what failed the one before doesn't fail it,
+    ///   as with a send under way that held the hand-over up until it was given up on, or a lack of
+    ///   file descriptors that has gone. Otherwise, take the messages off the stream, deal with
+    ///   them, and close the connection.
+    ///
+    /// Once a hand-over through this stream has stopped the connection reading, it may have taken
+    /// messages off this stream that another stream doesn't have, as that stream yielded them or
+    /// was made after them. A hand-over through any other stream of the connection, a clone of
+    /// this one included, then fails, rather than hand the connection over without them.
+    ///
+    /// # A peer that closes its end
+    ///
+    /// The end of what the peer sends, as the peer closes its end of the connection, such as once
+    /// it sent a last message, fails no hand-over, whether the connection comes to it before the
+    /// hand-over starts or while the hand-over stops the connection reading, and whether or not a
+    /// send to the peer failed since, as sends do once the peer receives nothing more. The
+    /// hand-over then hands over what the connection read, part of a message included, with the
+    /// socket. The connection that takes over yields the messages of what was read, then comes to
+    /// the same end of the socket, and ends as this one would have. A connection that ended on
+    /// anything else isn't handed over: see the errors below.
+    ///
+    /// For that, a connection that comes to that end keeps the part of a message that it read, if
+    /// any, and the file descriptors that came in that no message took, until it is handed over or
+    /// dropped, whether or not a hand-over is to come. Closing it doesn't let go of them.
+    ///
+    /// # While the connection is stopped
+    ///
+    /// From the first step on, the connection receives no more messages. Its other streams yield
+    /// what was queued for them and then end, with no error before their `None`, and so do the
+    /// streams of the object server and of proxies. The method calls that wait for their replies
+    /// fail with an I/O error ([`Error::InputOutput`]) of kind
+    /// [`NotConnected`](std::io::ErrorKind::NotConnected), as no reply comes in any more. Those
+    /// made since fail the same way before they are sent, and so does
+    /// [`MessageStream::for_match_rule`]. Messages that expect no reply, such as replies and
+    /// signals, are sent until the hand-over commits.
+    ///
+    /// # Other consumers of the messages
+    ///
+    /// The object server, proxies, other streams of the connection and its method calls that wait
+    /// for their replies take its messages too. A message that one of them took, and that this
+    /// stream did not yield, is handled twice: by them, and again by the connection that goes on.
+    /// The stream that `build_message_stream` gives, on a connection with no object server and no
+    /// other stream, is what this is for. Another stream that is full, and that nobody polls, also
+    /// holds the hand-over up, as the connection waits for room in it before it stops.
+    ///
+    /// # Cancellation
+    ///
+    /// The future can be dropped before it resolves, such as to bound the hand-over by a timeout:
+    /// a peer that doesn't read can hold a send under way up for as long as it likes. If the
+    /// future was polled by then, the connection has stopped reading, for good, and this stream
+    /// keeps what the hand-over took off its queue, as told above: hand the connection over through
+    /// this stream again, or take the messages off the stream and close the connection. A future
+    /// dropped before it was ever polled does nothing to the connection, which reads on.
+    ///
+    /// # Errors
+    ///
+    /// * [`Error::Unsupported`], before anything is done to the connection, which reads on, for a
+    ///   stream for a match rule ([`MessageStream::for_match_rule`]), which never had the messages
+    ///   that did not match it, and for a connection over a socket of your own whose read half
+    ///   can't hand over what it read ([`ReadHalf::can_take_unread`]).
+    /// * [`Error::InputOutput`], with nothing taken out of the connection, if:
+    ///   * the connection ended before it stopped reading, otherwise than at the end of what the
+    ///     peer sent: reading the socket failed, a message was invalid, or the runtime dropped the
+    ///     task that reads it;
+    ///   * it was closed with [`Connection::close`], or it was handed over already, such as through
+    ///     another stream;
+    ///   * a hand-over through another stream stopped the connection reading before, as told above;
+    ///   * a send was cut off midway, by an error or by its future being dropped. The socket may
+    ///     then hold part of a message, and the peer can make no sense of what follows it. If no
+    ///     send is under way as the hand-over starts, it fails on this before anything is done to
+    ///     the connection, which reads on. A send that failed with an I/O error of kind
+    ///     `BrokenPipe`, `ConnectionReset` or `ConnectionAborted`, as one to a peer that closed its
+    ///     end does, doesn't count: the peer receives nothing that follows it;
+    ///   * the socket or a file descriptor of a message fails to be duplicated, as when the process
+    ///     has too many file descriptors open.
+    ///
+    ///   The connection has then stopped reading, unless it ended before, or the hand-over failed
+    ///   before anything was done to it. The stream keeps what the hand-over took off its queue,
+    ///   as told above.
+    ///
+    /// [`Builder::build_message_stream`]: crate::connection::Builder::build_message_stream
+    /// [`Error::InputOutput`]: crate::Error::InputOutput
+    /// [`Error::Unsupported`]: crate::Error::Unsupported
+    /// [`ReadHalf::can_take_unread`]: crate::connection::socket::ReadHalf::can_take_unread
+    #[cfg(feature = "handover")]
+    pub async fn hand_over(&mut self) -> Result<Handover> {
+        if self.inner.match_rule.is_some() {
+            return Err(crate::Error::Unsupported);
+        }
+        let conn = Connection::from(&*self);
+        let handover = conn
+            .hand_over(&mut self.inner.msg_receiver, &mut self.backlog)
+            .await?;
+        // Every message that the stream was yet to yield went into the hand-over.
+        self.terminated = true;
+
+        Ok(handover)
+    }
+
     pub(crate) fn for_subscription_channel(
         msg_receiver: ActiveReceiver<Result<Message>>,
         rule: Option<OwnedMatchRule>,
@@ -217,6 +375,8 @@ impl MessageStream {
             },
             closed_listener: None,
             terminated: false,
+            #[cfg(feature = "handover")]
+            backlog: Backlog::default(),
         }
     }
 }
@@ -227,6 +387,10 @@ impl stream::Stream for MessageStream {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
 
+        #[cfg(feature = "handover")]
+        if let Some(item) = this.backlog.pop() {
+            return Poll::Ready(Some(item));
+        }
         match Pin::new(&mut this.inner.msg_receiver).poll_next(cx) {
             Poll::Ready(Some(item)) => return Poll::Ready(Some(item)),
             Poll::Ready(None) => {
@@ -311,6 +475,12 @@ impl OrderedStream for MessageStream {
 
 impl FusedStream for MessageStream {
     fn is_terminated(&self) -> bool {
+        // The queue can be over while the backlog, which comes before it, still holds messages.
+        #[cfg(feature = "handover")]
+        if !self.backlog.is_empty() {
+            return false;
+        }
+
         self.terminated || self.inner.msg_receiver.is_terminated()
     }
 }
@@ -328,6 +498,8 @@ impl From<Connection> for MessageStream {
             },
             closed_listener: None,
             terminated: false,
+            #[cfg(feature = "handover")]
+            backlog: Backlog::default(),
         }
     }
 }
