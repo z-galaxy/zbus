@@ -22,7 +22,7 @@ use crate::{
 /// A read takes in as much as the socket holds, up to the size of a buffer that this half keeps
 /// from one message to the next, and each message that is whole in the buffer is taken out of it
 /// without reading again. A message that doesn't fit in the buffer gets an allocation of its exact
-/// size, which takes over what the buffer holds of it and has the rest read straight into it.
+/// size, kept in the reader, so that a read dropped while it waits loses none of it.
 ///
 /// # File descriptors
 ///
@@ -50,6 +50,11 @@ pub(crate) struct Reader<O> {
     buffer: Vec<u8>,
     start: usize,
     end: usize,
+    /// A message longer than the buffer, read straight into an allocation of its exact length, of
+    /// which the first `long_filled` bytes have come in. Empty when there is none. While there is
+    /// one, the buffer holds nothing: the message took over what the buffer held of it.
+    long: Vec<u8>,
+    long_filled: usize,
     /// The file descriptors that came with the reads so far and that no message has taken, in
     /// the order they came in, as the sets that came with each read.
     #[cfg(unix)]
@@ -67,6 +72,8 @@ where
             buffer: vec![0; BUFFER_SIZE],
             start: 0,
             end: 0,
+            long: Vec::new(),
+            long_filled: 0,
             #[cfg(unix)]
             fds: VecDeque::new(),
         }
@@ -74,6 +81,10 @@ where
 
     /// Puts what the handshake read past its own end ahead of what this half has read itself.
     fn take_over(&mut self, bytes: &mut Vec<u8>, #[cfg(unix)] fds: &mut Vec<OwnedFd>) {
+        debug_assert!(
+            self.long.is_empty() || bytes.is_empty(),
+            "bytes read before a message partly read would come after it",
+        );
         if !bytes.is_empty() {
             let mut buffer = mem::take(bytes);
             buffer.extend_from_slice(&self.buffer[self.start..self.end]);
@@ -102,23 +113,6 @@ where
         self.end += self.received(received)?;
 
         Ok(())
-    }
-
-    /// Reads the rest of a message that is longer than the buffer straight into an allocation of
-    /// its own, after what the buffer holds of it.
-    async fn receive_long(&mut self, len: usize) -> crate::Result<Vec<u8>> {
-        let mut bytes = Vec::with_capacity(len);
-        bytes.extend_from_slice(&self.buffer[self.start..self.end]);
-        self.start = 0;
-        self.end = 0;
-        let mut pos = bytes.len();
-        bytes.resize(len, 0);
-        while pos < len {
-            let received = self.socket.recv(&mut bytes[pos..]).await;
-            pos += self.received(received)?;
-        }
-
-        Ok(bytes)
     }
 
     /// The number of bytes of a read, whose file descriptors join those that wait for a message.
@@ -192,6 +186,20 @@ where
         );
 
         let (primary_header, bytes) = loop {
+            if !self.long.is_empty() {
+                while self.long_filled < self.long.len() {
+                    // Disjoint fields: the socket is borrowed shared, `long` mutably. What a read
+                    // brings is counted as soon as it returns, so a call dropped while it waits
+                    // for the next one loses nothing.
+                    let received = self.socket.recv(&mut self.long[self.long_filled..]).await;
+                    self.long_filled += self.received(received)?;
+                }
+                let bytes = mem::take(&mut self.long);
+                self.long_filled = 0;
+
+                break (read_primary_header(&bytes)?.0, bytes);
+            }
+
             let buffered = &self.buffer[self.start..self.end];
             if buffered.len() >= MIN_MESSAGE_SIZE {
                 let (primary_header, len) = read_primary_header(buffered)?;
@@ -205,7 +213,16 @@ where
 
                     break (primary_header, bytes);
                 } else if len > self.buffer.len() {
-                    break (primary_header, self.receive_long(len).await?);
+                    // The message gets an allocation of its own, which takes over what the buffer
+                    // holds of it and has the rest read straight into it.
+                    self.long = Vec::with_capacity(len);
+                    self.long.extend_from_slice(buffered);
+                    self.long_filled = self.long.len();
+                    self.long.resize(len, 0);
+                    self.start = 0;
+                    self.end = 0;
+
+                    continue;
                 }
             }
 
@@ -229,6 +246,10 @@ where
     /// received, so there is never anything read ahead for it to hand out first.
     async fn recvmsg(&mut self, buf: &mut [u8]) -> RecvmsgResult {
         debug_assert_eq!(self.start, self.end, "bytes read ahead would be skipped");
+        debug_assert!(
+            self.long.is_empty(),
+            "a message partly read would be skipped"
+        );
 
         self.socket.recv(buf).await
     }

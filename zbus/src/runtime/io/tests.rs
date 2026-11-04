@@ -927,6 +927,61 @@ fn a_unix_connect_to_a_full_backlog_is_made_once_the_listener_accepts() {
     });
 }
 
+/// A message longer than the buffer of a reader comes out whole however often the call that
+/// receives it is dropped while it waits for more of the message, and another made in its place,
+/// both where the reads take in what the socket holds and where they take in a few bytes at a
+/// time.
+#[cfg(unix)]
+#[test]
+#[timeout(15000)]
+fn a_long_message_comes_out_whole_from_calls_dropped_while_they_wait() {
+    under_every_runtime(|runtime| receive_long_dropping_every_wait(runtime, UnixOps));
+    under_every_runtime(|runtime| {
+        receive_long_dropping_every_wait(runtime, Trickle::with_sizes(&[1, 7, 30, 1000]))
+    });
+}
+
+/// Receives a message of 10 KiB through a reader over `ops`, which the peer writes in three
+/// pieces, the next of them each time a call pends. Each call is polled once, and dropped if it
+/// pends, and the waker that it left behind is what has another made in its place.
+#[cfg(unix)]
+async fn receive_long_dropping_every_wait<O>(runtime: Runtime, ops: O)
+where
+    O: SocketOps,
+{
+    let (left, mut right) = UnixStream::pair().unwrap();
+    let mut receiver = Reader::new(half(&runtime, left, ops));
+    let msg = Message::method_call("/", "Test")
+        .build(&vec![7u8; 10 * 1024])
+        .unwrap();
+    let mut pieces = msg.data().chunks(msg.data().len().div_ceil(3));
+    right.write_all(pieces.next().unwrap()).unwrap();
+
+    let mut dropped = 0;
+    let received = std::future::poll_fn(|cx| {
+        let polled = receiver
+            .receive_message(0, &mut vec![], &mut vec![])
+            .as_mut()
+            .poll(cx);
+        if polled.is_pending() {
+            dropped += 1;
+            if let Some(piece) = pieces.next() {
+                right.write_all(piece).unwrap();
+            }
+        }
+
+        polled
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(&received.data()[..], &msg.data()[..]);
+    assert!(
+        dropped >= 2,
+        "the message came out before the rest of it was written"
+    );
+}
+
 /// Asserts that `source` is in non-blocking mode.
 ///
 /// A read on a socket with nothing to read is how it shows: a socket that blocks would wait for
