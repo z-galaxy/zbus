@@ -430,7 +430,7 @@ impl Connection {
 
             Ok(None)
         } else {
-            let pending_call = self.inner.pending_method_calls.register_call(serial);
+            let pending_call = self.inner.pending_method_calls.register_call(serial)?;
             self.send(&msg).await?;
 
             Ok(Some(pending_call))

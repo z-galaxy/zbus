@@ -214,6 +214,7 @@ mod tests {
     use crate::{
         Guid, MessageStream,
         connection::{Builder, socket::Channel},
+        message::Type,
         runtime::test_runtime::{AbortingRuntime, TestRuntime},
     };
 
@@ -264,6 +265,52 @@ mod tests {
             // A cancelled reader never gets to close the channel behind the stream, so only the
             // stream itself can say it is spent — and a `select!` loop spins until it does.
             assert!(stream.is_terminated(), "the finished stream denies it");
+        });
+    }
+
+    /// A method call made once the reader ended fails before it is sent, as no reply can come in
+    /// any more, though the connection can still send.
+    #[test]
+    #[timeout(15000)]
+    fn a_method_call_made_once_the_reader_ended_is_not_sent() {
+        let runtime = AbortingRuntime::new();
+        let (c1, c2) = Channel::pair();
+
+        futures_lite::future::block_on(async {
+            let guid = Guid::generate();
+            let (client, peer) = futures_util::try_join!(
+                Builder::authenticated_socket(c1, guid.clone())
+                    .p2p()
+                    .runtime(runtime.clone())
+                    .build(),
+                Builder::authenticated_socket(c2, guid)
+                    .p2p()
+                    .runtime(TestRuntime::new())
+                    .build(),
+            )
+            .unwrap();
+            let mut peer_stream = MessageStream::from(&peer);
+            runtime.abort_tasks();
+            client.closed().await;
+
+            let reply = client
+                .call_method(
+                    None::<()>,
+                    "/org/zbus/Test",
+                    Some("org.zbus.Test"),
+                    "NoReply",
+                    &(),
+                )
+                .await;
+            assert!(reply.is_err(), "the call was answered: {reply:?}");
+            client
+                .emit_signal(None::<()>, "/org/zbus/Test", "org.zbus.Test", "Test", &())
+                .await
+                .unwrap();
+
+            // The signal is the first message that the peer gets, so the call never went out.
+            let msg = peer_stream.next().await.unwrap().unwrap();
+            assert_eq!(msg.message_type(), Type::Signal, "{msg:?}");
         });
     }
 
