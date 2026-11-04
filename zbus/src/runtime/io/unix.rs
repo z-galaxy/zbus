@@ -271,8 +271,14 @@ fn socket_credentials(fd: BorrowedFd<'_>) -> io::Result<(ConnectionCredentials, 
                 creds = creds.set_process_fd(unsafe { OwnedFd::from_raw_fd(pidfd).into() });
             } else if ret < 0 {
                 let err = io::Error::last_os_error();
-                // ENOPROTOOPT means the kernel doesn't support this feature.
-                if err.raw_os_error() != Some(libc::ENOPROTOOPT) {
+                // The kernel may have no descriptor to give, which leaves it out, as dbus-broker
+                // does: one older than 6.5 has no such option (ENOPROTOOPT), the socket may have
+                // no peer process (ENODATA), and one older than 6.16 has none for a process that
+                // has exited (EINVAL or ESRCH), as one that connected and went may have.
+                if !matches!(
+                    err.raw_os_error(),
+                    Some(libc::ENOPROTOOPT | libc::ENODATA | libc::EINVAL | libc::ESRCH)
+                ) {
                     return Err(err);
                 }
             }
