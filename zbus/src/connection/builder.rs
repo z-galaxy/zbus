@@ -12,7 +12,7 @@ use std::os::unix::net::UnixStream;
 #[cfg(windows)]
 use uds_windows::UnixStream;
 
-#[cfg(feature = "bus-impl")]
+#[cfg(any(feature = "bus-impl", feature = "handover"))]
 use crate::MessageStream;
 #[cfg(any(unix, windows))]
 use crate::runtime::io::UnixOps;
@@ -544,7 +544,7 @@ impl<'a> Builder<'a> {
     /// To get the [`Connection`] out of the returned stream, use `Connection::from(&stream)` —
     /// this is cheap (an `Arc` clone).
     ///
-    /// This method is only available when the `bus-impl` feature is enabled.
+    /// This method is only available when the `bus-impl` or the `handover` feature is enabled.
     ///
     /// # Errors
     ///
@@ -553,6 +553,11 @@ impl<'a> Builder<'a> {
     /// # Example
     ///
     /// ```
+    /// # // The example runs over a channel, which needs the `p2p` feature.
+    /// # #[cfg(not(feature = "p2p"))]
+    /// # fn main() {}
+    /// # #[cfg(feature = "p2p")]
+    /// # fn main() {
     /// # use futures_util::StreamExt;
     /// # use zbus::{
     /// #     Connection, Guid, block_on,
@@ -587,8 +592,9 @@ impl<'a> Builder<'a> {
     ///
     /// let _conn: Connection = (&stream).into();
     /// # });
+    /// # }
     /// ```
-    #[cfg(feature = "bus-impl")]
+    #[cfg(any(feature = "bus-impl", feature = "handover"))]
     pub async fn build_message_stream(self) -> Result<MessageStream> {
         let (conn, msg_receiver) = self.build_inner(true).await?;
         let msg_receiver = msg_receiver.expect("build_inner(true) always returns Some");

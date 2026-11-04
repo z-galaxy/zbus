@@ -7,7 +7,12 @@
 //! `build()` + `MessageStream::from`, the Hello can be lost; `build_message_stream` fixes
 //! this by setting up the stream before the socket reader task starts.
 
-#![cfg(all(unix, feature = "bus-impl"))]
+#![cfg(all(
+    unix,
+    feature = "p2p",
+    any(feature = "bus-impl", feature = "handover"),
+    any(feature = "default-rt", feature = "tokio")
+))]
 
 use futures_util::StreamExt;
 use ntest::timeout;
