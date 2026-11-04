@@ -268,6 +268,42 @@ where
     fn auth_mechanism(&self) -> AuthMechanism {
         self.socket.ops.auth_mechanism()
     }
+
+    #[cfg(feature = "handover")]
+    fn can_take_unread(&self) -> bool {
+        true
+    }
+
+    /// Moves out the message partly read into an allocation of its own, if any, then what the
+    /// buffer holds, and the file descriptors that wait, all of their sets in one list.
+    ///
+    /// A reader that takes them over puts that list ahead of what it reads as one set. It stands
+    /// for the sets that waited here, of which there was at least one, so no more sets wait in
+    /// that reader than would have in this one, and a sender that counts its descriptors still
+    /// never has more than `MAX_FD_SETS` wait.
+    #[cfg(feature = "handover")]
+    fn take_unread(&mut self, bytes: &mut Vec<u8>, #[cfg(unix)] fds: &mut Vec<OwnedFd>) {
+        if !self.long.is_empty() {
+            let mut long = mem::take(&mut self.long);
+            long.truncate(self.long_filled);
+            // The allocation has room for the whole message, which can be up to 128 MiB long,
+            // while little of it may have come in.
+            long.shrink_to_fit();
+            self.long_filled = 0;
+            if bytes.is_empty() {
+                // The message can be as long as D-Bus allows, so it is moved rather than copied
+                // where nothing comes before it.
+                *bytes = long;
+            } else {
+                bytes.append(&mut long);
+            }
+        }
+        bytes.extend_from_slice(&self.buffer[self.start..self.end]);
+        self.start = 0;
+        self.end = 0;
+        #[cfg(unix)]
+        fds.extend(self.fds.drain(..).flatten());
+    }
 }
 
 /// How many sets of file descriptors, each of those that came with one read, may wait for messages

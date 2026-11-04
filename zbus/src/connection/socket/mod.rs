@@ -206,6 +206,13 @@ pub trait ReadHalf: std::fmt::Debug + Send + Sync + 'static {
     ///   belonging to the first message(s) (as part of the connection handshake process). This is
     ///   the buffer containing those bytes (if any). If you're implementing this method, most
     ///   likely you can safely ignore this parameter.
+    #[cfg_attr(
+        feature = "handover",
+        doc = "   A half that can take what it left unread ([`ReadHalf::can_take_unread`]) is the \
+               exception: it has to take these ahead of anything that it reads, or fail on them if \
+               it can't make messages of them, as they are also how a connection that takes over \
+               gets what the other one left unread."
+    )]
     /// - `already_received_fds`: Same goes for file descriptors belonging to first messages.
     ///
     /// # Cancellation
@@ -268,28 +275,15 @@ pub trait ReadHalf: std::fmt::Debug + Send + Sync + 'static {
                 }
             }
         };
-        // Nothing is allocated when nothing follows the message.
-        let rest = already_received_bytes.split_off(len);
-        let bytes = mem::replace(already_received_bytes, rest);
 
-        // The message takes as many of the descriptors that wait as its header counts, whichever
-        // of its bytes they came with, as the reference implementation of D-Bus does.
-        #[cfg(unix)]
-        let fds = if already_received_fds.is_empty() {
-            vec![]
-        } else {
-            let (_, _, fields) = crate::message::parser::parse(&bytes)?;
-            let count = (fields.unix_fds().unwrap_or(0) as usize).min(already_received_fds.len());
-
-            already_received_fds.drain(..count).collect()
-        };
-        let endian = Endian::from(primary_header.endian_sig());
-        let ctxt = Context::new(endian, 0);
-        #[cfg(unix)]
-        let bytes = serialized::Data::new_fds(bytes, ctxt, fds);
-        #[cfg(not(unix))]
-        let bytes = serialized::Data::new(bytes, ctxt);
-        Message::from_raw_parts(bytes, seq)
+        take_message(
+            seq,
+            &primary_header,
+            len,
+            already_received_bytes,
+            #[cfg(unix)]
+            already_received_fds,
+        )
     }
 
     /// Attempt to receive bytes from the socket.
@@ -320,6 +314,64 @@ pub trait ReadHalf: std::fmt::Debug + Send + Sync + 'static {
     /// Default is `AuthMechanism::External`.
     fn auth_mechanism(&self) -> AuthMechanism {
         AuthMechanism::External
+    }
+
+    /// Whether this half can take out what it read off the socket and is yet to return in a
+    /// message, through [`ReadHalf::take_unread`], for its connection to be handed over.
+    ///
+    /// A half that returns `true` promises three things:
+    ///
+    /// * [`ReadHalf::receive_message`] is cancel-safe. Its connection drops the future of a call
+    ///   wherever it waits, and whatever the call read off the socket by then has to be kept,
+    ///   either in `already_received_bytes` and `already_received_fds` or in the half, for
+    ///   `take_unread` to take out.
+    /// * `receive_message` takes `already_received_bytes` and `already_received_fds` ahead of
+    ///   anything that it reads, or fails on them if it can't make messages of them, rather than
+    ///   leave them behind. That is how a connection that takes over gets what the other one left
+    ///   unread.
+    /// * Nothing underneath the half holds on to bytes of the socket that `take_unread` can't take
+    ///   out, as a buffered stream does.
+    ///
+    /// A half that implements [`ReadHalf::recvmsg`] so that a call dropped while it waits loses
+    /// nothing (see the cancellation section of [`ReadHalf::receive_message`]), and leaves
+    /// `receive_message` to the default implementation, keeps the first two promises, and holds
+    /// nothing for `take_unread` to take out.
+    ///
+    /// The read half of a
+    #[cfg_attr(feature = "p2p", doc = "[`Channel`]")]
+    #[cfg_attr(not(feature = "p2p"), doc = "`Channel`")]
+    /// returns `true`. A channel carries whole messages, so it takes back the whole messages that
+    /// a connection over a channel leaves unread, and fails on part of one, which can only come
+    /// from a connection over some other socket.
+    ///
+    /// The default implementation returns `false`.
+    ///
+    /// This method is only available when the `handover` feature is enabled.
+    #[cfg(feature = "handover")]
+    fn can_take_unread(&self) -> bool {
+        false
+    }
+
+    /// Move what this half read off the socket, and is yet to return in a message, to the end of
+    /// `bytes`. Move the file descriptors that came in with it, and that no message took, to the
+    /// end of `fds`. Both go in the order that they came in.
+    ///
+    /// A connection calls this once, as it stops reading, if [`ReadHalf::can_take_unread`] says
+    /// that it can. That comes after its last call to [`ReadHalf::receive_message`], which it may
+    /// have dropped while that call waited. `bytes` and `fds` then hold the
+    /// `already_received_bytes` and `already_received_fds` that the connection kept for its next
+    /// call.
+    ///
+    /// The default implementation moves nothing. That suits a half that keeps nothing of its own
+    /// from one call of `receive_message` to the next, such as one that leaves `receive_message`
+    /// to the default implementation.
+    ///
+    /// This method is only available when the `handover` feature is enabled.
+    #[cfg(feature = "handover")]
+    fn take_unread(&mut self, bytes: &mut Vec<u8>, #[cfg(unix)] fds: &mut Vec<OwnedFd>) {
+        let _ = bytes;
+        #[cfg(unix)]
+        let _ = fds;
     }
 }
 
@@ -460,6 +512,39 @@ pub(crate) fn read_primary_header(bytes: &[u8]) -> crate::Result<(PrimaryHeader,
     Ok((primary_header, total_len))
 }
 
+/// Take the message that `bytes` start with, which is whole in them, `len` bytes long as
+/// `primary_header` says, out of them, with as many of `fds` as its header counts.
+pub(crate) fn take_message(
+    seq: u64,
+    primary_header: &PrimaryHeader,
+    len: usize,
+    bytes: &mut Vec<u8>,
+    #[cfg(unix)] fds: &mut Vec<OwnedFd>,
+) -> crate::Result<Message> {
+    // Nothing is allocated when nothing follows the message.
+    let rest = bytes.split_off(len);
+    let bytes = mem::replace(bytes, rest);
+
+    // The message takes as many of the descriptors that wait as its header counts, whichever of
+    // its bytes they came with, as the reference implementation of D-Bus does.
+    #[cfg(unix)]
+    let fds = if fds.is_empty() {
+        vec![]
+    } else {
+        let (_, _, fields) = crate::message::parser::parse(&bytes)?;
+        let count = (fields.unix_fds().unwrap_or(0) as usize).min(fds.len());
+
+        fds.drain(..count).collect()
+    };
+    let endian = Endian::from(primary_header.endian_sig());
+    let ctxt = Context::new(endian, 0);
+    #[cfg(unix)]
+    let bytes = serialized::Data::new_fds(bytes, ctxt, fds);
+    #[cfg(not(unix))]
+    let bytes = serialized::Data::new(bytes, ctxt);
+    Message::from_raw_parts(bytes, seq)
+}
+
 /// The most that a read of the default [`ReadHalf::receive_message`] has room for.
 ///
 /// The room is zero-filled before each read, and what the read leaves of it is given up after,
@@ -536,6 +621,20 @@ impl ReadHalf for Box<dyn ReadHalf> {
 
     fn auth_mechanism(&self) -> AuthMechanism {
         (**self).auth_mechanism()
+    }
+
+    #[cfg(feature = "handover")]
+    fn can_take_unread(&self) -> bool {
+        (**self).can_take_unread()
+    }
+
+    #[cfg(feature = "handover")]
+    fn take_unread(&mut self, bytes: &mut Vec<u8>, #[cfg(unix)] fds: &mut Vec<OwnedFd>) {
+        (**self).take_unread(
+            bytes,
+            #[cfg(unix)]
+            fds,
+        )
     }
 }
 

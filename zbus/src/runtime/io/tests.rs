@@ -19,6 +19,12 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, ToSocketAddrs},
     sync::Arc,
 };
+#[cfg(all(unix, feature = "handover"))]
+use std::{
+    pin::Pin,
+    sync::atomic::{AtomicBool, Ordering},
+    task::Poll,
+};
 
 use ntest::timeout;
 
@@ -980,6 +986,375 @@ where
         dropped >= 2,
         "the message came out before the rest of it was written"
     );
+}
+
+/// What a reader read and is yet to return in a message is what it hands over: exactly the bytes
+/// that are yet to be taken as messages, and the file descriptors that wait, all of their sets in
+/// one list, in the order that they came in. That holds wherever the reader is stopped: by
+/// dropping a call that waits for the rest of a primary header, of a body or of a message longer
+/// than its buffer, or between calls, with whole messages in its buffer. The reader that was
+/// stopped takes back what it handed over, yields the messages that are whole in it, and hands over
+/// the rest once stopped again. A reader that takes over that rest, over a socket that carries what
+/// follows it, yields the messages that are left. All of them come with the same descriptors as
+/// from a reader that was never stopped.
+#[cfg(all(unix, feature = "handover"))]
+#[test]
+#[timeout(15000)]
+fn a_reader_hands_over_what_it_is_yet_to_return() {
+    // Each run reads the same pipes, which are told apart by their inodes.
+    let names = ["a", "b", "c", "d", "e"];
+    let pipes = names.map(pipe_with);
+    let inodes = pipes.each_ref().map(inode);
+    let fd = |i: usize| Fd::from(pipes[i].as_fd());
+    // Message 0 counts the descriptor of pipe a, message 1 those of pipes b and c, message 2
+    // none, message 3 that of pipe d, and message 4, which is longer than the buffer of a reader,
+    // that of pipe e.
+    let msgs = [
+        Message::method_call("/", "Test")
+            .build(&(0u32, fd(0)))
+            .unwrap(),
+        Message::method_call("/", "Test")
+            .build(&(1u32, fd(1), fd(2)))
+            .unwrap(),
+        Message::method_call("/", "Test").build(&2u32).unwrap(),
+        Message::method_call("/", "Test")
+            .build(&(3u32, fd(3)))
+            .unwrap(),
+        Message::method_call("/", "Test")
+            .build(&(fd(4), vec![4u8; 6000]))
+            .unwrap(),
+    ];
+    let bytes: Vec<u8> = msgs.iter().flat_map(|msg| msg.data().to_vec()).collect();
+    // Where each message starts in `bytes`, and where the last one ends.
+    let mut at = vec![0];
+    for msg in &msgs {
+        at.push(at.last().unwrap() + msg.data().len());
+    }
+    let stops = [
+        // In the primary header of message 1.
+        Stop {
+            reads: &[
+                (at[1], &[0]),
+                (at[1] + 10, &[1, 2]),
+                (at[2], &[]),
+                (at[4], &[3]),
+                (at[5], &[4]),
+            ],
+            made: 2,
+            out: 1,
+            waits: true,
+        },
+        // In the body of message 1, whose descriptors come in two sets.
+        Stop {
+            reads: &[
+                (at[1], &[0]),
+                (at[1] + 20, &[1]),
+                (at[2] - 4, &[2]),
+                (at[2], &[]),
+                (at[4], &[3]),
+                (at[5], &[4]),
+            ],
+            made: 3,
+            out: 1,
+            waits: true,
+        },
+        // In message 4, which is longer than the buffer.
+        Stop {
+            reads: &[
+                (at[1], &[0]),
+                (at[2], &[1, 2]),
+                (at[4], &[3]),
+                (at[4] + 1000, &[4]),
+                (at[4] + 5000, &[]),
+                (at[5], &[]),
+            ],
+            made: 5,
+            out: 4,
+            waits: true,
+        },
+        // Between calls, with messages 1 to 3 whole in the buffer, which one read brought along
+        // with message 0, and with all of their descriptors.
+        Stop {
+            reads: &[(at[4], &[0, 1, 2, 3]), (at[5], &[4])],
+            made: 1,
+            out: 1,
+            waits: false,
+        },
+    ];
+
+    for stop in stops {
+        let Stop {
+            reads,
+            made,
+            out,
+            waits,
+        } = stop;
+        under_every_runtime(|runtime| {
+            // The reads of `reads[range]`, each of which starts where the one before it ends.
+            let script = |range: std::ops::Range<usize>| -> VecDeque<_> {
+                let mut start = range.start.checked_sub(1).map_or(0, |i| reads[i].0);
+
+                reads[range]
+                    .iter()
+                    .map(|(end, of)| {
+                        let fds = of.iter().map(|i| pipes[*i].try_clone().unwrap());
+                        let read = (bytes[start..*end].to_vec(), fds.collect());
+                        start = *end;
+
+                        read
+                    })
+                    .collect()
+            };
+            let all = script(0..reads.len());
+            let (before, after) = (script(0..made), script(made..reads.len()));
+            let name = |fd: &dyn AsFd| names[inodes.iter().position(|i| *i == inode(&fd)).unwrap()];
+            let describe = move |msg: Message| {
+                let fds = msg
+                    .data()
+                    .fds()
+                    .iter()
+                    .map(|fd| name(fd))
+                    .collect::<Vec<_>>();
+
+                (msg.data().to_vec(), fds)
+            };
+            let (msgs, bytes, at) = (&msgs, &bytes, &at);
+
+            async move {
+                let (mut uninterrupted, _peer) = scripted(&runtime, Scripted(Mutex::new(all)));
+                let mut expected = vec![];
+                for seq in 0..msgs.len() {
+                    let received = uninterrupted
+                        .receive_message(seq as u64, &mut vec![], &mut vec![])
+                        .await
+                        .unwrap();
+                    expected.push(describe(received));
+                }
+                let none: [&str; 0] = [];
+                assert_eq!(
+                    expected.iter().map(|(_, fds)| &fds[..]).collect::<Vec<_>>(),
+                    [&["a"][..], &["b", "c"], &none, &["d"], &["e"]],
+                    "the descriptors went with other messages than their own",
+                );
+
+                let stalled = Arc::new(AtomicBool::new(false));
+                let ops = Stalling(Scripted(Mutex::new(before)), stalled.clone());
+                let (mut stopped, _peer) = scripted(&runtime, ops);
+                assert!(stopped.can_take_unread());
+                let mut received = vec![];
+                for seq in 0..out {
+                    let msg = stopped
+                        .receive_message(seq as u64, &mut vec![], &mut vec![])
+                        .await
+                        .unwrap();
+                    received.push(describe(msg));
+                }
+                if waits {
+                    let (mut bytes, mut fds) = (vec![], vec![]);
+                    let call = stopped.receive_message(out as u64, &mut bytes, &mut fds);
+                    drop_once_stalled(call, &stalled).await;
+                }
+                let (mut unread, mut unread_fds) = (vec![], vec![]);
+                stopped.take_unread(&mut unread, &mut unread_fds);
+                let (mut again, mut again_fds) = (vec![], vec![]);
+                stopped.take_unread(&mut again, &mut again_fds);
+                assert!(
+                    again.is_empty() && again_fds.is_empty(),
+                    "the reader kept what it handed over",
+                );
+
+                // What the reader hands over once it has returned the messages before message
+                // `from`: the bytes from where that one starts, and the descriptors that came in
+                // and that none of the messages before it took.
+                let end = reads[made - 1].0;
+                let handed_over = |unread: &[u8], unread_fds: &[OwnedFd], from: usize| {
+                    assert_eq!(unread, &bytes[at[from]..end]);
+                    let came_in = reads[..made]
+                        .iter()
+                        .flat_map(|(_, of)| of.iter().map(|i| names[*i]));
+                    let taken: usize = msgs[..from].iter().map(|msg| msg.data().fds().len()).sum();
+                    assert_eq!(
+                        unread_fds.iter().map(|fd| name(fd)).collect::<Vec<_>>(),
+                        came_in.skip(taken).collect::<Vec<_>>(),
+                        "the descriptors that wait were not handed over in the order they came in",
+                    );
+                };
+                handed_over(&unread, &unread_fds, out);
+
+                // The reader that was stopped takes back what it handed over, as a connection
+                // that goes on over the same halves does, and yields the messages that are whole
+                // in it. Stopped again, while it waits for more, it hands over what is left.
+                let whole = (out..msgs.len()).take_while(|i| at[i + 1] <= end).count();
+                let resumed = out + whole;
+                for seq in out..resumed {
+                    let msg = stopped
+                        .receive_message(seq as u64, &mut unread, &mut unread_fds)
+                        .await
+                        .unwrap();
+                    received.push(describe(msg));
+                }
+                // The flag stays set if a call was dropped before, as the peer sends nothing more
+                // either way, so this one may be dropped as soon as it waits. That is after it
+                // took back what it was given, which it does before it waits for anything.
+                let call = stopped.receive_message(resumed as u64, &mut unread, &mut unread_fds);
+                drop_once_stalled(call, &stalled).await;
+                stopped.take_unread(&mut unread, &mut unread_fds);
+                handed_over(&unread, &unread_fds, resumed);
+
+                let (mut taking_over, _peer) = scripted(&runtime, Scripted(Mutex::new(after)));
+                for seq in resumed..msgs.len() {
+                    let msg = taking_over
+                        .receive_message(seq as u64, &mut unread, &mut unread_fds)
+                        .await
+                        .unwrap();
+                    received.push(describe(msg));
+                }
+                assert_eq!(received, expected);
+            }
+        });
+    }
+}
+
+/// Where a reader is stopped, in [`a_reader_hands_over_what_it_is_yet_to_return`].
+#[cfg(all(unix, feature = "handover"))]
+struct Stop<'a> {
+    /// The reads, each as where in the bytes of the messages it ends, and the pipes whose
+    /// descriptors come with it.
+    reads: &'a [(usize, &'a [usize])],
+    /// How many of the reads the reader makes before it is stopped.
+    made: usize,
+    /// How many messages the reader returns before it is stopped.
+    out: usize,
+    /// Whether the reader is stopped by dropping a call that waits, rather than between calls.
+    waits: bool,
+}
+
+/// The file descriptors that a reader takes over wait as one set, however many sets they waited
+/// in where they were handed over. Two more sets may then come in for them to wait with, and a
+/// fourth is an error, as with the sets that come with the reads of a reader of its own.
+#[cfg(all(unix, feature = "handover"))]
+#[test]
+#[timeout(15000)]
+fn descriptors_taken_over_wait_as_one_set() {
+    let msg = Message::method_call("/", "Test")
+        .build(&vec![0u8; 6000])
+        .unwrap();
+
+    for more in [2, 3] {
+        under_every_runtime(|runtime| {
+            // The message is longer than the buffer of a reader, and comes in reads that each come
+            // with a descriptor that its header doesn't count. The reader that is stopped makes the
+            // first two.
+            let mut reads: VecDeque<_> = msg
+                .data()
+                .chunks(msg.data().len().div_ceil(2 + more))
+                .map(|bytes| (bytes.to_vec(), vec![pipe_with("")]))
+                .collect();
+            let rest = reads.split_off(2);
+            let msg = &msg;
+
+            async move {
+                let stalled = Arc::new(AtomicBool::new(false));
+                let ops = Stalling(Scripted(Mutex::new(reads)), stalled.clone());
+                let (mut stopped, _peer) = scripted(&runtime, ops);
+                let (mut bytes, mut fds) = (vec![], vec![]);
+                let call = stopped.receive_message(0, &mut bytes, &mut fds);
+                drop_once_stalled(call, &stalled).await;
+                let (mut unread, mut unread_fds) = (vec![], vec![]);
+                stopped.take_unread(&mut unread, &mut unread_fds);
+                assert_eq!(unread_fds.len(), 2);
+                let (mut again, mut again_fds) = (vec![], vec![]);
+                stopped.take_unread(&mut again, &mut again_fds);
+                assert!(
+                    again.is_empty() && again_fds.is_empty(),
+                    "the reader kept what it handed over",
+                );
+
+                let (mut taking_over, _peer) = scripted(&runtime, Scripted(Mutex::new(rest)));
+                let received = taking_over
+                    .receive_message(0, &mut unread, &mut unread_fds)
+                    .await;
+
+                match more {
+                    2 => assert_eq!(&received.unwrap().data()[..], &msg.data()[..]),
+                    _ => assert!(
+                        matches!(
+                            &received,
+                            Err(crate::Error::InputOutput(e))
+                                if e.kind() == std::io::ErrorKind::InvalidData
+                        ),
+                        "{received:?}",
+                    ),
+                }
+            }
+        });
+    }
+}
+
+/// Polls `call` until it waits with `stalled` set, that is for a read that found that the peer
+/// sends nothing more, and drops it there.
+///
+/// A runtime that waits for the socket to be readable before each read can have a call wait before
+/// it gets to that read, so a call that waits may not be done with the script yet.
+#[cfg(all(unix, feature = "handover"))]
+async fn drop_once_stalled<F>(mut call: F, stalled: &AtomicBool)
+where
+    F: Future<Output = crate::Result<Message>> + Unpin,
+{
+    std::future::poll_fn(|cx| match Pin::new(&mut call).poll(cx) {
+        Poll::Ready(received) => panic!("a call returned with no message whole: {received:?}"),
+        Poll::Pending if stalled.load(Ordering::Relaxed) => Poll::Ready(()),
+        Poll::Pending => Poll::Pending,
+    })
+    .await
+}
+
+/// A reader through `ops` over one end of a new socket pair, as a connection holds it, and the
+/// other end.
+///
+/// The other end has written a byte, which the reads of `ops` leave alone, so the socket stays
+/// readable for any runtime that waits for it to be before each read.
+#[cfg(all(unix, feature = "handover"))]
+fn scripted<O>(runtime: &Runtime, ops: O) -> (Box<dyn ReadHalf>, UnixStream)
+where
+    O: SocketOps,
+{
+    let (left, mut right) = UnixStream::pair().unwrap();
+    right.write_all(b"!").unwrap();
+
+    (Box::new(Reader::new(half(runtime, left, ops))), right)
+}
+
+/// The operations of a [`Scripted`] socket whose peer sends nothing more once the script is out,
+/// rather than closing its end, so that a read then waits. The flag is set once a read finds that.
+#[cfg(all(unix, feature = "handover"))]
+#[derive(Debug)]
+struct Stalling(Scripted, Arc<AtomicBool>);
+
+#[cfg(all(unix, feature = "handover"))]
+impl SocketOps for Stalling {
+    fn recv(&self, source: &IoSource, buffer: &mut [u8]) -> RecvmsgResult {
+        if self.0.0.lock().unwrap().is_empty() {
+            self.1.store(true, Ordering::Relaxed);
+
+            return Err(std::io::ErrorKind::WouldBlock.into());
+        }
+
+        self.0.recv(source, buffer)
+    }
+
+    fn send(
+        &self,
+        source: &IoSource,
+        buffers: &[IoSlice<'_>],
+        fds: &[BorrowedFd<'_>],
+    ) -> std::io::Result<usize> {
+        self.0.send(source, buffers, fds)
+    }
+
+    fn can_pass_unix_fd(&self) -> bool {
+        true
+    }
 }
 
 /// Asserts that `source` is in non-blocking mode.
