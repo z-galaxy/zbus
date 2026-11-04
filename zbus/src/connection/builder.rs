@@ -1,6 +1,10 @@
 #[cfg(feature = "service")]
 use std::collections::HashMap;
+#[cfg(all(feature = "handover", unix))]
+use std::os::fd::OwnedFd;
 use std::{collections::HashSet, mem, num::NonZeroUsize, vec};
+#[cfg(feature = "handover")]
+use std::{fmt, num::NonZeroU32};
 #[cfg(feature = "service")]
 use zruntime::Event;
 use zruntime::broadcast::Receiver as ActiveReceiver;
@@ -36,6 +40,8 @@ use crate::{
     names::InterfaceName,
     object_server::{ArcInterface, Interface},
 };
+#[cfg(feature = "handover")]
+use crate::{message::header::raise_next_serial, names::OwnedUniqueName};
 
 #[cfg(all(feature = "handover", any(unix, windows)))]
 use super::handover::SocketKind;
@@ -44,6 +50,8 @@ use super::{
     handshake::{AuthMechanism, Authenticated},
     socket::{BoxedSplit, ReadHalf, Split, WriteHalf},
 };
+#[cfg(feature = "handover")]
+use super::{Handover, HandoverSocket};
 
 #[derive(Debug)]
 enum Target {
@@ -110,6 +118,10 @@ pub struct Builder<'a> {
     // a descriptor of it for a hand-over.
     #[cfg(all(feature = "handover", any(unix, windows)))]
     io_source: Option<(IoSource, SocketKind)>,
+    // What a connection that was handed over leaves to the one that takes it over, if this is
+    // the builder of that one.
+    #[cfg(feature = "handover")]
+    taken_over: Option<TakenOver>,
     error: Option<Error>,
 }
 
@@ -259,6 +271,12 @@ impl<'a> Builder<'a> {
     ///
     /// This is similar to [`Builder::socket`], except that the socket is either already
     /// authenticated or does not require authentication.
+    #[cfg_attr(
+        feature = "handover",
+        doc = "",
+        doc = "To go on with a connection that was handed over, use [`Builder::take_over`] \
+               instead, which also takes what that connection left unread."
+    )]
     ///
     /// An invalid GUID is reported by [`Builder::build`].
     pub fn authenticated_socket<S, G>(socket: S, guid: G) -> Self
@@ -272,6 +290,91 @@ impl<'a> Builder<'a> {
             Ok(guid) => builder.guid = Some(guid),
             Err(e) => builder.record(e.into()),
         }
+
+        builder
+    }
+
+    /// A builder for a connection that goes on from `handover`, which
+    /// [`MessageStream::hand_over`] took out of a connection, in this process or in another one.
+    ///
+    /// The connection runs over `handover.socket`. It has the GUID, the unique name, the passing
+    /// of file descriptors and the kind (peer-to-peer or bus) of `handover`. It goes through no
+    /// authentication handshake, and a connection to a bus says no `Hello`.
+    ///
+    /// This method is only available when the `handover` feature is enabled.
+    ///
+    /// It takes the bytes and the file descriptors of `handover` ahead of anything that it reads
+    /// off the socket, so the first messages that it yields are those that they hold or start. It
+    /// yields them as soon as it is built, so a [`MessageStream`] made from it once it is built can
+    /// miss them. Build it with [`Builder::build_message_stream`] to get them all, on a stream
+    /// that it can be handed over through in turn. The interfaces that
+    #[cfg_attr(feature = "service", doc = "[`Builder::serve_at`] adds")]
+    #[cfg_attr(
+        not(feature = "service"),
+        doc = "`Builder::serve_at` (which requires the `service` feature) adds"
+    )]
+    /// get the method calls among them.
+    ///
+    /// Once the connection is built, the messages that this process builds get serial numbers
+    /// from `handover.next_serial` on, unless they already would. So the replies to method calls
+    /// made before the hand-over aren't taken for those of calls made since.
+    ///
+    /// `Builder::server`, `Builder::auth_mechanism` and `Builder::user_id` have no effect on the
+    /// connection here, as there is no handshake, though an invalid GUID given to
+    /// `Builder::server` still fails the build. `Builder::unique_name`, if called, replaces the
+    /// name of `handover`. Everything else is up to the builder, as usual. Like a [`Handover`], the
+    /// builder closes the socket when it is dropped, and so does a build that fails or whose future
+    /// is dropped.
+    ///
+    /// [`Builder::build`] fails with [`Error::Unsupported`]:
+    #[cfg_attr(
+        feature = "p2p",
+        doc = "* for a hand-over of a connection to a bus that [`Builder::p2p`] was called for;"
+    )]
+    /// * for a hand-over that holds unread bytes or file descriptors, over a [`Socket`] of your own
+    ///   whose read half can't take them ([`ReadHalf::can_take_unread`]).
+    ///
+    /// [`MessageStream::hand_over`]: crate::MessageStream::hand_over
+    /// [`Socket`]: crate::connection::Socket
+    #[cfg(feature = "handover")]
+    pub fn take_over(handover: Handover) -> Self {
+        let Handover {
+            socket,
+            server_guid,
+            unique_name,
+            unread_bytes,
+            #[cfg(unix)]
+            unread_fds,
+            #[cfg(unix)]
+            unix_fd_passing,
+            #[cfg(feature = "p2p")]
+            p2p,
+            next_serial,
+        } = handover;
+        // The handshake is behind the socket, so it is taken as authenticated.
+        let target = match socket {
+            #[cfg(any(unix, windows))]
+            HandoverSocket::UnixStream(stream) => Target::UnixStream(stream),
+            HandoverSocket::TcpStream(stream) => Target::TcpStream(stream),
+            HandoverSocket::Socket(split) => Target::AuthenticatedSocket(split),
+        };
+        let mut builder = Self::new(target);
+        #[cfg(feature = "p2p")]
+        {
+            builder.p2p = p2p;
+        }
+        builder.taken_over = Some(TakenOver {
+            server_guid,
+            unique_name,
+            unread_bytes,
+            #[cfg(unix)]
+            unread_fds,
+            #[cfg(unix)]
+            unix_fd_passing,
+            #[cfg(feature = "p2p")]
+            p2p,
+            next_serial,
+        });
 
         builder
     }
@@ -556,7 +659,10 @@ impl<'a> Builder<'a> {
         doc = "",
         doc = "The stream has had every message of the connection, from the first, so the \
                connection can be handed over through it \
-               ([`MessageStream::hand_over`](crate::MessageStream::hand_over))."
+               ([`MessageStream::hand_over`](crate::MessageStream::hand_over)). A connection \
+               that takes over ([`Builder::take_over`]) yields the messages that it was handed as \
+               soon as it is built. A stream made from it once it is built can miss them, while \
+               one built with this gets every one of them."
     )]
     ///
     /// This method is only available when the `bus-impl` or the `handover` feature is enabled.
@@ -740,6 +846,8 @@ impl<'a> Builder<'a> {
             runtime: None,
             #[cfg(all(feature = "handover", any(unix, windows)))]
             io_source: None,
+            #[cfg(feature = "handover")]
+            taken_over: None,
             error,
         }
     }
@@ -759,6 +867,17 @@ impl<'a> Builder<'a> {
 
         #[allow(unused_mut)]
         let (mut stream, server_guid, authenticated) = self.target_connect(runtime).await?;
+        // Ahead of the authenticated socket that it builds on, as the GUID that comes with it is
+        // that of the hand-over, not the one that `target_connect` gives.
+        #[cfg(feature = "handover")]
+        if let Some(taken_over) = self.taken_over.take() {
+            return taken_over.authenticated(
+                stream,
+                unique_name,
+                #[cfg(feature = "p2p")]
+                self.p2p,
+            );
+        }
         if authenticated {
             let (socket_read, socket_write) = stream.take();
             Ok(Authenticated {
@@ -892,6 +1011,83 @@ impl<'a> Builder<'a> {
         };
 
         Ok((split, guid, authenticated))
+    }
+}
+
+/// What [`Builder::take_over`] keeps of a [`Handover`] for the build: everything but the socket,
+/// which is the target of the builder.
+#[cfg(feature = "handover")]
+struct TakenOver {
+    server_guid: OwnedGuid,
+    unique_name: Option<OwnedUniqueName>,
+    unread_bytes: Vec<u8>,
+    #[cfg(unix)]
+    unread_fds: Vec<OwnedFd>,
+    #[cfg(unix)]
+    unix_fd_passing: bool,
+    #[cfg(feature = "p2p")]
+    p2p: bool,
+    next_serial: NonZeroU32,
+}
+
+#[cfg(feature = "handover")]
+impl TakenOver {
+    /// The connection over `stream` that goes on from the hand-over, with `unique_name` in place
+    /// of that of the hand-over, if any, as the builder says that it is `p2p` or not.
+    fn authenticated(
+        self,
+        stream: BoxedSplit,
+        unique_name: Option<OwnedUniqueName>,
+        #[cfg(feature = "p2p")] p2p: bool,
+    ) -> Result<Authenticated> {
+        #[cfg(feature = "p2p")]
+        if p2p != self.p2p {
+            return Err(Error::Unsupported);
+        }
+        let (socket_read, socket_write) = stream.take();
+        let unread = !self.unread_bytes.is_empty();
+        #[cfg(unix)]
+        let unread = unread || !self.unread_fds.is_empty();
+        // A half that doesn't say that it takes what it is given as already received may ignore
+        // it, which would lose the start of what the peer sent.
+        if unread && !socket_read.can_take_unread() {
+            return Err(Error::Unsupported);
+        }
+        raise_next_serial(self.next_serial);
+
+        Ok(Authenticated {
+            #[cfg(unix)]
+            cap_unix_fd: self.unix_fd_passing && socket_read.can_pass_unix_fd(),
+            socket_read: Some(socket_read),
+            socket_write,
+            server_guid: self.server_guid,
+            already_received_bytes: self.unread_bytes,
+            #[cfg(unix)]
+            already_received_fds: self.unread_fds,
+            unique_name: unique_name.or(self.unique_name),
+            peer_credentials: None,
+        })
+    }
+}
+
+/// Shows how many bytes and file descriptors were left unread rather than which, as a `Handover`
+/// does.
+#[cfg(feature = "handover")]
+impl fmt::Debug for TakenOver {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut taken_over = f.debug_struct("TakenOver");
+        taken_over
+            .field("server_guid", &self.server_guid)
+            .field("unique_name", &self.unique_name)
+            .field("unread_bytes", &self.unread_bytes.len());
+        #[cfg(unix)]
+        taken_over
+            .field("unread_fds", &self.unread_fds.len())
+            .field("unix_fd_passing", &self.unix_fd_passing);
+        #[cfg(feature = "p2p")]
+        taken_over.field("p2p", &self.p2p);
+
+        taken_over.field("next_serial", &self.next_serial).finish()
     }
 }
 

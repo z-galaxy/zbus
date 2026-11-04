@@ -79,7 +79,8 @@ where
         }
     }
 
-    /// Puts what the handshake read past its own end ahead of what this half has read itself.
+    /// Puts what the handshake read past its own end, or what a connection that was handed over
+    /// left unread, ahead of what this half has read itself.
     fn take_over(&mut self, bytes: &mut Vec<u8>, #[cfg(unix)] fds: &mut Vec<OwnedFd>) {
         debug_assert!(
             self.long.is_empty() || bytes.is_empty(),
@@ -91,7 +92,7 @@ where
             self.start = 0;
             self.end = buffer.len();
             // Whatever the handshake read past its end stays in the buffer until it is taken, so
-            // the buffer is as long as that if it has to be.
+            // the buffer is as long as that if it has to be, until `shrink` gives the room back.
             buffer.resize(self.end.max(BUFFER_SIZE), 0);
             self.buffer = buffer;
         }
@@ -99,6 +100,24 @@ where
         if !fds.is_empty() {
             self.fds.push_front(mem::take(fds));
         }
+    }
+
+    /// Gives back the room that the buffer grew by, once what it holds fits in a buffer of the
+    /// usual size, which it moves to its start.
+    ///
+    /// The buffer only grows to take what was read before this half, such as all of the messages
+    /// that a connection that was handed over left unread, and the start of a long one, which can
+    /// add up to many times the usual size. The reader lives as long as its connection, so the
+    /// room is given back as soon as those are out of the buffer, rather than kept for good.
+    fn shrink(&mut self) {
+        if self.buffer.len() <= BUFFER_SIZE || self.end - self.start > BUFFER_SIZE {
+            return;
+        }
+        self.buffer.copy_within(self.start..self.end, 0);
+        self.end -= self.start;
+        self.start = 0;
+        self.buffer.truncate(BUFFER_SIZE);
+        self.buffer.shrink_to_fit();
     }
 
     /// Reads as much as the socket holds into the room that the buffer has after the bytes it
@@ -210,17 +229,20 @@ where
                         self.start = 0;
                         self.end = 0;
                     }
+                    self.shrink();
 
                     break (primary_header, bytes);
-                } else if len > self.buffer.len() {
+                } else if len > BUFFER_SIZE {
                     // The message gets an allocation of its own, which takes over what the buffer
-                    // holds of it and has the rest read straight into it.
+                    // holds of it and has the rest read straight into it. That goes for a buffer
+                    // that grew too, which then has no more than the start of this message.
                     self.long = Vec::with_capacity(len);
                     self.long.extend_from_slice(buffered);
                     self.long_filled = self.long.len();
                     self.long.resize(len, 0);
                     self.start = 0;
                     self.end = 0;
+                    self.shrink();
 
                     continue;
                 }

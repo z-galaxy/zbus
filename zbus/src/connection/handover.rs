@@ -18,13 +18,18 @@
 //!    socket, the messages that were queued on the stream and that it did not yield, what the
 //!    connection read off the socket after them and made no message of yet, the file descriptors
 //!    that came with all of those, and what a connection that goes on needs to know of this one.
+//! 4. Build the connection that goes on, in this process or in another one that the hand-over is
+//!    passed to, with [`Builder::take_over`], and its stream with `build_message_stream`. It yields
+//!    the messages of the hand-over first, then goes on reading the socket where the other one
+//!    stopped, and it can be handed over in turn.
 //!
-//! Nothing that the peer sent is lost on the way, and nothing is written to the socket once the
-//! hand-over commits, so the peer sees nothing but a pause. A peer that closed its end of the
-//! connection, such as one that sent a last message and went, is no exception, even once a send to
-//! it failed: what it sent is handed over, and the connection that goes on comes to its end. For
-//! that, the connection keeps what it read of such a peer and made no message of, the file
-//! descriptors that came with it included, until it is handed over or dropped.
+//! Nothing that the peer sent is lost on the way, and nothing is written to the socket from the
+//! commit of the hand-over until the connection that goes on sends, so the peer sees nothing but a
+//! pause. A peer that closed its end of the connection, such as one that sent a last message and
+//! went, is no exception, even once a send to it failed: what it sent is handed over, and the
+//! connection that goes on comes to its end. For that, the connection keeps what it read of such a
+//! peer and made no message of, the file descriptors that came with it included, until it is handed
+//! over or dropped.
 //!
 //! A hand-over that fails, or that is given up on, such as by a timeout, loses nothing either: the
 //! stream keeps the messages that the hand-over took off it, and yields them before the rest. The
@@ -43,16 +48,29 @@
 //! # Example
 //!
 //! ```
-//! use zbus::{block_on, connection::Builder};
+//! use zbus::{Connection, block_on, connection::Builder};
 //!
 //! # fn main() -> zbus::Result<()> {
 //! block_on(async {
 //!     let mut stream = Builder::session().build_message_stream().await?;
+//!     let name = Connection::from(&stream).unique_name().cloned();
 //!     // Take the messages of the connection off `stream` and deal with them, until it is time to
 //!     // hand the connection over.
 //!
 //!     let handover = stream.hand_over().await?;
-//!     assert!(handover.unique_name.is_some());
+//!
+//!     // The connection goes on, with the name that the bus knows it by.
+//!     let stream = Builder::take_over(handover).build_message_stream().await?;
+//!     let conn = Connection::from(&stream);
+//!     assert_eq!(conn.unique_name().cloned(), name);
+//!     conn.call_method(
+//!         Some("org.freedesktop.DBus"),
+//!         "/org/freedesktop/DBus",
+//!         Some("org.freedesktop.DBus.Peer"),
+//!         "Ping",
+//!         &(),
+//!     )
+//!     .await?;
 //!
 //!     Ok(())
 //! })
@@ -60,6 +78,7 @@
 //! ```
 //!
 //! [`Builder::build_message_stream`]: super::Builder::build_message_stream
+//! [`Builder::take_over`]: super::Builder::take_over
 //! [`MessageStream`]: crate::MessageStream
 //! [`MessageStream::hand_over`]: crate::MessageStream::hand_over
 
@@ -103,8 +122,8 @@ use crate::{
     names::OwnedUniqueName,
 };
 
-/// A connection taken apart by [`MessageStream::hand_over`], for a connection to go on from where
-/// it stopped.
+/// A connection taken apart by [`MessageStream::hand_over`], for [`Builder::take_over`] to build a
+/// connection that goes on from where it stopped.
 ///
 /// The connection that goes on can be in this process. It can also be in another process that the
 /// hand-over is passed to, such as the next instance of a service that restarts, or a helper
@@ -116,12 +135,13 @@ use crate::{
 ///
 /// Pass on the descriptors: the socket's and, on unix, those of `unread_fds`, in their order, such
 /// as over a unix socket or through systemd's file descriptor store. Pass the other fields on as
-/// data.
+/// data. Then build it again there with [`Handover::new`] and set the fields.
 ///
 /// `unread_bytes` holds the messages that were queued on the stream, and the start of one that the
 /// peer was in the middle of sending, which can be as long as the longest message that D-Bus
 /// allows (128 MiB).
 ///
+/// [`Builder::take_over`]: super::Builder::take_over
 /// [`MessageStream::hand_over`]: crate::MessageStream::hand_over
 #[non_exhaustive]
 #[must_use = "dropping a `Handover` closes the socket that it holds, which disconnects the peer"]
@@ -168,6 +188,29 @@ pub struct Handover {
     pub next_serial: NonZeroU32,
 }
 
+impl Handover {
+    /// A hand-over of a connection over `socket` to the server `server_guid`.
+    ///
+    /// The hand-over is of a connection to a bus, with no unique name, nothing read ahead and no
+    /// passing of file descriptors, and its serial numbers start at 1. Set the fields to those of
+    /// the connection that was handed over.
+    pub fn new(socket: HandoverSocket, server_guid: OwnedGuid) -> Self {
+        Self {
+            socket,
+            server_guid,
+            unique_name: None,
+            unread_bytes: Vec::new(),
+            #[cfg(unix)]
+            unread_fds: Vec::new(),
+            #[cfg(unix)]
+            unix_fd_passing: false,
+            #[cfg(feature = "p2p")]
+            p2p: false,
+            next_serial: NonZeroU32::MIN,
+        }
+    }
+}
+
 /// Shows how many bytes and file descriptors were left unread rather than which: the bytes can be
 /// as many as the longest message that D-Bus allows.
 impl fmt::Debug for Handover {
@@ -189,7 +232,8 @@ impl fmt::Debug for Handover {
     }
 }
 
-/// The socket of a connection that was handed over ([`MessageStream::hand_over`]).
+/// The socket of a connection that was handed over ([`MessageStream::hand_over`]), for
+/// [`Builder::take_over`] to go on over.
 ///
 /// This type is only available when the `handover` feature is enabled.
 ///
@@ -197,6 +241,7 @@ impl fmt::Debug for Handover {
 /// of them closes the socket, and the peer sees the connection go, unless the descriptor was
 /// passed on first.
 ///
+/// [`Builder::take_over`]: super::Builder::take_over
 /// [`MessageStream::hand_over`]: crate::MessageStream::hand_over
 #[derive(Debug)]
 #[non_exhaustive]
@@ -876,7 +921,7 @@ fn not_connected(reason: &'static str) -> io::Error {
 
 #[cfg(all(test, feature = "p2p"))]
 mod tests {
-    use std::{fmt::Debug, io};
+    use std::{fmt::Debug, io, num::NonZeroU32};
     #[cfg(unix)]
     use std::{
         future::Future,
@@ -898,33 +943,26 @@ mod tests {
     use ntest::timeout;
     use test_log::test;
 
-    use super::HandoverSocket;
     #[cfg(unix)]
     use super::ReaderEnd;
+    use super::{Handover, HandoverSocket};
     #[cfg(unix)]
     use crate::{
         Address,
         address::transport::{Transport, Unix, UnixSocket},
         connection::{
             AuthMechanism,
-            socket::{BoxedSplit, RecvmsgResult, Split, WriteHalf},
+            socket::{BoxedSplit, ReadHalf, RecvmsgResult, Split, WriteHalf},
         },
         runtime::io::{RegisteredIo, UnixOps, registered},
     };
     use crate::{
         Connection, Error, Guid, MatchRule, Message, MessageStream, Result,
-        connection::{
-            Builder,
-            socket::{Channel, ReadHalf, read_primary_header},
-        },
-        message::Type,
+        connection::{Builder, socket::Channel},
+        message::{Type, header::next_serial},
         runtime::{
             Runtime,
             test_runtime::{AbortingRuntime, TestRuntime, under_every_runtime},
-        },
-        wire::{
-            Endian,
-            serialized::{Context, Data},
         },
     };
 
@@ -961,7 +999,8 @@ mod tests {
 
     /// A connection whose peer closed its end, once it sent a last message, is handed over with
     /// that message, which the stream did not yield, though it came to the end of the input before
-    /// the hand-over. Its streams end on that end then, and so do the calls made since.
+    /// the hand-over. Its streams end on that end then, and so do the calls made since. A
+    /// connection that takes over yields the message, then comes to the same end.
     #[test]
     #[timeout(15000)]
     fn a_connection_whose_peer_went_is_handed_over_with_what_it_sent() {
@@ -989,13 +1028,22 @@ mod tests {
                 stream.next().await.is_none(),
                 "the stream outlived the hand-over"
             );
+            let mut stream = on(Builder::take_over(handover), &runtime)
+                .build_message_stream()
+                .await
+                .unwrap();
+            let received = stream.next().await.unwrap().unwrap();
+            assert_eq!(&received.data()[..], &msg.data()[..]);
+            assert_end_of_input(stream.next().await.unwrap());
+            assert!(stream.next().await.is_none(), "the stream outlived its end");
         });
     }
 
     /// A connection whose peer closed its end of the socket is handed over with what it read, the
     /// part of a message included, and the socket, which holds the rest up to that end, whether
     /// the connection came to the end before the hand-over or as the hand-over stopped it, and
-    /// whatever the peer sent before.
+    /// whatever the peer sent before. A connection that takes over yields the message that the
+    /// peer sent whole, then comes to the same end.
     #[cfg(unix)]
     #[test]
     #[timeout(15000)]
@@ -1018,14 +1066,23 @@ mod tests {
 
                     let case = format!("ended: {ended}, whole: {whole}, cut: {cut}");
                     assert!(stream.next().await.is_none(), "{case}");
-                    let socket = match handover.socket {
-                        HandoverSocket::UnixStream(socket) => socket,
-                        socket => panic!("a unix socket was handed over as {socket:?}"),
-                    };
+                    assert!(
+                        matches!(handover.socket, HandoverSocket::UnixStream(_)),
+                        "{case}: a unix socket was handed over as {:?}",
+                        handover.socket,
+                    );
                     // What the connection didn't read is still in the socket, up to its end.
-                    let mut unread = handover.unread_bytes;
-                    (&socket).read_to_end(&mut unread).unwrap();
-                    assert_eq!(unread, sent, "{case}");
+                    assert!(sent.starts_with(&handover.unread_bytes), "{case}");
+                    let mut stream = on(Builder::take_over(handover), &runtime)
+                        .build_message_stream()
+                        .await
+                        .unwrap();
+                    if whole {
+                        let received = stream.next().await.unwrap().unwrap();
+                        assert_eq!(&received.data()[..], &last.data()[..], "{case}");
+                    }
+                    assert_end_of_input(stream.next().await.unwrap());
+                    assert!(stream.next().await.is_none(), "{case}");
                 }
             }
         });
@@ -1033,7 +1090,8 @@ mod tests {
 
     /// A connection whose peer went, once it sent a last message, is handed over with that
     /// message and the socket, though a send to the peer failed since: the peer receives nothing
-    /// more, so nothing follows what the send may have left in the socket.
+    /// more, so nothing follows what the send may have left in the socket. A connection that takes
+    /// over yields the message, then comes to the same end.
     #[cfg(unix)]
     #[test]
     #[timeout(15000)]
@@ -1052,14 +1110,14 @@ mod tests {
             let handover = stream.hand_over().await.unwrap();
 
             assert_eq!(handover.unread_bytes, &last.data()[..]);
-            let socket = match handover.socket {
-                HandoverSocket::UnixStream(socket) => socket,
-                socket => panic!("a unix socket was handed over as {socket:?}"),
-            };
-            // The socket is at the end that the connection came to.
-            let mut rest = vec![];
-            (&socket).read_to_end(&mut rest).unwrap();
-            assert!(rest.is_empty(), "the socket holds more: {rest:?}");
+            let mut stream = on(Builder::take_over(handover), &runtime)
+                .build_message_stream()
+                .await
+                .unwrap();
+            let received = stream.next().await.unwrap().unwrap();
+            assert_eq!(&received.data()[..], &last.data()[..]);
+            assert_end_of_input(stream.next().await.unwrap());
+            assert!(stream.next().await.is_none(), "the stream outlived its end");
         });
     }
 
@@ -1082,6 +1140,14 @@ mod tests {
             let handover = stream.hand_over().await.unwrap();
 
             assert_eq!(handover.unread_bytes, &last.data()[..]);
+            let mut stream = on(Builder::take_over(handover), &runtime)
+                .build_message_stream()
+                .await
+                .unwrap();
+            let received = stream.next().await.unwrap().unwrap();
+            assert_eq!(&received.data()[..], &last.data()[..]);
+            assert_end_of_input(stream.next().await.unwrap());
+            assert!(stream.next().await.is_none(), "the stream outlived its end");
         });
     }
 
@@ -1093,7 +1159,7 @@ mod tests {
     fn a_connection_that_cant_stop_reading_reads_on() {
         under_every_runtime(|runtime| async move {
             let (peer, theirs) = UnixStream::pair().unwrap();
-            let split = recvmsg_only(&runtime, theirs);
+            let split = recvmsg_only(&runtime, theirs, false);
             let mut stream = on(
                 Builder::authenticated_socket(split, Guid::generate()),
                 &runtime,
@@ -1150,7 +1216,8 @@ mod tests {
 
     /// The messages queued on a full stream, which a reader that read more waits for room in, are
     /// taken off it by the hand-over itself, which lets the reader stop. They are handed over,
-    /// those that the reader read after them too, and nothing is written to the socket.
+    /// those that the reader read after them too, and nothing is written to the socket. A
+    /// connection that takes over yields them first.
     #[cfg(unix)]
     #[test]
     #[timeout(15000)]
@@ -1203,13 +1270,24 @@ mod tests {
                     matches!(&read, Err(e) if e.kind() == ErrorKind::WouldBlock),
                     "the peer got something: {read:?}",
                 );
+                // Only a stream set up before the connection is built is sure to get the messages
+                // that it takes over whole.
+                let mut stream = on(Builder::take_over(handover), &runtime)
+                    .build_message_stream()
+                    .await
+                    .unwrap();
+                for sent in &msgs[taken..] {
+                    let received = stream.next().await.unwrap().unwrap();
+                    assert_eq!(&received.data()[..], &sent.data()[..]);
+                }
             }
         });
     }
 
     /// The messages queued on the stream, which it didn't yield, are handed over with their file
     /// descriptors, in their order, ahead of the part of a message that the reader read, and of
-    /// the descriptors that came with that.
+    /// the descriptors that came with that. A connection that takes over yields each message with
+    /// its own descriptors.
     #[cfg(unix)]
     #[test]
     #[timeout(15000)]
@@ -1253,11 +1331,24 @@ mod tests {
             assert_eq!(handover.unread_bytes, sent);
             let inodes: Vec<_> = handover.unread_fds.iter().map(inode).collect();
             assert_eq!(inodes, pipes.each_ref().map(inode));
+            drop(conn);
+            let mut stream = on(Builder::take_over(handover), &runtime)
+                .build_message_stream()
+                .await
+                .unwrap();
+            (&peer).write_all(&msgs[2].data()[20..]).unwrap();
+            for sent in &msgs {
+                let received = stream.next().await.unwrap().unwrap();
+                assert_eq!(&received.data()[..], &sent.data()[..]);
+                let inodes: Vec<_> = received.data().fds().iter().map(inode).collect();
+                let sent: Vec<_> = sent.data().fds().iter().map(inode).collect();
+                assert_eq!(inodes, sent);
+            }
         });
     }
 
     /// A connection that stopped in the middle of a message hands over its socket with the part
-    /// of the message that it read, and the socket carries the rest.
+    /// of the message that it read, and a connection that takes over goes on with that message.
     #[cfg(unix)]
     #[test]
     #[timeout(15000)]
@@ -1278,17 +1369,18 @@ mod tests {
                 .build(&vec![7u8; 10 * 1024])
                 .unwrap();
 
-            let unread = hand_over_in_the_middle_of(&runtime, &long, 6000).await;
+            let room = hand_over_in_the_middle_of(&runtime, &long, 6000).await;
 
             assert!(
-                unread.capacity() < long.data().len(),
+                room < long.data().len(),
                 "the hand-over keeps room for the rest of the message",
             );
         });
     }
 
     /// The file descriptors that came in with the part of a message that was read are handed over
-    /// with it, in the order that they came in.
+    /// with it, in the order that they came in, and the message carries them once a connection
+    /// that takes over has the rest of it.
     #[cfg(unix)]
     #[test]
     #[timeout(15000)]
@@ -1308,6 +1400,15 @@ mod tests {
 
             assert_eq!(handover.unread_bytes, &msg.data()[..20]);
             let inodes: Vec<_> = handover.unread_fds.iter().map(inode).collect();
+            assert_eq!(inodes, pipes.each_ref().map(inode));
+            let mut stream = on(Builder::take_over(handover), &runtime)
+                .build_message_stream()
+                .await
+                .unwrap();
+            (&peer).write_all(&msg.data()[20..]).unwrap();
+            let received = stream.next().await.unwrap().unwrap();
+            assert_eq!(&received.data()[..], &msg.data()[..]);
+            let inodes: Vec<_> = received.data().fds().iter().map(inode).collect();
             assert_eq!(inodes, pipes.each_ref().map(inode));
         });
     }
@@ -1691,8 +1792,9 @@ mod tests {
         });
     }
 
-    /// A connection over a channel hands over its halves, through which come the messages that it
-    /// is yet to read, while its peer goes on sending.
+    /// A connection over a channel hands over its halves, with the messages that its stream had
+    /// queued, and a connection that takes over gets those, then those that it is yet to read,
+    /// while its peer goes on sending.
     #[test]
     #[timeout(15000)]
     fn a_channel_is_handed_over_with_the_messages_that_it_is_yet_to_read() {
@@ -1715,25 +1817,18 @@ mod tests {
                     let handover = stream.hand_over().await.unwrap();
                     #[cfg(unix)]
                     assert!(handover.unread_fds.is_empty());
-                    let mut split = match handover.socket {
-                        HandoverSocket::Socket(split) => split,
-                        socket => panic!("a channel was handed over as {socket:?}"),
-                    };
-                    // The messages that the stream had queued.
-                    received.extend(messages_of(&handover.unread_bytes));
+                    assert!(
+                        matches!(handover.socket, HandoverSocket::Socket(_)),
+                        "a channel was handed over as {:?}",
+                        handover.socket,
+                    );
+                    let mut stream = on(Builder::take_over(handover), &runtime)
+                        .build_message_stream()
+                        .await
+                        .unwrap();
                     // The peer is still sending the rest.
                     while received.len() < msgs.len() {
-                        let msg = split
-                            .read_mut()
-                            .receive_message(
-                                0,
-                                &mut vec![],
-                                #[cfg(unix)]
-                                &mut vec![],
-                            )
-                            .await
-                            .unwrap();
-                        received.push(msg);
+                        received.push(stream.next().await.unwrap().unwrap());
                     }
 
                     received
@@ -1749,10 +1844,329 @@ mod tests {
         });
     }
 
-    /// Hands over a connection that yielded a whole message, and read `cut` up to `at`, and
-    /// checks what it handed over. Gives the bytes that it handed over.
+    /// A connection that takes over a channel puts the messages that come over the channel after
+    /// those that it was handed, so its streams, joined in the order of the positions of their
+    /// messages, yield them in the order that they came in.
+    #[test]
+    #[timeout(15000)]
+    fn messages_after_a_take_over_are_ordered_after_those_handed_over() {
+        under_every_runtime(|runtime| async move {
+            let (mut stream, peer) = channel_pair(&runtime).await;
+            let mut probe = stream.clone();
+            let [handed, live] = ["Handed", "Live"]
+                .map(|member| Message::signal(PATH, INTERFACE, member).build(&()).unwrap());
+
+            peer.send(&handed).await.unwrap();
+            // Queued on the stream, which hands it over.
+            probe.next().await.unwrap().unwrap();
+            let handover = stream.hand_over().await.unwrap();
+            let mut stream = on(Builder::take_over(handover), &runtime)
+                .build_message_stream()
+                .await
+                .unwrap();
+            // A clone has what the stream has queued, and gets what the stream gets.
+            let only = |member: &'static str| {
+                let is_member = move |msg: &Result<Message>| {
+                    msg.as_ref()
+                        .is_ok_and(|msg| msg.header().member().unwrap().as_str() == member)
+                };
+
+                ordered_stream::OrderedStreamExt::filter(stream.clone(), is_member)
+            };
+            let joined = ordered_stream::join(only("Handed"), only("Live"));
+            peer.send(&live).await.unwrap();
+            let received = [
+                stream.next().await.unwrap().unwrap(),
+                stream.next().await.unwrap().unwrap(),
+            ];
+
+            assert_eq!(members(&received), ["Handed", "Live"]);
+            assert!(
+                received[0].recv_position() < received[1].recv_position(),
+                "{received:?}"
+            );
+            // Both are queued on the clones by now.
+            let joined: Vec<_> = ordered_stream::OrderedStreamExt::into_stream(joined)
+                .take(2)
+                .map(Result::unwrap)
+                .collect()
+                .await;
+            assert_eq!(members(&joined), ["Handed", "Live"]);
+        });
+    }
+
+    /// A connection over halves of your own, whose read half only receives bytes and says that it
+    /// can take out what it read, is handed over in the middle of a message as its halves, and a
+    /// connection that takes over goes on with that message.
     #[cfg(unix)]
-    async fn hand_over_in_the_middle_of(runtime: &Runtime, cut: &Message, at: usize) -> Vec<u8> {
+    #[test]
+    #[timeout(15000)]
+    fn a_connection_over_halves_of_your_own_is_taken_over() {
+        under_every_runtime(|runtime| async move {
+            let (peer, theirs) = UnixStream::pair().unwrap();
+            let probe = theirs.try_clone().unwrap();
+            let split = recvmsg_only(&runtime, theirs, true);
+            let mut stream = on(
+                Builder::authenticated_socket(split, Guid::generate()),
+                &runtime,
+            )
+            .p2p()
+            .build_message_stream()
+            .await
+            .unwrap();
+            let msgs = [1, 2, 3].map(signal);
+
+            let mut sent = msgs[0].data().to_vec();
+            sent.extend_from_slice(&msgs[1].data()[..10]);
+            (&peer).write_all(&sent).unwrap();
+            let received = stream.next().await.unwrap().unwrap();
+            assert_eq!(&received.data()[..], &msgs[0].data()[..]);
+            wait_until(|| rustix::io::ioctl_fionread(&probe).unwrap() == 0);
+            let handover = stream.hand_over().await.unwrap();
+
+            assert_eq!(handover.unread_bytes, &msgs[1].data()[..10]);
+            assert!(
+                matches!(handover.socket, HandoverSocket::Socket(_)),
+                "halves of your own were handed over as {:?}",
+                handover.socket,
+            );
+            let mut stream = on(Builder::take_over(handover), &runtime)
+                .build_message_stream()
+                .await
+                .unwrap();
+            let mut rest = msgs[1].data()[10..].to_vec();
+            rest.extend_from_slice(&msgs[2].data()[..]);
+            (&peer).write_all(&rest).unwrap();
+            for sent in &msgs[1..] {
+                let received = stream.next().await.unwrap().unwrap();
+                assert_eq!(&received.data()[..], &sent.data()[..]);
+            }
+        });
+    }
+
+    /// A hand-over that left bytes or file descriptors unread isn't taken over through a read half
+    /// that can't take them, while one that left nothing unread is.
+    #[cfg(unix)]
+    #[test]
+    #[timeout(15000)]
+    fn what_was_left_unread_isnt_taken_over_through_a_half_that_cant_take_it() {
+        under_every_runtime(|runtime| async move {
+            let msg = signal(1);
+            for (bytes, fds) in [(false, false), (true, false), (false, true)] {
+                let (peer, theirs) = UnixStream::pair().unwrap();
+                let split = recvmsg_only(&runtime, theirs, false);
+                let mut handover = p2p_handover(HandoverSocket::Socket(split));
+                if bytes {
+                    handover.unread_bytes = msg.data()[..10].to_vec();
+                }
+                if fds {
+                    handover.unread_fds = vec![pipe()];
+                }
+
+                let built = on(Builder::take_over(handover), &runtime).build().await;
+
+                if bytes || fds {
+                    assert!(matches!(built, Err(Error::Unsupported)), "{built:?}");
+                    continue;
+                }
+                let conn = built.unwrap();
+                let mut stream = MessageStream::from(&conn);
+                (&peer).write_all(&msg.data()[..]).unwrap();
+                let received = stream.next().await.unwrap().unwrap();
+                assert_eq!(&received.data()[..], &msg.data()[..]);
+            }
+        });
+    }
+
+    /// The read half of a channel says that it can take what a hand-over left unread, while it
+    /// takes whole messages only, so a connection that takes over a channel with part of a message
+    /// left unread builds, and then ends on it.
+    #[test]
+    #[timeout(15000)]
+    fn a_channel_taken_over_with_part_of_a_message_left_unread_ends_on_it() {
+        under_every_runtime(|runtime| async move {
+            let (ours, _theirs) = Channel::pair();
+            let mut handover = p2p_handover(HandoverSocket::Socket(ours.into()));
+            handover.unread_bytes = signal(1).data()[..10].to_vec();
+
+            let conn = on(Builder::take_over(handover), &runtime)
+                .build()
+                .await
+                .unwrap();
+
+            // A call fails on what ended the connection, whether it is made before the end or
+            // after.
+            let call = conn
+                .call_method(None::<()>, PATH, Some(INTERFACE), "Late", &())
+                .await;
+            let Err(Error::InputOutput(e)) = &call else {
+                panic!("the call didn't fail on the part of a message left unread: {call:?}");
+            };
+            assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{e}");
+        });
+    }
+
+    /// A hand-over of a connection to a bus isn't taken over as a peer-to-peer connection.
+    #[test]
+    #[timeout(15000)]
+    fn a_bus_connection_isnt_taken_over_as_a_peer_to_peer_one() {
+        under_every_runtime(|runtime| async move {
+            let (ours, _theirs) = Channel::pair();
+            let mut handover = p2p_handover(HandoverSocket::Socket(ours.into()));
+            handover.p2p = false;
+
+            let built = on(Builder::take_over(handover), &runtime)
+                .p2p()
+                .build()
+                .await;
+
+            assert!(matches!(built, Err(Error::Unsupported)), "{built:?}");
+        });
+    }
+
+    /// Once a connection took over, the messages that the process builds get serial numbers from
+    /// the one that the hand-over gives on. A hand-over that gives a lower one doesn't lower them.
+    #[test]
+    #[timeout(15000)]
+    fn serial_numbers_go_on_from_that_of_the_hand_over() {
+        under_every_runtime(|runtime| async move {
+            // Other tests build messages meanwhile, which only raises the serial numbers further.
+            let floor = next_serial().checked_add(1000).unwrap();
+            for next in [floor, NonZeroU32::MIN] {
+                let (ours, _theirs) = Channel::pair();
+                let mut handover = p2p_handover(HandoverSocket::Socket(ours.into()));
+                handover.next_serial = next;
+
+                let _conn = on(Builder::take_over(handover), &runtime)
+                    .build()
+                    .await
+                    .unwrap();
+
+                let serial = signal(1).primary_header().serial_num();
+                assert!(serial >= floor, "{serial} is below {floor}");
+            }
+        });
+    }
+
+    /// A connection to a bus that takes over has the unique name of the hand-over, and says no
+    /// `Hello`: the first message that the bus gets from it is the first one that it sends.
+    #[cfg(unix)]
+    #[test]
+    #[timeout(15000)]
+    fn a_bus_connection_takes_over_with_its_unique_name() {
+        under_every_runtime(|runtime| async move {
+            // A peer-to-peer connection plays the bus.
+            let (mut bus_stream, ours) = over_a_socket_pair(&runtime).await;
+
+            let conn = on(Builder::take_over(bus_handover(ours)), &runtime)
+                .build()
+                .await
+                .unwrap();
+
+            assert!(
+                conn.is_bus(),
+                "a bus connection was taken over as a peer-to-peer one"
+            );
+            assert_eq!(conn.unique_name().unwrap().as_str(), UNIQUE_NAME);
+            conn.emit_signal(None::<()>, PATH, INTERFACE, "Test", &())
+                .await
+                .unwrap();
+            let msg = bus_stream.next().await.unwrap().unwrap();
+            assert_eq!(msg.message_type(), Type::Signal);
+            assert_eq!(msg.header().sender().unwrap(), UNIQUE_NAME);
+        });
+    }
+
+    /// An interface served on a connection to a bus that took over gets the method calls to the
+    /// unique name of the hand-over.
+    #[cfg(all(unix, feature = "service"))]
+    #[test]
+    #[timeout(15000)]
+    fn a_bus_connection_that_took_over_serves_calls_to_its_unique_name() {
+        under_every_runtime(|runtime| async move {
+            let (bus, ours) = over_a_socket_pair(&runtime).await;
+            let bus = Connection::from(&bus);
+
+            let _conn = on(Builder::take_over(bus_handover(ours)), &runtime)
+                .serve_at(PATH, Echo)
+                .build()
+                .await
+                .unwrap();
+
+            let reply = bus
+                .call_method(Some(UNIQUE_NAME), PATH, Some(INTERFACE), "Echo", &"hello")
+                .await
+                .unwrap();
+            assert_eq!(reply.body().deserialize::<String>().unwrap(), "hello");
+        });
+    }
+
+    /// A method call that a connection left unread goes to the interface served on the connection
+    /// that takes over, which replies to it.
+    #[cfg(all(unix, feature = "service"))]
+    #[test]
+    #[timeout(15000)]
+    fn a_method_call_left_unread_is_served_once_taken_over() {
+        under_every_runtime(|runtime| async move {
+            let (mut peer_stream, ours) = over_a_socket_pair(&runtime).await;
+            let call = Message::method_call(PATH, "Echo")
+                .interface(INTERFACE)
+                .build(&"left unread")
+                .unwrap();
+            let mut handover = p2p_handover(HandoverSocket::UnixStream(ours));
+            handover.unread_bytes = call.data().to_vec();
+
+            let _conn = on(Builder::take_over(handover), &runtime)
+                .serve_at(PATH, Echo)
+                .build()
+                .await
+                .unwrap();
+
+            let reply = peer_stream.next().await.unwrap().unwrap();
+            assert_eq!(reply.message_type(), Type::MethodReturn);
+            assert_eq!(
+                reply.header().reply_serial(),
+                Some(call.primary_header().serial_num()),
+            );
+            assert_eq!(reply.body().deserialize::<&str>().unwrap(), "left unread");
+        });
+    }
+
+    /// A connection that checks the bodies of the messages that it receives checks those that it
+    /// takes over too.
+    #[cfg(all(unix, feature = "bus-impl"))]
+    #[test]
+    #[timeout(15000)]
+    fn the_bodies_of_messages_left_unread_are_checked() {
+        under_every_runtime(|runtime| async move {
+            let (_peer, ours) = UnixStream::pair().unwrap();
+            let builder = Message::signal(PATH, INTERFACE, "Test");
+            // SAFETY: The body carries no file descriptors, and the connection is to check it.
+            let invalid = unsafe { builder.build_raw_body(&[2, 0, 0, 0], "b", vec![]) }.unwrap();
+            let valid = signal(1);
+            let mut handover = p2p_handover(HandoverSocket::UnixStream(ours));
+            handover.unread_bytes = [&valid.data()[..], &invalid.data()[..]].concat();
+
+            let mut stream = on(Builder::take_over(handover).validate_bodies(), &runtime)
+                .build_message_stream()
+                .await
+                .unwrap();
+
+            let received = stream.next().await.unwrap().unwrap();
+            assert_eq!(&received.data()[..], &valid.data()[..]);
+            let error = stream.next().await.unwrap().unwrap_err();
+            assert!(matches!(error, Error::Failure(_)), "{error:?}");
+            assert!(
+                stream.next().await.is_none(),
+                "the stream outlived its error"
+            );
+        });
+    }
+
+    /// Hands over a connection that yielded a whole message, and read `cut` up to `at`, checks what
+    /// it handed over, and takes it over. Gives how much room the bytes that it handed over had.
+    #[cfg(unix)]
+    async fn hand_over_in_the_middle_of(runtime: &Runtime, cut: &Message, at: usize) -> usize {
         let (mut stream, peer, probe) = served(runtime).await;
         let conn = Connection::from(&stream);
         let (whole, last) = (signal(1), signal(3));
@@ -1778,41 +2192,70 @@ mod tests {
         assert!(handover.unix_fd_passing);
         assert!(handover.p2p);
         assert!(handover.next_serial > last.primary_header().serial_num());
-        let socket = match handover.socket {
-            HandoverSocket::UnixStream(socket) => socket,
-            socket => panic!("a unix socket was handed over as {socket:?}"),
-        };
-        // The peer goes on where it was, and the socket that was handed over carries the rest.
+        assert!(
+            matches!(handover.socket, HandoverSocket::UnixStream(_)),
+            "a unix socket was handed over as {:?}",
+            handover.socket,
+        );
+        let room = handover.unread_bytes.capacity();
+        let guid = handover.server_guid.clone();
+        // The connection that takes over has nothing to do with the one that was handed over.
+        drop(conn);
+        let mut stream = on(Builder::take_over(handover), runtime)
+            .build_message_stream()
+            .await
+            .unwrap();
+        let conn = Connection::from(&stream);
+        assert_eq!(conn.server_guid(), &guid);
+        assert!(
+            conn.inner.cap_unix_fd,
+            "the connection that took over can't pass file descriptors",
+        );
+
+        // The peer goes on where it was.
         let mut rest = cut.data()[at..].to_vec();
         rest.extend_from_slice(&last.data()[..]);
         (&peer).write_all(&rest).unwrap();
-        // It is non-blocking as the connection left it.
-        socket.set_nonblocking(false).unwrap();
-        let mut received = vec![0; rest.len()];
-        (&socket).read_exact(&mut received).unwrap();
-        assert_eq!(received, rest);
 
-        handover.unread_bytes
+        for sent in [cut, &last] {
+            let received = stream.next().await.unwrap().unwrap();
+            assert_eq!(&received.data()[..], &sent.data()[..]);
+        }
+
+        // The connection that took over is handed over in turn, in the middle of a message too.
+        (&peer).write_all(&cut.data()[..at]).unwrap();
+        wait_until(|| rustix::io::ioctl_fionread(&probe).unwrap() == 0);
+        let handover = stream.hand_over().await.unwrap();
+        assert_eq!(handover.unread_bytes, &cut.data()[..at]);
+        assert!(
+            matches!(handover.socket, HandoverSocket::UnixStream(_)),
+            "a unix socket was handed over again as {:?}",
+            handover.socket,
+        );
+
+        room
     }
 
     /// The halves of `socket`, registered on `runtime`, of which the read half only receives
-    /// bytes.
+    /// bytes, and says that it can take out what it read as `can_take_unread` says.
     #[cfg(unix)]
-    fn recvmsg_only(runtime: &Runtime, socket: UnixStream) -> BoxedSplit {
+    fn recvmsg_only(runtime: &Runtime, socket: UnixStream, can_take_unread: bool) -> BoxedSplit {
         let socket = Arc::new(registered(runtime, socket, UnixOps).unwrap());
         let read = RecvmsgOnly {
             socket: socket.clone(),
+            can_take_unread,
         };
 
         Split::new(Box::new(read), Box::new(socket) as Box<dyn WriteHalf>)
     }
 
     /// A read half that only receives bytes, and leaves everything else to the defaults of
-    /// `ReadHalf`.
+    /// `ReadHalf`, but for whether it can take out what it read.
     #[cfg(unix)]
     #[derive(Debug)]
     struct RecvmsgOnly {
         socket: Arc<RegisteredIo<UnixOps>>,
+        can_take_unread: bool,
     }
 
     #[cfg(unix)]
@@ -1820,6 +2263,12 @@ mod tests {
     impl ReadHalf for RecvmsgOnly {
         async fn recvmsg(&mut self, buffer: &mut [u8]) -> RecvmsgResult {
             self.socket.recv(buffer).await
+        }
+
+        // Whether it says so is up to the test. It could, as the default `receive_message` keeps
+        // all that it reads in what it is given, and a receipt that is dropped loses nothing.
+        fn can_take_unread(&self) -> bool {
+            self.can_take_unread
         }
     }
 
@@ -1880,6 +2329,24 @@ mod tests {
         wait_until(|| conn.inner.msg_receiver.len() == 2);
 
         queued
+    }
+
+    /// A hand-over of a peer-to-peer connection over `socket`, with nothing left unread.
+    fn p2p_handover(socket: HandoverSocket) -> Handover {
+        let mut handover = Handover::new(socket, Guid::generate().into());
+        handover.p2p = true;
+
+        handover
+    }
+
+    /// A hand-over of a connection to a bus over `socket`, whose unique name is `UNIQUE_NAME`.
+    #[cfg(unix)]
+    fn bus_handover(socket: UnixStream) -> Handover {
+        let mut handover =
+            Handover::new(HandoverSocket::UnixStream(socket), Guid::generate().into());
+        handover.unique_name = Some(UNIQUE_NAME.try_into().unwrap());
+
+        handover
     }
 
     /// Polls `sending` until it wrote part of its message to the socket of `peer`, which doesn't
@@ -1956,20 +2423,6 @@ mod tests {
         assert_eq!(received, &msg.data()[..]);
     }
 
-    /// The messages that `bytes` hold, one after the other.
-    fn messages_of(mut bytes: &[u8]) -> Vec<Message> {
-        let mut msgs = vec![];
-        while !bytes.is_empty() {
-            let (primary_header, len) = read_primary_header(bytes).unwrap();
-            let ctxt = Context::new(Endian::from(primary_header.endian_sig()), 0);
-            let data = Data::new(bytes[..len].to_vec(), ctxt);
-            msgs.push(Message::from_raw_parts(data, 0).unwrap());
-            bytes = &bytes[len..];
-        }
-
-        msgs
-    }
-
     /// The stream of a connection and its peer, over a channel, both on `runtime`.
     async fn channel_pair(runtime: &Runtime) -> (MessageStream, Connection) {
         let guid = Guid::generate();
@@ -2036,6 +2489,13 @@ mod tests {
         Message::signal(PATH, INTERFACE, "Test").build(&n).unwrap()
     }
 
+    /// The members of `msgs`.
+    fn members(msgs: &[Message]) -> Vec<String> {
+        msgs.iter()
+            .map(|msg| msg.header().member().unwrap().to_string())
+            .collect()
+    }
+
     /// A signal longer than the buffer of a socket holds.
     #[cfg(unix)]
     fn big_signal() -> Message {
@@ -2052,6 +2512,21 @@ mod tests {
         }
     }
 
+    /// An interface that answers a call with what it was given.
+    #[cfg(all(unix, feature = "service"))]
+    struct Echo;
+
+    #[cfg(all(unix, feature = "service"))]
+    #[crate::interface(name = "org.zbus.Test")]
+    impl Echo {
+        fn echo(&self, text: String) -> String {
+            text
+        }
+    }
+
     const PATH: &str = "/org/zbus/Test";
     const INTERFACE: &str = "org.zbus.Test";
+    /// The unique name that a bus gave a connection that it handed over.
+    #[cfg(unix)]
+    const UNIQUE_NAME: &str = ":1.42";
 }

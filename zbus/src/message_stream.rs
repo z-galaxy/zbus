@@ -219,7 +219,8 @@ impl MessageStream {
     }
 
     /// Hand the connection of this stream over, for a connection in this process or in another
-    /// one to go on from where it stopped.
+    /// one to go on from where it stopped, through
+    /// [`Builder::take_over`](crate::connection::Builder::take_over).
     ///
     /// [The module of the hand-over](crate::connection::handover) tells how it goes. The stream is
     /// to be one that has had every message of its connection, from the first, as the one that

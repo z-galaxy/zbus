@@ -1291,6 +1291,124 @@ fn descriptors_taken_over_wait_as_one_set() {
     }
 }
 
+/// A reader that takes over the start of a message longer than its buffer grows the buffer to hold
+/// it, and gives that room back once the message moves into an allocation of its own: the read
+/// after the message has no more room than that of a reader that took nothing over.
+#[cfg(all(unix, feature = "handover"))]
+#[test]
+#[timeout(15000)]
+fn a_reader_gives_back_the_room_that_it_grew_its_buffer_by() {
+    let long = Message::method_call("/", "Test")
+        .build(&vec![0u8; 64 * 1024])
+        .unwrap();
+    let short = Message::method_call("/", "Test").build(&()).unwrap();
+    let taken_over = 32 * 1024;
+
+    under_every_runtime(|runtime| {
+        let (long, short) = (&long, &short);
+
+        async move {
+            let buffer = room_of_a_fresh_reader(&runtime, short).await;
+            assert!(
+                buffer < taken_over,
+                "the buffer of a reader holds {buffer} bytes"
+            );
+
+            let rooms = Arc::new(Mutex::new(vec![]));
+            let script = VecDeque::from([
+                (long.data()[taken_over..].to_vec(), vec![]),
+                (short.data().to_vec(), vec![]),
+            ]);
+            let ops = Rooms(Scripted(Mutex::new(script)), rooms.clone());
+            let (mut reader, _peer) = scripted(&runtime, ops);
+            let mut unread = long.data()[..taken_over].to_vec();
+            for (seq, sent) in [long, short].into_iter().enumerate() {
+                let received = reader
+                    .receive_message(seq as u64, &mut unread, &mut vec![])
+                    .await
+                    .unwrap();
+                assert_eq!(&received.data()[..], &sent.data()[..]);
+            }
+
+            // The first read is into the allocation of the long message, the second into the
+            // buffer.
+            let rest = long.data().len() - taken_over;
+            assert_eq!(*rooms.lock().unwrap(), [rest, buffer]);
+        }
+    });
+}
+
+/// A reader that takes over many long messages, as a connection that was handed over with a
+/// backlog leaves unread, grows its buffer to hold them all, and gives that room back once it took
+/// them out, whether the last of them is whole, or comes in part and moves into an allocation of
+/// its own: the read after the messages has no more room than that of a reader that took nothing
+/// over.
+#[cfg(all(unix, feature = "handover"))]
+#[test]
+#[timeout(15000)]
+fn a_reader_gives_back_the_room_of_the_messages_that_it_took_over() {
+    let long = |n: u8| {
+        Message::method_call("/", "Test")
+            .build(&vec![n; 256 * 1024])
+            .unwrap()
+    };
+    let msgs = [long(1), long(2), long(3), long(4)];
+    let short = Message::method_call("/", "Test").build(&()).unwrap();
+    let last = msgs[3].data().len();
+
+    under_every_runtime(|runtime| {
+        let (msgs, short) = (&msgs, &short);
+
+        async move {
+            let buffer = room_of_a_fresh_reader(&runtime, short).await;
+
+            // However much of the last message was taken over.
+            for taken_over in [last, 32 * 1024] {
+                let rest = &msgs[3].data()[taken_over..];
+                let mut script = VecDeque::from([(short.data().to_vec(), vec![])]);
+                if !rest.is_empty() {
+                    script.push_front((rest.to_vec(), vec![]));
+                }
+                let rooms = Arc::new(Mutex::new(vec![]));
+                let ops = Rooms(Scripted(Mutex::new(script)), rooms.clone());
+                let (mut reader, _peer) = scripted(&runtime, ops);
+                let mut unread: Vec<u8> = msgs.iter().flat_map(|msg| msg.data().to_vec()).collect();
+                unread.truncate(unread.len() - rest.len());
+                for (seq, sent) in msgs.iter().chain([short]).enumerate() {
+                    let received = reader
+                        .receive_message(seq as u64, &mut unread, &mut vec![])
+                        .await
+                        .unwrap();
+                    assert_eq!(&received.data()[..], &sent.data()[..]);
+                }
+
+                // The rest of the last message, if any, is read into an allocation of its own.
+                let mut reads = vec![];
+                if !rest.is_empty() {
+                    reads.push(rest.len());
+                }
+                reads.push(buffer);
+                assert_eq!(*rooms.lock().unwrap(), reads, "taken over: {taken_over}");
+            }
+        }
+    });
+}
+
+/// The room of the read of a reader that took nothing over, and reads `msg`.
+#[cfg(all(unix, feature = "handover"))]
+async fn room_of_a_fresh_reader(runtime: &Runtime, msg: &Message) -> usize {
+    let rooms = Arc::new(Mutex::new(vec![]));
+    let script = VecDeque::from([(msg.data().to_vec(), vec![])]);
+    let ops = Rooms(Scripted(Mutex::new(script)), rooms.clone());
+    let (mut fresh, _peer) = scripted(runtime, ops);
+    fresh
+        .receive_message(0, &mut vec![], &mut vec![])
+        .await
+        .unwrap();
+
+    rooms.lock().unwrap()[0]
+}
+
 /// Polls `call` until it waits with `stalled` set, that is for a read that found that the peer
 /// sends nothing more, and drops it there.
 ///
@@ -1339,6 +1457,33 @@ impl SocketOps for Stalling {
 
             return Err(std::io::ErrorKind::WouldBlock.into());
         }
+
+        self.0.recv(source, buffer)
+    }
+
+    fn send(
+        &self,
+        source: &IoSource,
+        buffers: &[IoSlice<'_>],
+        fds: &[BorrowedFd<'_>],
+    ) -> std::io::Result<usize> {
+        self.0.send(source, buffers, fds)
+    }
+
+    fn can_pass_unix_fd(&self) -> bool {
+        true
+    }
+}
+
+/// The operations of a [`Scripted`] socket that note how much room each read is given.
+#[cfg(all(unix, feature = "handover"))]
+#[derive(Debug)]
+struct Rooms(Scripted, Arc<Mutex<Vec<usize>>>);
+
+#[cfg(all(unix, feature = "handover"))]
+impl SocketOps for Rooms {
+    fn recv(&self, source: &IoSource, buffer: &mut [u8]) -> RecvmsgResult {
+        self.1.lock().unwrap().push(buffer.len());
 
         self.0.recv(source, buffer)
     }

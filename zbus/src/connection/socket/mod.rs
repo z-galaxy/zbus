@@ -211,7 +211,8 @@ pub trait ReadHalf: std::fmt::Debug + Send + Sync + 'static {
         doc = "   A half that can take what it left unread ([`ReadHalf::can_take_unread`]) is the \
                exception: it has to take these ahead of anything that it reads, or fail on them if \
                it can't make messages of them, as they are also how a connection that takes over \
-               gets what the other one left unread."
+               ([`Builder::take_over`](crate::connection::Builder::take_over)) gets what the \
+               other one left unread."
     )]
     /// - `already_received_fds`: Same goes for file descriptors belonging to first messages.
     ///
@@ -334,8 +335,8 @@ pub trait ReadHalf: std::fmt::Debug + Send + Sync + 'static {
     ///   `take_unread` to take out.
     /// * `receive_message` takes `already_received_bytes` and `already_received_fds` ahead of
     ///   anything that it reads, or fails on them if it can't make messages of them, rather than
-    ///   leave them behind. That is how a connection that takes over gets what the other one left
-    ///   unread.
+    ///   leave them behind. That is how a connection that takes over ([`Builder::take_over`]) gets
+    ///   what the other one left unread.
     /// * `receive_message` fails with an I/O error of kind
     ///   [`UnexpectedEof`](io::ErrorKind::UnexpectedEof) at the end of the input, once the peer
     ///   closed its end of the socket, as the default implementation does, and with no error of
@@ -360,10 +361,14 @@ pub trait ReadHalf: std::fmt::Debug + Send + Sync + 'static {
     /// channel being closed.
     ///
     /// The default implementation returns `false`. Then [`MessageStream::hand_over`] fails with
-    /// [`Error::Unsupported`] for a connection over this half.
+    /// [`Error::Unsupported`] for a connection over this half, and so does [`Builder::build`] for a
+    /// connection that takes over ([`Builder::take_over`]) a hand-over that holds unread bytes or
+    /// file descriptors.
     ///
     /// This method is only available when the `handover` feature is enabled.
     ///
+    /// [`Builder::build`]: crate::connection::Builder::build
+    /// [`Builder::take_over`]: crate::connection::Builder::take_over
     /// [`Error::Unsupported`]: crate::Error::Unsupported
     /// [`MessageStream::hand_over`]: crate::MessageStream::hand_over
     #[cfg(feature = "handover")]
