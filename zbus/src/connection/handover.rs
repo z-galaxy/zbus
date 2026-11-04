@@ -18,7 +18,18 @@
 //!    socket, the messages that were queued on the stream and that it did not yield, what the
 //!    connection read off the socket after them and made no message of yet, the file descriptors
 //!    that came with all of those, and what a connection that goes on needs to know of this one.
-//! 4. Build the connection that goes on, in this process or in another one that the hand-over is
+#![cfg_attr(
+    unix,
+    doc = "4. To pass the hand-over to another process, or to keep it while this one restarts, \
+           such as in the file descriptor store of systemd, turn it into bytes and file \
+           descriptors with [`Handover::encode`], and back with [`Handover::decode`]."
+)]
+#![cfg_attr(
+    not(unix),
+    doc = "4. To pass the hand-over to another process, pass its socket on, and build it again \
+           there with [`Handover::new`]."
+)]
+//! 5. Build the connection that goes on, in this process or in another one that the hand-over is
 //!    passed to, with [`Builder::take_over`], and its stream with `build_message_stream`. It yields
 //!    the messages of the hand-over first, then goes on reading the socket where the other one
 //!    stopped, and it can be handed over in turn.
@@ -48,8 +59,14 @@
 //! # Example
 //!
 //! ```
-//! use zbus::{Connection, block_on, connection::Builder};
+//! use zbus::{
+//!     Connection, block_on,
+//!     connection::{Builder, Handover},
+//! };
 //!
+//! # #[cfg(not(unix))]
+//! # fn main() {}
+//! # #[cfg(unix)]
 //! # fn main() -> zbus::Result<()> {
 //! block_on(async {
 //!     let mut stream = Builder::session().build_message_stream().await?;
@@ -58,6 +75,11 @@
 //!     // hand the connection over.
 //!
 //!     let handover = stream.hand_over().await?;
+//!     let (bytes, fds) = handover.encode()?;
+//!
+//!     // Pass `bytes` and `fds` on, such as to the file descriptor store of systemd, and get them
+//!     // back, such as in the next instance of the service.
+//!     let handover = Handover::decode(&bytes, fds)?;
 //!
 //!     // The connection goes on, with the name that the bus knows it by.
 //!     let stream = Builder::take_over(handover).build_message_stream().await?;
@@ -105,6 +127,8 @@ use std::{
 };
 
 use futures_core::Stream;
+#[cfg(unix)]
+use serde::{Serialize, Serializer};
 #[cfg(windows)]
 use uds_windows::UnixStream;
 use zruntime::{
@@ -121,6 +145,14 @@ use crate::{
     message,
     names::OwnedUniqueName,
 };
+#[cfg(unix)]
+use crate::{
+    Guid,
+    wire::{
+        self, LE, Signature, Type,
+        serialized::{Context, Data},
+    },
+};
 
 /// A connection taken apart by [`MessageStream::hand_over`], for [`Builder::take_over`] to build a
 /// connection that goes on from where it stopped.
@@ -132,10 +164,17 @@ use crate::{
 /// This type is only available when the `handover` feature is enabled.
 ///
 /// # Passing it to another process
-///
-/// Pass on the descriptors: the socket's and, on unix, those of `unread_fds`, in their order, such
-/// as over a unix socket or through systemd's file descriptor store. Pass the other fields on as
-/// data. Then build it again there with [`Handover::new`] and set the fields.
+#[cfg_attr(
+    unix,
+    doc = "[`Handover::encode`] turns it into bytes and file descriptors, which can be passed on \
+           over a unix socket or kept in the file descriptor store of systemd, and \
+           [`Handover::decode`] turns those back into a hand-over."
+)]
+#[cfg_attr(
+    not(unix),
+    doc = "Pass on the descriptor of the socket. Pass the other fields on as data. Then build it \
+           again there with [`Handover::new`] and set the fields."
+)]
 ///
 /// `unread_bytes` holds the messages that were queued on the stream, and the start of one that the
 /// peer was in the middle of sending, which can be as long as the longest message that D-Bus
@@ -208,6 +247,128 @@ impl Handover {
             p2p: false,
             next_serial: NonZeroU32::MIN,
         }
+    }
+
+    /// Turn the hand-over into bytes and file descriptors, to pass it to another process, such as
+    /// over a unix socket, or to keep it while this one restarts, such as in the file descriptor
+    /// store of systemd.
+    ///
+    /// The file descriptors are the socket's, followed by those of `unread_fds`, in their order.
+    /// Pass them all on, in this order, along with the bytes, and turn them back into a hand-over
+    /// with [`Handover::decode`].
+    ///
+    /// The bytes are a format version, in a byte of its own, followed by the other fields in the
+    /// D-Bus wire format, little-endian. The format is kept stable: a later version of zbus decodes
+    /// the bytes that this one encodes, as a service that restarts after an update needs. A version
+    /// of zbus that doesn't know the format version of the bytes, as an earlier one may not,
+    /// refuses them.
+    ///
+    /// # Errors
+    ///
+    /// * [`Error::Unsupported`] for the hand-over of a connection over a socket of your own
+    ///   ([`HandoverSocket::Socket`]), which has no descriptor to pass on.
+    /// * An I/O error ([`Error::InputOutput`]) of kind `InvalidInput` for more unread bytes than
+    ///   the wire format can hold (4 GiB).
+    ///
+    /// As this takes the hand-over, a failure drops it, which closes its socket. Check its socket
+    /// first if it may be a socket of your own.
+    #[cfg(unix)]
+    pub fn encode(self) -> Result<(Vec<u8>, Vec<OwnedFd>)> {
+        let socket = match self.socket {
+            HandoverSocket::UnixStream(stream) => (ENCODED_UNIX_STREAM, OwnedFd::from(stream)),
+            HandoverSocket::TcpStream(stream) => (ENCODED_TCP_STREAM, OwnedFd::from(stream)),
+            HandoverSocket::Socket(_) => return Err(Error::Unsupported),
+        };
+        let (kind, socket) = socket;
+        if u32::try_from(self.unread_bytes.len()).is_err() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the unread bytes are too many for the wire format",
+            )
+            .into());
+        }
+        let fields = (
+            kind,
+            self.server_guid.as_str(),
+            self.unique_name.as_deref().map_or("", |name| name.as_str()),
+            Bytes(&self.unread_bytes),
+            self.unread_fds.len() as u32,
+            self.unix_fd_passing,
+            // Encoded whatever the features of this build, so that every build decodes it.
+            #[cfg(feature = "p2p")]
+            self.p2p,
+            #[cfg(not(feature = "p2p"))]
+            false,
+            self.next_serial.get(),
+        );
+        let encoded = wire::to_bytes(Context::new(LE, 0), &fields)?;
+        let mut bytes = Vec::with_capacity(1 + encoded.len());
+        bytes.push(ENCODING_VERSION);
+        bytes.extend_from_slice(&encoded);
+        let mut fds = Vec::with_capacity(1 + self.unread_fds.len());
+        fds.push(socket);
+        fds.extend(self.unread_fds);
+
+        Ok((bytes, fds))
+    }
+
+    /// Turn `bytes` and `fds`, which [`Handover::encode`] gave, back into a hand-over, in this
+    /// process or in another one.
+    ///
+    /// # Errors
+    ///
+    /// * [`Error::Unsupported`] for bytes of a format version that this version of zbus doesn't
+    ///   know, as one that a later version encoded may be, and for the hand-over of a peer-to-peer
+    ///   connection in a build without the `p2p` feature.
+    /// * An I/O error ([`Error::InputOutput`]) of kind `InvalidData` for bytes that are not what
+    ///   `encode` gives, or for a number of file descriptors other than the one that they count.
+    ///
+    /// The file descriptors are closed on an error.
+    #[cfg(unix)]
+    pub fn decode(bytes: &[u8], mut fds: Vec<OwnedFd>) -> Result<Handover> {
+        let (version, encoded) = bytes.split_first().ok_or_else(malformed)?;
+        if *version != ENCODING_VERSION {
+            return Err(Error::Unsupported);
+        }
+        let encoded = Data::new(encoded, Context::new(LE, 0));
+        let (fields, len) = encoded
+            .deserialize::<(u8, &str, &str, &[u8], u32, bool, bool, u32)>()
+            .map_err(|_| malformed())?;
+        let (kind, server_guid, unique_name, unread_bytes, fd_count, unix_fd_passing, p2p, next) =
+            fields;
+        // The socket's descriptor comes first. Counted without adding to `fd_count`, which can
+        // overflow on a 32-bit target.
+        if len != encoded.len() || fds.len().checked_sub(1) != Some(fd_count as usize) {
+            return Err(malformed());
+        }
+        let server_guid = Guid::try_from(server_guid).map_err(|_| malformed())?;
+        let unique_name = match unique_name {
+            "" => None,
+            name => Some(OwnedUniqueName::try_from(name).map_err(|_| malformed())?),
+        };
+        let next_serial = NonZeroU32::new(next).ok_or_else(malformed)?;
+        #[cfg(not(feature = "p2p"))]
+        if p2p {
+            return Err(Error::Unsupported);
+        }
+        let socket = fds.remove(0);
+        let socket = match kind {
+            ENCODED_UNIX_STREAM => HandoverSocket::UnixStream(UnixStream::from(socket)),
+            ENCODED_TCP_STREAM => HandoverSocket::TcpStream(TcpStream::from(socket)),
+            _ => return Err(malformed()),
+        };
+
+        Ok(Handover {
+            socket,
+            server_guid: server_guid.to_owned().into(),
+            unique_name,
+            unread_bytes: unread_bytes.to_vec(),
+            unread_fds: fds,
+            unix_fd_passing,
+            #[cfg(feature = "p2p")]
+            p2p,
+            next_serial,
+        })
     }
 }
 
@@ -874,6 +1035,44 @@ fn dup(source: &IoSource) -> io::Result<Owned> {
     borrowed.try_clone_to_owned()
 }
 
+/// Bytes that the wire format takes in one go, rather than one byte at a time, as an array of
+/// bytes.
+#[cfg(unix)]
+struct Bytes<'b>(&'b [u8]);
+
+#[cfg(unix)]
+impl Serialize for Bytes<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_bytes(self.0)
+    }
+}
+
+#[cfg(unix)]
+impl Type for Bytes<'_> {
+    const SIGNATURE: &'static Signature = <[u8]>::SIGNATURE;
+}
+
+/// The error of bytes or file descriptors that [`Handover::decode`] can make no hand-over of.
+#[cfg(unix)]
+fn malformed() -> Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        "not the bytes and file descriptors of a hand-over",
+    )
+    .into()
+}
+
+/// The version of the format that [`Handover::encode`] gives, which only ever goes up, for a format
+/// that a version of zbus that knows it decodes.
+#[cfg(unix)]
+const ENCODING_VERSION: u8 = 1;
+/// How [`Handover::encode`] gives a [`HandoverSocket::UnixStream`].
+#[cfg(unix)]
+const ENCODED_UNIX_STREAM: u8 = 0;
+/// How [`Handover::encode`] gives a [`HandoverSocket::TcpStream`].
+#[cfg(unix)]
+const ENCODED_TCP_STREAM: u8 = 1;
+
 /// What this platform owns a socket as.
 #[cfg(unix)]
 type Owned = OwnedFd;
@@ -955,6 +1154,7 @@ mod tests {
             socket::{BoxedSplit, ReadHalf, RecvmsgResult, Split, WriteHalf},
         },
         runtime::io::{RegisteredIo, UnixOps, registered},
+        wire::{self, LE, serialized::Context},
     };
     use crate::{
         Connection, Error, Guid, MatchRule, Message, MessageStream, Result,
@@ -2163,6 +2363,165 @@ mod tests {
         });
     }
 
+    /// A hand-over turned into bytes and file descriptors, and back, has every field that it had,
+    /// and a connection that takes over from it goes on where the one that was handed over
+    /// stopped, with the messages and the descriptors that it left unread.
+    #[cfg(unix)]
+    #[test]
+    #[timeout(15000)]
+    fn a_hand_over_goes_through_bytes_and_descriptors() {
+        under_every_runtime(|runtime| async move {
+            let (mut stream, peer, probe) = served(&runtime).await;
+            let pipes = [pipe(), pipe()];
+            let msgs = [
+                Message::signal(PATH, INTERFACE, "WithFds")
+                    .build(&crate::Fd::from(&pipes[0]))
+                    .unwrap(),
+                Message::signal(PATH, INTERFACE, "WithFds")
+                    .build(&crate::Fd::from(&pipes[1]))
+                    .unwrap(),
+            ];
+            send_with_fds(&peer, &msgs[0].data()[..], &[pipes[0].as_fd()]);
+            send_with_fds(&peer, &msgs[1].data()[..20], &[pipes[1].as_fd()]);
+            wait_until(|| rustix::io::ioctl_fionread(&probe).unwrap() == 0);
+            let mut handover = stream.hand_over().await.unwrap();
+            handover.unique_name = Some(UNIQUE_NAME.try_into().unwrap());
+            let unread_bytes = handover.unread_bytes.clone();
+            let next_serial = handover.next_serial;
+            let guid = handover.server_guid.clone();
+
+            let (bytes, fds) = handover.encode().unwrap();
+
+            assert_eq!(fds.len(), 3);
+            let handover = Handover::decode(&bytes, fds).unwrap();
+            assert!(
+                matches!(handover.socket, HandoverSocket::UnixStream(_)),
+                "a unix socket was decoded as {:?}",
+                handover.socket,
+            );
+            assert_eq!(handover.server_guid, guid);
+            assert_eq!(handover.unique_name.as_ref().unwrap().as_str(), UNIQUE_NAME);
+            assert_eq!(handover.unread_bytes, unread_bytes);
+            let inodes: Vec<_> = handover.unread_fds.iter().map(inode).collect();
+            assert_eq!(inodes, pipes.each_ref().map(inode));
+            assert!(handover.unix_fd_passing);
+            assert!(handover.p2p);
+            assert_eq!(handover.next_serial, next_serial);
+            let mut stream = on(Builder::take_over(handover), &runtime)
+                .build_message_stream()
+                .await
+                .unwrap();
+            assert_eq!(
+                Connection::from(&stream).unique_name().unwrap().as_str(),
+                UNIQUE_NAME
+            );
+            (&peer).write_all(&msgs[1].data()[20..]).unwrap();
+            for (sent, pipe) in msgs.iter().zip(&pipes) {
+                let received = stream.next().await.unwrap().unwrap();
+                assert_eq!(&received.data()[..], &sent.data()[..]);
+                let inodes: Vec<_> = received.data().fds().iter().map(inode).collect();
+                assert_eq!(inodes, [inode(pipe)]);
+            }
+        });
+    }
+
+    /// The hand-over of a connection to a bus over a TCP socket, with nothing left unread and no
+    /// passing of file descriptors, goes through bytes and file descriptors too.
+    #[cfg(unix)]
+    #[test]
+    fn a_tcp_hand_over_goes_through_bytes_and_descriptors() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let address = socket.local_addr().unwrap();
+        let mut handover =
+            Handover::new(HandoverSocket::TcpStream(socket), Guid::generate().into());
+        handover.next_serial = NonZeroU32::new(77).unwrap();
+        let guid = handover.server_guid.clone();
+
+        let (bytes, fds) = handover.encode().unwrap();
+
+        assert_eq!(fds.len(), 1);
+        let handover = Handover::decode(&bytes, fds).unwrap();
+        match &handover.socket {
+            HandoverSocket::TcpStream(socket) => assert_eq!(socket.local_addr().unwrap(), address),
+            socket => panic!("a TCP socket was decoded as {socket:?}"),
+        }
+        assert_eq!(handover.server_guid, guid);
+        assert!(handover.unique_name.is_none());
+        assert!(handover.unread_bytes.is_empty() && handover.unread_fds.is_empty());
+        assert!(!handover.unix_fd_passing);
+        assert!(!handover.p2p);
+        assert_eq!(handover.next_serial.get(), 77);
+    }
+
+    /// Bytes of a format version that this version of zbus doesn't know are refused.
+    #[cfg(unix)]
+    #[test]
+    fn an_unknown_format_version_is_refused() {
+        let (mut bytes, fds) = encoded();
+        bytes[0] += 1;
+
+        let decoded = Handover::decode(&bytes, fds);
+
+        assert!(matches!(decoded, Err(Error::Unsupported)), "{decoded:?}");
+    }
+
+    /// Bytes with more or fewer file descriptors than they count, bytes that are not those of a
+    /// hand-over, and bytes with a field that no hand-over has, such as an unknown kind of socket,
+    /// an invalid GUID or unique name, or a serial number of 0, are refused.
+    #[cfg(unix)]
+    #[test]
+    fn what_is_not_an_encoded_hand_over_is_refused() {
+        let (bytes, mut fds) = encoded();
+        fds.push(pipe());
+        assert_invalid_data(Handover::decode(&bytes, fds));
+
+        let (bytes, mut fds) = encoded();
+        fds.pop();
+        assert_invalid_data(Handover::decode(&bytes, fds));
+
+        let (bytes, fds) = encoded();
+        assert_invalid_data(Handover::decode(&bytes[..bytes.len() - 1], fds));
+
+        let (_, fds) = encoded();
+        assert_invalid_data(Handover::decode(&[], fds));
+
+        let guid = Guid::generate();
+        let decoded = Handover::decode(&encoded_fields(guid.as_str(), UNIQUE_NAME, 1), socket());
+        assert!(decoded.is_ok(), "{decoded:?}");
+
+        let mut bytes = encoded_fields(guid.as_str(), UNIQUE_NAME, 1);
+        bytes.push(0);
+        assert_invalid_data(Handover::decode(&bytes, socket()));
+
+        let mut bytes = encoded_fields(guid.as_str(), UNIQUE_NAME, 1);
+        // The kind of socket comes right after the format version.
+        bytes[1] = 2;
+        assert_invalid_data(Handover::decode(&bytes, socket()));
+
+        let bytes = encoded_fields("not a GUID", UNIQUE_NAME, 1);
+        assert_invalid_data(Handover::decode(&bytes, socket()));
+
+        let bytes = encoded_fields(guid.as_str(), "org.zbus.NotUnique", 1);
+        assert_invalid_data(Handover::decode(&bytes, socket()));
+
+        let bytes = encoded_fields(guid.as_str(), UNIQUE_NAME, 0);
+        assert_invalid_data(Handover::decode(&bytes, socket()));
+    }
+
+    /// The hand-over of a connection over a socket of your own has no descriptor to pass on, so it
+    /// isn't turned into bytes and file descriptors.
+    #[cfg(unix)]
+    #[test]
+    fn a_socket_of_your_own_is_not_encoded() {
+        let (ours, _theirs) = Channel::pair();
+        let handover = p2p_handover(HandoverSocket::Socket(ours.into()));
+
+        let encoded = handover.encode();
+
+        assert!(matches!(encoded, Err(Error::Unsupported)), "{encoded:?}");
+    }
+
     /// Hands over a connection that yielded a whole message, and read `cut` up to `at`, checks what
     /// it handed over, and takes it over. Gives how much room the bytes that it handed over had.
     #[cfg(unix)]
@@ -2331,6 +2690,18 @@ mod tests {
         queued
     }
 
+    /// The bytes and the file descriptors of a hand-over over one end of a new unix socket pair,
+    /// with a file descriptor left unread.
+    #[cfg(unix)]
+    fn encoded() -> (Vec<u8>, Vec<OwnedFd>) {
+        let (ours, _theirs) = UnixStream::pair().unwrap();
+        let mut handover = p2p_handover(HandoverSocket::UnixStream(ours));
+        handover.unread_bytes = signal(1).data().to_vec();
+        handover.unread_fds = vec![pipe()];
+
+        handover.encode().unwrap()
+    }
+
     /// A hand-over of a peer-to-peer connection over `socket`, with nothing left unread.
     fn p2p_handover(socket: HandoverSocket) -> Handover {
         let mut handover = Handover::new(socket, Guid::generate().into());
@@ -2479,6 +2850,42 @@ mod tests {
         assert_eq!(e.kind(), io::ErrorKind::UnexpectedEof, "{e}");
     }
 
+    /// The bytes that [`Handover::encode`] gives for a peer-to-peer hand-over over a unix socket,
+    /// with nothing left unread, with these fields, which can be ones that it never gives.
+    #[cfg(unix)]
+    fn encoded_fields(server_guid: &str, unique_name: &str, next_serial: u32) -> Vec<u8> {
+        let fields = (
+            super::ENCODED_UNIX_STREAM,
+            server_guid,
+            unique_name,
+            super::Bytes(&[]),
+            0u32,
+            false,
+            true,
+            next_serial,
+        );
+        let mut bytes = vec![super::ENCODING_VERSION];
+        bytes.extend_from_slice(&wire::to_bytes(Context::new(LE, 0), &fields).unwrap());
+
+        bytes
+    }
+
+    /// The file descriptors of a hand-over with no file descriptors left unread: a socket's.
+    #[cfg(unix)]
+    fn socket() -> Vec<OwnedFd> {
+        vec![UnixStream::pair().unwrap().0.into()]
+    }
+
+    /// Asserts that `result` is the error of bytes and file descriptors that are not those of a
+    /// hand-over.
+    #[cfg(unix)]
+    fn assert_invalid_data<T: Debug>(result: Result<T>) {
+        let Err(Error::InputOutput(e)) = &result else {
+            panic!("expected the error of what is not a hand-over: {result:?}");
+        };
+        assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{e}");
+    }
+
     /// A match rule for every signal.
     fn signals() -> MatchRule<'static> {
         MatchRule::builder().msg_type(Type::Signal).build().unwrap()
@@ -2529,4 +2936,66 @@ mod tests {
     /// The unique name that a bus gave a connection that it handed over.
     #[cfg(unix)]
     const UNIQUE_NAME: &str = ":1.42";
+}
+
+/// The tests of a build without the `p2p` feature, whose hand-overs are those of connections to a
+/// bus.
+#[cfg(all(test, unix, not(feature = "p2p")))]
+mod tests_without_p2p {
+    use std::{num::NonZeroU32, os::unix::net::UnixStream};
+
+    use super::{Handover, HandoverSocket};
+    use crate::{Error, Guid, OwnedGuid};
+
+    /// The hand-over of a connection to a bus goes through bytes and file descriptors.
+    #[test]
+    fn a_bus_hand_over_goes_through_bytes_and_descriptors() {
+        let (ours, _theirs) = UnixStream::pair().unwrap();
+        let mut handover = Handover::new(HandoverSocket::UnixStream(ours), guid());
+        handover.unique_name = Some(":1.42".try_into().unwrap());
+        handover.unread_bytes = vec![1, 2, 3];
+        handover.unix_fd_passing = true;
+        handover.next_serial = NonZeroU32::new(77).unwrap();
+        let guid = handover.server_guid.clone();
+
+        let (bytes, fds) = handover.encode().unwrap();
+
+        assert_eq!(fds.len(), 1);
+        let handover = Handover::decode(&bytes, fds).unwrap();
+        assert!(
+            matches!(handover.socket, HandoverSocket::UnixStream(_)),
+            "a unix socket was decoded as {:?}",
+            handover.socket,
+        );
+        assert_eq!(handover.server_guid, guid);
+        assert_eq!(handover.unique_name.unwrap().as_str(), ":1.42");
+        assert_eq!(handover.unread_bytes, [1, 2, 3]);
+        assert!(handover.unread_fds.is_empty());
+        assert!(handover.unix_fd_passing);
+        assert_eq!(handover.next_serial.get(), 77);
+    }
+
+    /// The hand-over of a peer-to-peer connection isn't decoded in a build that can't build one.
+    #[test]
+    fn a_peer_to_peer_hand_over_is_not_decoded() {
+        let (ours, _theirs) = UnixStream::pair().unwrap();
+        let handover = Handover::new(HandoverSocket::UnixStream(ours), guid());
+        let (mut bytes, fds) = handover.encode().unwrap();
+        // The bytes end with whether the connection is a peer-to-peer one and the next serial
+        // number, in 4 bytes each.
+        let p2p = bytes.len() - 8;
+        assert_eq!(bytes[p2p..p2p + 4], [0; 4]);
+        bytes[p2p] = 1;
+
+        let decoded = Handover::decode(&bytes, fds);
+
+        assert!(matches!(decoded, Err(Error::Unsupported)), "{decoded:?}");
+    }
+
+    /// The GUID of a server, which a build without the `p2p` feature can't generate.
+    fn guid() -> OwnedGuid {
+        Guid::from_static_str("0123456789abcdef0123456789abcdef")
+            .unwrap()
+            .into()
+    }
 }
