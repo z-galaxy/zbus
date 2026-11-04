@@ -60,6 +60,16 @@ impl SocketOps for UnixOps {
         cfg!(unix)
     }
 
+    #[cfg(unix)]
+    fn peer_credentials(
+        &self,
+        source: &IoSource,
+        runtime: &Runtime,
+    ) -> impl Future<Output = io::Result<ConnectionCredentials>> + Send {
+        peer_credentials(source.as_fd(), Some(runtime))
+    }
+
+    #[cfg(windows)]
     fn peer_credentials(
         &self,
         source: &IoSource,
@@ -105,18 +115,19 @@ pub(crate) fn unix_socket_address(
     SocketAddr::from_pathname(path)
 }
 
-/// The credentials of the peer of a unix socket.
+/// The credentials of the peer of the unix socket `fd`.
 ///
 /// The socket itself is asked on the calling thread: those are plain socket options. The
 /// supplementary groups the D-Bus specification asks for come out of NSS, which may go to a file,
-/// a daemon or the network, so that part goes to `runtime` — on the platforms that have such a
-/// lookup to make at all.
+/// a daemon or the network, so that part goes off the calling thread, on the platforms that have
+/// such a lookup to make at all: to `runtime`, that of the connection over the socket, if there is
+/// one, and as `unblock` tells otherwise.
 #[cfg(unix)]
-async fn peer_credentials(
-    source: &IoSource,
-    runtime: &Runtime,
+pub(crate) async fn peer_credentials(
+    fd: BorrowedFd<'_>,
+    runtime: Option<&Runtime>,
 ) -> io::Result<ConnectionCredentials> {
-    let (credentials, lookup) = socket_credentials(source.as_fd())?;
+    let (credentials, lookup) = socket_credentials(fd)?;
 
     Ok(lookup.complete(credentials, runtime).await)
 }
@@ -387,21 +398,27 @@ struct GroupLookup {
 
 #[cfg(unix)]
 impl GroupLookup {
-    /// `credentials`, with the peer's groups looked up on `runtime` and added to them.
+    /// `credentials`, with the peer's groups looked up and added to them.
     ///
     /// The groups come out of NSS, which may go to a file, a daemon or the network, so the lookup
-    /// is blocking work for the runtime rather than for the thread the connection is polled on.
-    /// Nothing goes to the runtime if there is nothing to look up.
+    /// is blocking work, rather than work for the thread that the caller is polled on. It goes to
+    /// `runtime`, that of the connection over the socket, if there is one, and to `unblock`
+    /// otherwise. Nothing goes anywhere if there is nothing to look up.
     #[cfg(any(target_os = "android", target_os = "linux"))]
     async fn complete(
         self,
         mut credentials: ConnectionCredentials,
-        runtime: &Runtime,
+        runtime: Option<&Runtime>,
     ) -> ConnectionCredentials {
         let Some((uid, gid)) = self.nss else {
             return credentials;
         };
-        for group in runtime.spawn_blocking(move || Self::groups(uid, gid)).await {
+        let lookup = move || Self::groups(uid, gid);
+        let groups = match runtime {
+            Some(runtime) => runtime.spawn_blocking(lookup).await,
+            None => unblock(lookup).await,
+        };
+        for group in groups {
             credentials = credentials.add_unix_group_id(group);
         }
 
@@ -416,7 +433,7 @@ impl GroupLookup {
     async fn complete(
         self,
         credentials: ConnectionCredentials,
-        _runtime: &Runtime,
+        _runtime: Option<&Runtime>,
     ) -> ConnectionCredentials {
         credentials
     }
@@ -489,6 +506,23 @@ impl GroupLookup {
 
         groups
     }
+}
+
+/// Runs `work` off the calling thread, with no connection to run it on the runtime of: on the
+/// blocking pool of Tokio if the `tokio` feature is enabled and a Tokio runtime is current, as for
+/// a connection built there, and on the threads that zbus keeps for blocking work otherwise, which
+/// need no runtime to be running.
+#[cfg(any(target_os = "android", target_os = "linux"))]
+async fn unblock<T>(work: impl FnOnce() -> T + Send + 'static) -> T
+where
+    T: Send + 'static,
+{
+    #[cfg(feature = "tokio")]
+    if let Some(runtime) = crate::runtime::Tokio::current() {
+        return crate::runtime::traits::Runtime::spawn_blocking(&runtime, work).await;
+    }
+
+    zruntime::unblock(work).await
 }
 
 /// The groups that the process of the peer of the socket `fd` had as it connected, from
@@ -593,15 +627,70 @@ pub(super) fn send_credentials_byte(fd: std::os::fd::RawFd) -> io::Result<usize>
 mod tests {
     use std::os::{fd::AsFd, unix::net::UnixStream};
 
-    use rustix::process::{getegid, getgroups};
+    use rustix::process::{getegid, geteuid, getgroups};
 
-    /// The groups of a peer come from its socket: those that its process has, along with its
-    /// primary group, with nothing to look up in NSS.
+    use super::GroupLookup;
+    #[cfg(feature = "bus-impl")]
+    use crate::Error;
+    use crate::{block_on, fdo::ConnectionCredentials};
+
+    /// The credentials of a peer come from its socket: its user, its process, and the groups that
+    /// its process has, along with its primary group, with nothing to look up in NSS.
     #[test]
     fn credentials_of_a_peer() {
         let (socket, _peer) = UnixStream::pair().unwrap();
 
         let (credentials, lookup) = super::socket_credentials(socket.as_fd()).unwrap();
+        assert_ours(&credentials);
+        assert!(lookup.nss.is_none());
+    }
+
+    /// The groups of a peer that the socket doesn't tell are looked up in NSS off the calling
+    /// thread, with no connection to look them up on the runtime of too.
+    #[test]
+    fn groups_are_looked_up_with_no_connection() {
+        let (uid, gid) = (geteuid().as_raw(), getegid().as_raw());
+        let lookup = GroupLookup {
+            nss: Some((uid, gid)),
+        };
+
+        let credentials = block_on(lookup.complete(ConnectionCredentials::default(), None));
+
+        let groups = credentials.unix_group_ids().cloned().unwrap_or_default();
+        assert_eq!(groups, GroupLookup::groups(uid, gid));
+    }
+
+    /// The credentials of the peer of a socket that no connection runs over are those that a
+    /// connection over it would have.
+    #[cfg(feature = "bus-impl")]
+    #[test]
+    fn credentials_of_the_peer_of_a_socket_of_its_own() {
+        let (socket, _peer) = UnixStream::pair().unwrap();
+
+        let credentials = block_on(ConnectionCredentials::of_peer(&socket)).unwrap();
+
+        assert_ours(&credentials);
+    }
+
+    /// A descriptor that is not a socket has no peer to tell the credentials of.
+    #[cfg(feature = "bus-impl")]
+    #[test]
+    fn a_descriptor_that_is_no_socket_has_no_credentials() {
+        let (read, _write) = std::io::pipe().unwrap();
+
+        let credentials = block_on(ConnectionCredentials::of_peer(&read));
+
+        let Err(Error::InputOutput(e)) = &credentials else {
+            panic!("a pipe has credentials: {credentials:?}");
+        };
+        assert_eq!(e.raw_os_error(), Some(libc::ENOTSOCK), "{e}");
+    }
+
+    /// Asserts that `credentials` are those of this process, as the peer of a socket pair that it
+    /// made has them.
+    fn assert_ours(credentials: &ConnectionCredentials) {
+        assert_eq!(credentials.unix_user_id(), Some(geteuid().as_raw()));
+        assert_eq!(credentials.process_id(), Some(std::process::id()));
         let mut groups: Vec<_> = getgroups()
             .unwrap()
             .into_iter()
@@ -611,6 +700,5 @@ mod tests {
         groups.sort_unstable();
         groups.dedup();
         assert_eq!(credentials.unix_group_ids(), Some(&groups));
-        assert!(lookup.nss.is_none());
     }
 }
