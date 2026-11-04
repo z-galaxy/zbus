@@ -12,7 +12,7 @@ use std::fmt::Debug;
 
 #[cfg(windows)]
 use crate::win32;
-use crate::{Error, OwnedGuid, Result, names::OwnedUniqueName};
+use crate::{Error, OwnedGuid, Result, fdo::ConnectionCredentials, names::OwnedUniqueName};
 
 use super::socket::{BoxedSplit, ReadHalf, WriteHalf};
 
@@ -43,6 +43,8 @@ pub struct Authenticated {
     #[cfg(unix)]
     pub(crate) already_received_fds: Vec<std::os::fd::OwnedFd>,
     pub(crate) unique_name: Option<OwnedUniqueName>,
+    /// The credentials of the peer, if the handshake looked them up.
+    pub(crate) peer_credentials: Option<ConnectionCredentials>,
 }
 
 impl Authenticated {

@@ -741,6 +741,7 @@ impl<'a> Builder<'a> {
                 unique_name,
                 #[cfg(unix)]
                 already_received_fds: vec![],
+                peer_credentials: None,
             })
         } else {
             #[cfg(feature = "p2p")]
@@ -765,9 +766,9 @@ impl<'a> Builder<'a> {
                     #[cfg(any(unix, target_os = "wasi"))]
                     let client_uid = self.user_id.or_else(|| creds.unix_user_id());
                     #[cfg(windows)]
-                    let client_sid = creds.into_windows_sid();
+                    let client_sid = creds.windows_sid().cloned();
 
-                    Authenticated::server(
+                    let mut auth = Authenticated::server(
                         stream,
                         guid.to_owned().into(),
                         #[cfg(any(unix, target_os = "wasi"))]
@@ -777,7 +778,12 @@ impl<'a> Builder<'a> {
                         self.auth_mechanism,
                         unique_name,
                     )
-                    .await
+                    .await?;
+                    // The connection keeps the credentials that authenticated the client, rather
+                    // than look them up again.
+                    auth.peer_credentials = Some(creds);
+
+                    Ok(auth)
                 }
             }
 

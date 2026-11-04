@@ -1267,7 +1267,10 @@ impl Connection {
                 runtime,
                 drop_event: Event::new(),
                 method_timeout,
-                credentials: OnceLock::new(),
+                credentials: auth
+                    .peer_credentials
+                    .map(|credentials| OnceLock::from(Arc::new(credentials)))
+                    .unwrap_or_default(),
             }),
         };
 
@@ -1326,12 +1329,18 @@ impl Connection {
     /// The fields are populated on the best effort basis. Some or all fields may not even make
     /// sense for certain sockets or on certain platforms and hence will be set to `None`.
     ///
-    /// This method caches the credentials on the first call for you.
+    /// This method caches the credentials on the first call for you. The server side of a
+    /// peer-to-peer connection has them from its handshake already. Once they are known, this
+    /// method doesn't wait for the socket, which a send to a peer that doesn't read can take long
+    /// to be done with.
     ///
     /// # Caveats
     ///
     /// Currently `linux_security_label` field is not populated.
     pub async fn peer_creds(&self) -> io::Result<&Arc<ConnectionCredentials>> {
+        if let Some(creds) = self.inner.credentials.get() {
+            return Ok(creds);
+        }
         let mut socket_write = self.inner.socket_write.lock().await;
 
         // Keeping the `socket_write` lock guard ensures that this isn't racy.
@@ -1904,6 +1913,25 @@ mod p2p_tests {
                 .build(),
             Builder::tcp_stream(p1).p2p().build(),
         )
+    }
+
+    // The server side of a connection keeps the credentials of the client that its handshake
+    // looked up, and gives them while a send holds the socket up.
+    #[cfg(unix)]
+    #[test]
+    #[timeout(15000)]
+    fn server_keeps_the_credentials_of_its_handshake() {
+        crate::utils::block_on(async {
+            // The client comes first.
+            let (_client, server) = unix_p2p_pipe().await.unwrap();
+
+            let _sending = server.inner.socket_write.lock().await;
+            let credentials = server.peer_creds().await.unwrap();
+            assert_eq!(
+                credentials.unix_user_id(),
+                Some(rustix::process::geteuid().as_raw())
+            );
+        });
     }
 
     #[cfg(unix)]

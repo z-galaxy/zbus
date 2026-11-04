@@ -237,6 +237,7 @@ impl Handshake for Server {
             #[cfg(unix)]
             already_received_fds: received_fds,
             unique_name: self.unique_name,
+            peer_credentials: None,
         })
     }
 }
