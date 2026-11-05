@@ -206,6 +206,8 @@ impl IntoDBusError for Error {
 pub(crate) struct ArcInterface {
     pub instance: Arc<RwLock<dyn Interface>>,
     pub spawn_tasks_for_methods: bool,
+    /// Whether the interface also serves the paths below the one it is registered at.
+    pub fallback: bool,
 }
 
 impl ArcInterface {
@@ -217,6 +219,19 @@ impl ArcInterface {
         Self {
             instance: Arc::new(RwLock::new(iface)),
             spawn_tasks_for_methods,
+            fallback: false,
+        }
+    }
+
+    /// Like [`ArcInterface::new`], for an interface that also serves the paths below the one it
+    /// is registered at.
+    pub fn new_fallback<I>(iface: I) -> Self
+    where
+        I: Interface,
+    {
+        Self {
+            fallback: true,
+            ..Self::new(iface)
         }
     }
 }

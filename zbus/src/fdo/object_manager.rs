@@ -115,11 +115,11 @@ impl ObjectManager {
     ) -> Result<ManagedObjects> {
         let path = header.path().ok_or(crate::Error::MissingField)?;
         let root = server.root().read().await;
-        let node = root
-            .get_child(path)
-            .ok_or_else(|| Error::UnknownObject(format!("Unknown object '{path}'")))?;
+        let (node, fallbacks) = root.with_fallbacks(path);
+        let node = node.ok_or_else(|| Error::UnknownObject(format!("Unknown object '{path}'")))?;
 
-        node.get_managed_objects(server, connection).await
+        node.get_managed_objects(fallbacks, server, connection)
+            .await
     }
 
     /// This signal is emitted when either a new object is added or when an existing object gains
