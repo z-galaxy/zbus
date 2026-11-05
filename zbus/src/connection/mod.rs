@@ -1116,11 +1116,7 @@ impl Connection {
         use std::collections::hash_map::Entry;
 
         if self.inner.msg_senders.lock().await.is_empty() {
-            // This only happens if socket reader task has errored out.
-            return Err(Error::InputOutput(Arc::new(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "Socket reader task has errored out",
-            ))));
+            return Err(self.reader_ended_error());
         }
 
         let mut subscriptions = self.inner.subscriptions.lock().await;
@@ -1140,12 +1136,16 @@ impl Connection {
                     )
                     .await?;
                 }
+                // The reader may have ended in the meantime, and closed the channels of
+                // the others. The subscription is only recorded once its channel is in place.
+                {
+                    let mut senders = self.inner.msg_senders.lock().await;
+                    if senders.is_empty() {
+                        return Err(self.reader_ended_error());
+                    }
+                    senders.insert(Some(rule), sender);
+                }
                 e.insert((1, receiver.clone().deactivate()));
-                self.inner
-                    .msg_senders
-                    .lock()
-                    .await
-                    .insert(Some(rule), sender);
 
                 Ok(receiver)
             }
@@ -1161,6 +1161,15 @@ impl Connection {
                 Ok(receiver.activate_cloned())
             }
         }
+    }
+
+    /// The error of a stream that can't be made, as the reader closed the channels of the others.
+    fn reader_ended_error(&self) -> Error {
+        // The reader ended on an error.
+        Error::InputOutput(Arc::new(io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "Socket reader task has errored out",
+        )))
     }
 
     pub(crate) async fn remove_match(&self, rule: OwnedMatchRule) -> Result<bool> {
