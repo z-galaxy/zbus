@@ -454,6 +454,7 @@ impl GroupLookup {
 
         groups.truncate(ngroups as usize);
         groups.sort();
+        groups.dedup();
 
         groups
     }
