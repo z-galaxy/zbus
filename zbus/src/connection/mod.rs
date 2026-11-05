@@ -994,6 +994,13 @@ impl Connection {
     ///
     /// The `ObjectServer` is created on-demand.
     ///
+    /// The `ObjectServer` starts listening for method calls in the background, so calls that
+    /// arrive before it does go unanswered. Callers that reach the connection through a
+    /// well-known name requested after the interfaces are registered do not run into this, but
+    /// the peer of a peer-to-peer connection, or a caller of the unique name of the connection,
+    /// can. The interfaces registered through [`Builder::serve_at`] are served from the start, as
+    /// the `ObjectServer` then listens before the connection reads any message.
+    ///
     /// **Note**: Once the `ObjectServer` is created, it will be replying to all method calls
     /// received on `self`. If you want to manually reply to method calls, do not use this
     /// method (or any of the `ObjectServer` related API).

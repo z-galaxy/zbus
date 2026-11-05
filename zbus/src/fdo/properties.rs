@@ -36,12 +36,9 @@ impl Properties {
     ) -> std::result::Result<OwnedVariant, BoxDBusError> {
         let path = header.path().ok_or(crate::Error::MissingField)?;
         let root = server.root().read().await;
-        let iface = root
-            .get_child(path)
-            .and_then(|node| node.interface_lock(interface_name.as_ref()))
-            .ok_or_else(|| {
-                Error::UnknownInterface(format!("Unknown interface '{interface_name}'"))
-            })?;
+        let iface = root.interface_at(path, &interface_name).map_err(|_| {
+            Error::UnknownInterface(format!("Unknown interface '{interface_name}'"))
+        })?;
 
         let res = iface
             .instance
@@ -68,12 +65,9 @@ impl Properties {
     ) -> std::result::Result<(), BoxDBusError> {
         let path = header.path().ok_or(crate::Error::MissingField)?;
         let root = server.root().read().await;
-        let iface = root
-            .get_child(path)
-            .and_then(|node| node.interface_lock(interface_name.as_ref()))
-            .ok_or_else(|| {
-                Error::UnknownInterface(format!("Unknown interface '{interface_name}'"))
-            })?;
+        let iface = root.interface_at(path, &interface_name).map_err(|_| {
+            Error::UnknownInterface(format!("Unknown interface '{interface_name}'"))
+        })?;
 
         match iface.instance.read().await.set(
             property_name,
@@ -122,12 +116,9 @@ impl Properties {
     ) -> Result<HashMap<String, OwnedVariant>> {
         let path = header.path().ok_or(crate::Error::MissingField)?;
         let root = server.root().read().await;
-        let iface = root
-            .get_child(path)
-            .and_then(|node| node.interface_lock(interface_name.as_ref()))
-            .ok_or_else(|| {
-                Error::UnknownInterface(format!("Unknown interface '{interface_name}'"))
-            })?;
+        let iface = root.interface_at(path, &interface_name).map_err(|_| {
+            Error::UnknownInterface(format!("Unknown interface '{interface_name}'"))
+        })?;
 
         let res = iface
             .instance

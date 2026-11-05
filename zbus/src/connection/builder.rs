@@ -370,23 +370,33 @@ impl<'a> Builder<'a> {
     ///
     /// An invalid path is reported by [`Builder::build`].
     #[cfg(feature = "service")]
-    pub fn serve_at<P, I>(mut self, path: P, iface: I) -> Self
+    pub fn serve_at<P, I>(self, path: P, iface: I) -> Self
     where
         I: Interface,
         P: TryInto<ObjectPath<'a>>,
         P::Error: Into<Error>,
     {
-        match path.try_into() {
-            Ok(path) => {
-                self.interfaces
-                    .entry(path)
-                    .or_default()
-                    .insert(I::name(), ArcInterface::new(iface));
-            }
-            Err(e) => self.record(e.into()),
-        }
+        self.serve(path, I::name(), ArcInterface::new(iface))
+    }
 
-        self
+    /// Register a D-Bus [`Interface`] to be served at a given path, and as a fallback for the
+    /// paths below it.
+    ///
+    /// This is to [`zbus::ObjectServer::at_fallback`] what [`Builder::serve_at`] is to
+    /// [`zbus::ObjectServer::at`]: the interface serves `path`, and the paths below it that don't
+    /// have an interface of the same name of their own, as soon as the connection is
+    /// established. Like [`Builder::serve_at`], this method replaces any previously added
+    /// interface with the same name at the same path, whether added as a fallback or not.
+    ///
+    /// An invalid path is reported by [`Builder::build`].
+    #[cfg(feature = "service")]
+    pub fn serve_at_fallback<P, I>(self, path: P, iface: I) -> Self
+    where
+        I: Interface,
+        P: TryInto<ObjectPath<'a>>,
+        P::Error: Into<Error>,
+    {
+        self.serve(path, I::name(), ArcInterface::new_fallback(iface))
     }
 
     /// Register a well-known name for this connection on the bus.
@@ -711,6 +721,24 @@ impl<'a> Builder<'a> {
             runtime: None,
             error,
         }
+    }
+
+    /// Add `iface` to the interfaces to serve at `path` under `name`, replacing any interface
+    /// already added there under that name.
+    #[cfg(feature = "service")]
+    fn serve<P>(mut self, path: P, name: InterfaceName<'static>, iface: ArcInterface) -> Self
+    where
+        P: TryInto<ObjectPath<'a>>,
+        P::Error: Into<Error>,
+    {
+        match path.try_into() {
+            Ok(path) => {
+                self.interfaces.entry(path).or_default().insert(name, iface);
+            }
+            Err(e) => self.record(e.into()),
+        }
+
+        self
     }
 
     /// Record `error`, unless an earlier constructor or setter already recorded one.

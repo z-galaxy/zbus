@@ -30,11 +30,9 @@ impl Introspectable {
     ) -> Result<String> {
         let path = header.path().ok_or(crate::Error::MissingField)?;
         let root = server.root().read().await;
-        let node = root
-            .get_child(path)
-            .ok_or_else(|| Error::UnknownObject(format!("Unknown object '{path}'")))?;
-
-        Ok(node.introspect().await)
+        root.introspect(path)
+            .await
+            .ok_or_else(|| Error::UnknownObject(format!("Unknown object '{path}'")))
     }
 }
 
