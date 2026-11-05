@@ -144,6 +144,9 @@ async fn main() -> Result<()> {
 }
 ```
 
+For objects whose paths are not known in advance, such as one per ID, an interface can also be
+registered as a fallback that serves a whole subtree of paths: see [`ObjectServer::at_fallback`].
+
 ### ⚠ Service activation pitfalls
 
 A possible footgun here is that you must request the service name **after** you setup the handlers,
@@ -448,4 +451,5 @@ While it's extremely useful to be able to generate the client-side proxy code di
 [`zbus::DBusError`]:https://docs.rs/zbus/latest/zbus/trait.DBusError.html
 [`zbus::fdo::Error`]: https://docs.rs/zbus/latest/zbus/fdo/enum.Error.html
 [`zbus::fdo::Error::UnknownProperty`]: https://docs.rs/zbus/latest/zbus/fdo/enum.Error.html#variant.UnknownProperty
+[`ObjectServer::at_fallback`]: https://docs.rs/zbus/latest/zbus/object_server/struct.ObjectServer.html#method.at_fallback
 [`proxy`]: https://docs.rs/zbus/latest/zbus/attr.proxy.html
