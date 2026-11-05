@@ -172,13 +172,16 @@ fn fd_recvmsg(fd: BorrowedFd<'_>, buffer: &mut [u8]) -> RecvmsgResult {
     let mut cmsg_buffer = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(FDS_MAX))];
     let mut ancillary = RecvAncillaryBuffer::new(&mut cmsg_buffer);
 
-    let msg = recvmsg(fd, &mut iov, &mut ancillary, RecvFlags::empty())?;
-    if msg.bytes == 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::BrokenPipe,
-            "failed to read from socket",
-        ));
-    }
+    // A read of nothing is the end of the input, as with any other socket, which the reader tells
+    // apart from an error. On Linux, a peer that closes its socket while bytes that it was sent
+    // are still unread in it makes a read fail with ECONNRESET instead, but only once the reads
+    // before it took all that the peer sent, and the reads after it read nothing: that is the
+    // end of the input too, with nothing lost.
+    let msg = match recvmsg(fd, &mut iov, &mut ancillary, RecvFlags::empty()) {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        Err(e) if e == rustix::io::Errno::CONNRESET => return Ok((0, vec![])),
+        msg => msg?,
+    };
     let mut fds = vec![];
     for msg in ancillary.drain() {
         match msg {

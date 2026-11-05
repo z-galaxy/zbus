@@ -9,7 +9,7 @@ use std::io;
 
 use std::num::NonZeroUsize;
 
-use zruntime::broadcast::{Receiver, Sender, channel};
+use zruntime::broadcast::{Receiver, RecvError, Sender, channel};
 
 use super::{read_primary_header, take_message};
 use crate::{
@@ -103,7 +103,13 @@ impl super::ReadHalf for Reader {
         }
 
         let msg = self.0.recv().await.map_err(|e| {
-            crate::Error::InputOutput(io::Error::new(io::ErrorKind::BrokenPipe, e).into())
+            let kind = match e {
+                // The other end is closed, which is the end of the input.
+                RecvError::Closed => io::ErrorKind::UnexpectedEof,
+                RecvError::Overflowed(_) => io::ErrorKind::BrokenPipe,
+            };
+
+            crate::Error::InputOutput(io::Error::new(kind, e).into())
         })?;
 
         // The message has the position that it had at the other end, which is 0 for one built
