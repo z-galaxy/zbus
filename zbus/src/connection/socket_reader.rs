@@ -119,9 +119,11 @@ impl SocketReader {
             trace!("Broadcasted to all streams: {:?}", msg);
 
             if msg.is_err() {
-                senders.clear();
+                // Closed before the streams end, so that a stream that ended finds the connection
+                // closed.
                 self.socket_status.closed.store(true, Ordering::Release);
                 self.socket_status.closed_event.notify(usize::MAX);
+                senders.clear();
                 trace!("Socket reading task stopped");
 
                 return;
@@ -265,6 +267,45 @@ mod tests {
             // A cancelled reader never gets to close the channel behind the stream, so only the
             // stream itself can say it is spent — and a `select!` loop spins until it does.
             assert!(stream.is_terminated(), "the finished stream denies it");
+        });
+    }
+
+    /// A connection that ends is closed by the time its streams end, so a stream that ended finds
+    /// the connection closed.
+    ///
+    /// The reader ends on a thread of its own, and a stream that ended before the connection was
+    /// closed would find it open only if this thread looked in between, so the test tries many
+    /// times.
+    #[test]
+    #[timeout(15000)]
+    fn a_stream_that_ended_finds_the_connection_closed() {
+        let (runtime, peer_runtime) = (TestRuntime::new(), TestRuntime::new());
+
+        futures_lite::future::block_on(async {
+            for i in 0..1000 {
+                let (c1, c2) = Channel::pair();
+                let guid = Guid::generate();
+                let (conn, peer) = futures_util::try_join!(
+                    Builder::authenticated_socket(c1, guid.clone())
+                        .p2p()
+                        .runtime(runtime.clone())
+                        .build(),
+                    Builder::authenticated_socket(c2, guid)
+                        .p2p()
+                        .runtime(peer_runtime.clone())
+                        .build(),
+                )
+                .unwrap();
+                let mut stream = MessageStream::from(&conn);
+
+                // The connection comes to the end of its input.
+                peer.close().await.unwrap();
+
+                let end = stream.next().await.unwrap();
+                assert!(end.is_err(), "the stream didn't end on an error: {end:?}");
+                assert!(stream.next().await.is_none(), "the stream lives on");
+                assert!(conn.is_closed(), "the connection is open still, at try {i}");
+            }
         });
     }
 
