@@ -216,6 +216,7 @@ impl Handshake for Client {
             #[cfg(unix)]
             already_received_fds: received_fds,
             unique_name,
+            peer_credentials: None,
         })
     }
 }

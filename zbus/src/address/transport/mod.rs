@@ -11,6 +11,8 @@ use std::{
 #[cfg(windows)]
 use crate::win32::autolaunch_bus_address;
 use crate::{Address, Error, Result, connection::socket::BoxedSplit, runtime::Runtime};
+#[cfg(all(feature = "handover", any(unix, windows)))]
+use crate::{connection::handover::SocketKind, runtime::IoSource};
 
 #[cfg(all(unix, feature = "unixexec"))]
 mod unixexec;
@@ -66,9 +68,9 @@ pub enum Transport {
 impl Transport {
     pub(super) async fn connect(&self, address: &Address, runtime: &Runtime) -> Result<Stream> {
         match self {
-            Transport::Unix(unix) => unix.connect(address, runtime).await.map(Stream::Unix),
+            Transport::Unix(unix) => unix.connect(address, runtime).await,
 
-            Transport::Tcp(tcp) => tcp.connect(address, runtime).await.map(Stream::Tcp),
+            Transport::Tcp(tcp) => tcp.connect(address, runtime).await,
 
             #[cfg(all(unix, feature = "unixexec"))]
             Transport::Unixexec(unixexec) => unixexec
@@ -135,10 +137,47 @@ impl Transport {
 /// writes through.
 #[derive(Debug)]
 pub(crate) enum Stream {
-    Unix(BoxedSplit),
+    // WASI has no unix-domain sockets.
+    #[cfg(any(unix, windows))]
+    Unix {
+        split: BoxedSplit,
+        /// The socket itself, which a connection that is handed over gives a descriptor of.
+        #[cfg(all(feature = "handover", any(unix, windows)))]
+        source: IoSource,
+    },
     #[cfg(all(unix, feature = "unixexec"))]
     Unixexec(BoxedSplit),
-    Tcp(BoxedSplit),
+    Tcp {
+        split: BoxedSplit,
+        /// As for `Unix`. WASI can't duplicate a descriptor, so it has no use for it.
+        #[cfg(all(feature = "handover", any(unix, windows)))]
+        source: IoSource,
+    },
+}
+
+impl Stream {
+    /// The socket itself, and its kind, which a connection that is handed over gives a descriptor
+    /// of, if zbus drives it.
+    #[cfg(all(feature = "handover", any(unix, windows)))]
+    pub(crate) fn source(&self) -> Option<(IoSource, SocketKind)> {
+        match self {
+            Self::Unix { source, .. } => Some((source.clone(), SocketKind::Unix)),
+            #[cfg(all(unix, feature = "unixexec"))]
+            Self::Unixexec(_) => None,
+            Self::Tcp { source, .. } => Some((source.clone(), SocketKind::Tcp)),
+        }
+    }
+
+    /// The halves of the socket.
+    pub(crate) fn into_split(self) -> BoxedSplit {
+        match self {
+            #[cfg(any(unix, windows))]
+            Self::Unix { split, .. } => split,
+            #[cfg(all(unix, feature = "unixexec"))]
+            Self::Unixexec(split) => split,
+            Self::Tcp { split, .. } => split,
+        }
+    }
 }
 
 fn decode_hex(c: char) -> Result<u8> {

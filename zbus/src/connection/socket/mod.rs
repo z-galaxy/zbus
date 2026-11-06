@@ -11,8 +11,10 @@ pub use channel::Channel;
 mod split;
 pub use split::{BoxedSplit, Split};
 
-use std::io;
+use std::{io, mem};
 
+#[cfg(unix)]
+use crate::utils::FDS_MAX;
 use crate::{
     Message,
     conn::AuthMechanism,
@@ -29,10 +31,7 @@ use crate::{
     },
 };
 #[cfg(unix)]
-use std::{
-    mem,
-    os::fd::{AsFd, BorrowedFd, OwnedFd},
-};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 
 #[cfg(unix)]
 pub(crate) type RecvmsgResult = io::Result<(usize, Vec<OwnedFd>)>;
@@ -207,104 +206,91 @@ pub trait ReadHalf: std::fmt::Debug + Send + Sync + 'static {
     ///   belonging to the first message(s) (as part of the connection handshake process). This is
     ///   the buffer containing those bytes (if any). If you're implementing this method, most
     ///   likely you can safely ignore this parameter.
+    #[cfg_attr(
+        feature = "handover",
+        doc = "   A half that can take what it left unread ([`ReadHalf::can_take_unread`]) is the \
+               exception: it has to take these ahead of anything that it reads, or fail on them if \
+               it can't make messages of them, as they are also how a connection that takes over \
+               ([`Builder::take_over`](crate::connection::Builder::take_over)) gets what the \
+               other one left unread."
+    )]
     /// - `already_received_fds`: Same goes for file descriptors belonging to first messages.
+    ///
+    /// # Cancellation
+    #[cfg_attr(
+        feature = "handover",
+        doc = "A hand-over ([`MessageStream::hand_over`](crate::MessageStream::hand_over)) stops \
+               the connection reading by dropping the future of this method wherever it waits, if \
+               [`ReadHalf::can_take_unread`] says that it can.",
+        doc = ""
+    )]
+    /// The default implementation keeps what it read of a message in `already_received_bytes`
+    /// and `already_received_fds`, and never reads past the end of the message. So a call that is
+    /// dropped while it waits loses nothing, as long as a call to `recvmsg` that is dropped while
+    /// it waits loses nothing either: whatever that call took from the transport, the next one
+    /// brings. The next call to this method, given the same two, then goes on from where the
+    /// dropped one stopped. A `recvmsg` that reads with the `read` of Tokio's `AsyncReadExt`, as
+    /// the one in the example of [`Socket`] does, loses nothing when dropped, while one that
+    /// reads with its `read_exact` can lose what it read.
     async fn receive_message(
         &mut self,
         seq: u64,
         already_received_bytes: &mut Vec<u8>,
         #[cfg(unix)] already_received_fds: &mut Vec<OwnedFd>,
     ) -> crate::Result<Message> {
-        #[cfg(unix)]
-        let mut fds = vec![];
         // The primary header says how long the whole message is, so it is read on its own first,
-        // and the message gets an allocation of its exact length once it is in.
-        let mut header = [0; MIN_MESSAGE_SIZE];
-        let mut pos = already_received_bytes.len().min(MIN_MESSAGE_SIZE);
-        header[..pos].copy_from_slice(&already_received_bytes[..pos]);
-        already_received_bytes.drain(..pos);
-        while pos < MIN_MESSAGE_SIZE {
-            let res = self.recvmsg(&mut header[pos..]).await?;
-            let len = {
-                #[cfg(unix)]
-                {
-                    fds.extend(res.1);
-                    res.0
+        // and the message gets an allocation of its exact length once it is in. Each read is
+        // straight into `already_received_bytes`, no further than the end of the message, and
+        // into room for no more than `READ_MAX` bytes of it.
+        let (primary_header, len) = loop {
+            let have = already_received_bytes.len();
+            let want = if have < MIN_MESSAGE_SIZE {
+                MIN_MESSAGE_SIZE
+            } else {
+                let (primary_header, len) = read_primary_header(already_received_bytes)?;
+                if have >= len {
+                    break (primary_header, len);
                 }
-                #[cfg(not(unix))]
-                {
-                    res
-                }
+
+                len
             };
-            pos += len;
-            if len == 0 {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
+            already_received_bytes.reserve_exact(want - have);
+            let mut room = Room::new(already_received_bytes, want.min(have + READ_MAX));
+            let received = self.recvmsg(room.unfilled()).await;
+            #[cfg(unix)]
+            let (read, fds) = received?;
+            #[cfg(not(unix))]
+            let read = received?;
+            if read == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
                     "failed to receive message",
                 )
                 .into());
             }
-        }
-
-        let (primary_header, total_len) = read_primary_header(&header)?;
-        let mut bytes = Vec::with_capacity(total_len);
-        bytes.extend_from_slice(&header);
-        let to_take = std::cmp::min(total_len - bytes.len(), already_received_bytes.len());
-        bytes.extend(already_received_bytes.drain(..to_take));
-        let mut pos = bytes.len();
-        bytes.resize(total_len, 0);
-
-        // Read the rest, if any
-        while pos < total_len {
-            let res = self.recvmsg(&mut bytes[pos..]).await?;
-            let read = {
-                #[cfg(unix)]
-                {
-                    fds.extend(res.1);
-                    res.0
-                }
-                #[cfg(not(unix))]
-                {
-                    res
-                }
-            };
-            pos += read;
-            if read == 0 {
-                return Err(crate::Error::InputOutput(
-                    std::io::Error::new(
-                        std::io::ErrorKind::UnexpectedEof,
-                        "failed to receive message",
+            room.filled(read);
+            #[cfg(unix)]
+            {
+                // The descriptors wait in the order they came in, for the messages to take them.
+                already_received_fds.extend(fds);
+                if already_received_fds.len() > FDS_MAX {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "too many file descriptors that no header counts",
                     )
-                    .into(),
-                ));
+                    .into());
+                }
             }
-        }
+        };
 
-        // If we reach here, the message is complete; return it
-        let endian = Endian::from(primary_header.endian_sig());
-
-        #[cfg(unix)]
-        if !already_received_fds.is_empty() {
-            let (_, _, fields) = crate::message::parser::parse(&bytes)?;
-            let num_required_fds = fields.unix_fds().unwrap_or(0) as usize;
-            let num_pending = num_required_fds
-                .checked_sub(fds.len())
-                .ok_or_else(|| crate::Error::ExcessData)?;
-            // If we had previously received FDs, `num_pending` has to be > 0
-            if num_pending == 0 {
-                return Err(crate::Error::MissingParameter("Missing file descriptors"));
-            }
-            // All previously received FDs must go first in the list.
-            let mut already_received: Vec<_> = already_received_fds.drain(..num_pending).collect();
-            mem::swap(&mut already_received, &mut fds);
-            fds.extend(already_received);
-        }
-
-        let ctxt = Context::new(endian, 0);
-        #[cfg(unix)]
-        let bytes = serialized::Data::new_fds(bytes, ctxt, fds);
-        #[cfg(not(unix))]
-        let bytes = serialized::Data::new(bytes, ctxt);
-        Message::from_raw_parts(bytes, seq)
+        take_message(
+            seq,
+            &primary_header,
+            len,
+            already_received_bytes,
+            #[cfg(unix)]
+            already_received_fds,
+        )
     }
 
     /// Attempt to receive bytes from the socket.
@@ -335,6 +321,83 @@ pub trait ReadHalf: std::fmt::Debug + Send + Sync + 'static {
     /// Default is `AuthMechanism::External`.
     fn auth_mechanism(&self) -> AuthMechanism {
         AuthMechanism::External
+    }
+
+    /// Whether this half can take out what it read off the socket and is yet to return in a
+    /// message, through [`ReadHalf::take_unread`], for its connection to be handed over
+    /// ([`MessageStream::hand_over`]).
+    ///
+    /// A half that returns `true` promises four things:
+    ///
+    /// * [`ReadHalf::receive_message`] is cancel-safe. Its connection drops the future of a call
+    ///   wherever it waits, and whatever the call read off the socket by then has to be kept,
+    ///   either in `already_received_bytes` and `already_received_fds` or in the half, for
+    ///   `take_unread` to take out.
+    /// * `receive_message` takes `already_received_bytes` and `already_received_fds` ahead of
+    ///   anything that it reads, or fails on them if it can't make messages of them, rather than
+    ///   leave them behind. That is how a connection that takes over ([`Builder::take_over`]) gets
+    ///   what the other one left unread.
+    /// * `receive_message` fails with an I/O error of kind
+    ///   [`UnexpectedEof`](io::ErrorKind::UnexpectedEof) at the end of the input, once the peer
+    ///   closed its end of the socket, as the default implementation does, and with no error of
+    ///   that kind otherwise. A connection that comes to that end can still be handed over, with
+    ///   what it read, as the peer took nothing away from that, while one that ends on any other
+    ///   error can't.
+    /// * Nothing underneath the half holds on to bytes of the socket that `take_unread` can't take
+    ///   out, as a buffered stream does.
+    ///
+    /// A half that implements [`ReadHalf::recvmsg`] so that a call dropped while it waits loses
+    /// nothing (see the cancellation section of [`ReadHalf::receive_message`]), and that reads
+    /// nothing at the end of the input, and leaves `receive_message` to the default
+    /// implementation, keeps the first three promises, and holds nothing for `take_unread` to take
+    /// out.
+    ///
+    /// The read half of a
+    #[cfg_attr(feature = "p2p", doc = "[`Channel`]")]
+    #[cfg_attr(not(feature = "p2p"), doc = "`Channel`")]
+    /// returns `true`. A channel carries whole messages, so it takes back the whole messages that
+    /// a connection over a channel leaves unread, and fails on part of one, which can only come
+    /// from a connection over some other socket. The end of its input is the other end of the
+    /// channel being closed.
+    ///
+    /// The default implementation returns `false`. Then [`MessageStream::hand_over`] fails with
+    /// [`Error::Unsupported`] for a connection over this half, and so does [`Builder::build`] for a
+    /// connection that takes over ([`Builder::take_over`]) a hand-over that holds unread bytes or
+    /// file descriptors.
+    ///
+    /// This method is only available when the `handover` feature is enabled.
+    ///
+    /// [`Builder::build`]: crate::connection::Builder::build
+    /// [`Builder::take_over`]: crate::connection::Builder::take_over
+    /// [`Error::Unsupported`]: crate::Error::Unsupported
+    /// [`MessageStream::hand_over`]: crate::MessageStream::hand_over
+    #[cfg(feature = "handover")]
+    fn can_take_unread(&self) -> bool {
+        false
+    }
+
+    /// Move what this half read off the socket, and is yet to return in a message, to the end of
+    /// `bytes`. Move the file descriptors that came in with it, and that no message took, to the
+    /// end of `fds`. Both go in the order that they came in.
+    ///
+    /// A connection calls this once, as it stops reading for a hand-over
+    /// ([`MessageStream::hand_over`]), if [`ReadHalf::can_take_unread`] says that it can. That
+    /// comes after its last call to [`ReadHalf::receive_message`], which it may have dropped while
+    /// that call waited. `bytes` and `fds` then hold the `already_received_bytes` and
+    /// `already_received_fds` that the connection kept for its next call.
+    ///
+    /// The default implementation moves nothing. That suits a half that keeps nothing of its own
+    /// from one call of `receive_message` to the next, such as one that leaves `receive_message`
+    /// to the default implementation.
+    ///
+    /// This method is only available when the `handover` feature is enabled.
+    ///
+    /// [`MessageStream::hand_over`]: crate::MessageStream::hand_over
+    #[cfg(feature = "handover")]
+    fn take_unread(&mut self, bytes: &mut Vec<u8>, #[cfg(unix)] fds: &mut Vec<OwnedFd>) {
+        let _ = bytes;
+        #[cfg(unix)]
+        let _ = fds;
     }
 }
 
@@ -476,6 +539,83 @@ pub(crate) fn read_primary_header(bytes: &[u8]) -> crate::Result<(PrimaryHeader,
     Ok((primary_header, total_len))
 }
 
+/// Take the message that `bytes` start with, which is whole in them, `len` bytes long as
+/// `primary_header` says, out of them, with as many of `fds` as its header counts.
+pub(crate) fn take_message(
+    seq: u64,
+    primary_header: &PrimaryHeader,
+    len: usize,
+    bytes: &mut Vec<u8>,
+    #[cfg(unix)] fds: &mut Vec<OwnedFd>,
+) -> crate::Result<Message> {
+    // Nothing is allocated when nothing follows the message.
+    let rest = bytes.split_off(len);
+    let bytes = mem::replace(bytes, rest);
+
+    // The message takes as many of the descriptors that wait as its header counts, whichever of
+    // its bytes they came with, as the reference implementation of D-Bus does.
+    #[cfg(unix)]
+    let fds = if fds.is_empty() {
+        vec![]
+    } else {
+        let (_, _, fields) = crate::message::parser::parse(&bytes)?;
+        let count = (fields.unix_fds().unwrap_or(0) as usize).min(fds.len());
+
+        fds.drain(..count).collect()
+    };
+    let endian = Endian::from(primary_header.endian_sig());
+    let ctxt = Context::new(endian, 0);
+    #[cfg(unix)]
+    let bytes = serialized::Data::new_fds(bytes, ctxt, fds);
+    #[cfg(not(unix))]
+    let bytes = serialized::Data::new(bytes, ctxt);
+    Message::from_raw_parts(bytes, seq)
+}
+
+/// The most that a read of the default [`ReadHalf::receive_message`] has room for.
+///
+/// The room is zero-filled before each read, and what the read leaves of it is given up after,
+/// so a read costs zero-filling up to this much, however little it brings in. A message longer
+/// than this is read in pieces of no more than this.
+const READ_MAX: usize = 64 * 1024;
+
+/// Room at the end of a buffer for a read to fill, which the buffer gives up again when this is
+/// dropped, but for what the read is said to have filled.
+///
+/// A read that fails, or whose future is dropped while it waits, then leaves the buffer as it
+/// found it.
+struct Room<'b> {
+    bytes: &'b mut Vec<u8>,
+    /// How long `bytes` stays when this is dropped.
+    keep: usize,
+}
+
+impl<'b> Room<'b> {
+    /// Room in `bytes` after what they hold, up to a length of `len`.
+    fn new(bytes: &'b mut Vec<u8>, len: usize) -> Self {
+        let keep = bytes.len();
+        bytes.resize(len, 0);
+
+        Self { bytes, keep }
+    }
+
+    /// The part of the room that the read is yet to fill.
+    fn unfilled(&mut self) -> &mut [u8] {
+        &mut self.bytes[self.keep..]
+    }
+
+    /// Keeps the next `len` bytes of the room, which a read filled.
+    fn filled(&mut self, len: usize) {
+        self.keep += len;
+    }
+}
+
+impl Drop for Room<'_> {
+    fn drop(&mut self) {
+        self.bytes.truncate(self.keep);
+    }
+}
+
 #[async_trait::async_trait]
 impl ReadHalf for Box<dyn ReadHalf> {
     fn can_pass_unix_fd(&self) -> bool {
@@ -508,6 +648,20 @@ impl ReadHalf for Box<dyn ReadHalf> {
 
     fn auth_mechanism(&self) -> AuthMechanism {
         (**self).auth_mechanism()
+    }
+
+    #[cfg(feature = "handover")]
+    fn can_take_unread(&self) -> bool {
+        (**self).can_take_unread()
+    }
+
+    #[cfg(feature = "handover")]
+    fn take_unread(&mut self, bytes: &mut Vec<u8>, #[cfg(unix)] fds: &mut Vec<OwnedFd>) {
+        (**self).take_unread(
+            bytes,
+            #[cfg(unix)]
+            fds,
+        )
     }
 }
 
@@ -554,5 +708,377 @@ impl WriteHalf for Box<dyn WriteHalf> {
 
     async fn peer_credentials(&mut self) -> io::Result<ConnectionCredentials> {
         (**self).peer_credentials().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
+
+    use futures_lite::future::{block_on, poll_once};
+    use ntest::timeout;
+    use test_log::test;
+
+    use super::*;
+    #[cfg(unix)]
+    use crate::{Error, Fd};
+
+    /// Messages that come in a few bytes at a time come out whole and in order, however often the
+    /// call that receives one is dropped while it waits for more of it, and another made in its
+    /// place. What is read of a message that is yet to come in whole stays in the bytes that the
+    /// calls are given.
+    #[test]
+    #[timeout(15000)]
+    fn messages_come_out_whole_from_calls_dropped_while_they_wait() {
+        let msgs = [
+            Message::method_call("/", "Ping")
+                .interface("org.freedesktop.DBus.Peer")
+                .build(&())
+                .unwrap(),
+            Message::signal("/", "org.zbus.Test", "Signal")
+                .build(&"a string")
+                .unwrap(),
+            Message::method_call("/", "Test")
+                .build(&vec![7u8; 100])
+                .unwrap(),
+            Message::method_call("/", "Test")
+                .build(&(1u32, "more"))
+                .unwrap(),
+        ];
+        let next = Message::method_call("/", "Test")
+            .build(&vec![8u8; 100])
+            .unwrap();
+        let partial = &next.data()[..20];
+        let written = [
+            msgs.iter().flat_map(|msg| msg.data().to_vec()).collect(),
+            partial.to_vec(),
+        ]
+        .concat();
+        // The handshake leaves what it read past its own end for the first call, here all of the
+        // first message and the start of the second.
+        let mut bytes = written[..msgs[0].data().len() + 5].to_vec();
+        // The rest comes in reads of 1, 2 and 3 bytes in turn.
+        let mut reads = pieces(&written[bytes.len()..], &[1, 2, 3]);
+
+        let mut half = Scripted::default();
+        #[cfg(unix)]
+        let mut fds = vec![];
+        let mut received = vec![];
+        while received.len() < msgs.len() {
+            let polled = half.receive(
+                &mut bytes,
+                #[cfg(unix)]
+                &mut fds,
+            );
+            match polled {
+                Some(msg) => received.push(msg.unwrap()),
+                // The call was dropped, and the peer sends a little more.
+                None => half.push(reads.pop_front().expect("a call waits with all of it read")),
+            }
+        }
+        // The rest is the start of a message, which a call takes in, and then waits for more of.
+        half.reads.extend(reads.into_iter().map(Read::from));
+        let polled = half.receive(
+            &mut bytes,
+            #[cfg(unix)]
+            &mut fds,
+        );
+
+        assert!(polled.is_none(), "a message came out of part of one");
+        assert!(half.reads.is_empty(), "a call left reads alone");
+        for (received, sent) in received.iter().zip(&msgs) {
+            assert_eq!(&received.data()[..], &sent.data()[..]);
+        }
+        assert_eq!(bytes, partial);
+    }
+
+    /// A message several times longer than `READ_MAX` comes out whole, with the call that
+    /// receives it dropped each time it waits for more of it, however its reads fall across the
+    /// room of each. No read is given room for more than `READ_MAX` bytes.
+    #[test]
+    #[timeout(15000)]
+    fn a_long_message_comes_out_whole_in_reads_of_no_more_than_read_max() {
+        let msg = Message::method_call("/", "Test")
+            .build(&vec![7u8; 3 * READ_MAX + READ_MAX / 2])
+            .unwrap();
+        // The message comes in reads of just under, just over and over twice `READ_MAX` in turn.
+        let mut reads = pieces(
+            &msg.data()[..],
+            &[READ_MAX - 1, READ_MAX + 1, 2 * READ_MAX + 3],
+        );
+
+        let mut half = Scripted::default();
+        let mut bytes = vec![];
+        #[cfg(unix)]
+        let mut fds = vec![];
+        let received = loop {
+            let polled = half.receive(
+                &mut bytes,
+                #[cfg(unix)]
+                &mut fds,
+            );
+            match polled {
+                Some(received) => break received.unwrap(),
+                // The call was dropped, and the peer sends more.
+                None => half.push(reads.pop_front().expect("a call waits with all of it read")),
+            }
+        };
+
+        assert_eq!(&received.data()[..], &msg.data()[..]);
+        assert!(bytes.is_empty(), "bytes were left over");
+        assert_eq!(half.largest_room, READ_MAX);
+    }
+
+    /// Each message takes as many of the file descriptors that came in as its header counts, in
+    /// the order that they came in: those that came with any of its bytes, after those that came
+    /// before it and that no message took.
+    #[cfg(unix)]
+    #[test]
+    #[timeout(15000)]
+    fn messages_take_as_many_fds_as_their_headers_count() {
+        // The pipes are told apart by their inodes.
+        let pipes = [(); 4].map(|()| pipe());
+        let inodes = pipes.each_ref().map(inode);
+        let fd = |i: usize| Fd::from(pipes[i].as_fd());
+        // Message 0 counts one descriptor, message 1 two, message 2 none and message 3 one.
+        let msgs = [
+            Message::method_call("/", "Test")
+                .build(&(0u32, fd(0)))
+                .unwrap(),
+            Message::method_call("/", "Test")
+                .build(&(1u32, fd(1), fd(2)))
+                .unwrap(),
+            Message::method_call("/", "Test").build(&2u32).unwrap(),
+            Message::method_call("/", "Test")
+                .build(&(3u32, fd(3)))
+                .unwrap(),
+        ];
+        // The first byte of message 0 comes with the descriptors of messages 0 and 1, and the body
+        // of message 3 with its own.
+        let (start, body) = msgs[3].data().split_at(20);
+        let mut half = Scripted::default();
+        half.push_with_fds(msgs[0].data()[..1].to_vec(), clones(&pipes[..3]));
+        half.push(
+            [
+                &msgs[0].data()[1..],
+                &msgs[1].data()[..],
+                &msgs[2].data()[..],
+                start,
+            ]
+            .concat(),
+        );
+        half.push_with_fds(body.to_vec(), clones(&pipes[3..]));
+
+        let (mut bytes, mut fds) = (vec![], vec![]);
+        let mut received_with = vec![];
+        for sent in &msgs {
+            let received = half
+                .receive(&mut bytes, &mut fds)
+                .expect("a call waits with the message read")
+                .unwrap();
+            assert_eq!(&received.data()[..], &sent.data()[..]);
+            let fds = received.data().fds().iter().map(inode);
+            received_with.push(
+                fds.map(|inode| inodes.iter().position(|i| *i == inode).unwrap())
+                    .collect::<Vec<_>>(),
+            );
+        }
+
+        assert_eq!(
+            received_with,
+            [&[0][..], &[1, 2], &[], &[3]],
+            "the descriptors went with other messages than their own",
+        );
+        assert!(fds.is_empty(), "descriptors were left over");
+    }
+
+    /// A message whose header counts more file descriptors than came in is an error, rather than
+    /// a panic, whichever of them the handshake read.
+    #[cfg(unix)]
+    #[test]
+    #[timeout(15000)]
+    fn a_message_with_fewer_fds_than_its_header_counts_is_an_error() {
+        let pipes = [pipe(), pipe()];
+        let msg = Message::method_call("/", "Test")
+            .build(&(Fd::from(pipes[0].as_fd()), Fd::from(pipes[1].as_fd())))
+            .unwrap();
+        let mut half = Scripted::default();
+        half.push(msg.data().to_vec());
+        // The handshake read one of the descriptors, and the other never comes.
+        let mut fds = clones(&pipes[..1]);
+
+        let received = half
+            .receive(&mut vec![], &mut fds)
+            .expect("a call waits with the message read");
+
+        assert!(
+            matches!(received, Err(Error::MissingParameter(_))),
+            "{received:?}",
+        );
+    }
+
+    /// File descriptors that no header counts wait for the messages after them to take them, but
+    /// no more than `FDS_MAX` of them.
+    #[cfg(unix)]
+    #[test]
+    #[timeout(15000)]
+    fn more_than_fds_max_waiting_fds_are_an_error() {
+        allow_open_fds(2 * FDS_MAX as u64);
+        let pipe = pipe();
+        let msg = Message::method_call("/", "Test").build(&()).unwrap();
+        let mut half = Scripted::default();
+        let extra = (0..FDS_MAX).map(|_| pipe.try_clone().unwrap()).collect();
+        half.push_with_fds(msg.data().to_vec(), extra);
+        half.push_with_fds(msg.data().to_vec(), clones(&[pipe]));
+        let (mut bytes, mut fds) = (vec![], vec![]);
+
+        let first = half
+            .receive(&mut bytes, &mut fds)
+            .expect("a call waits with the message read");
+        let second = half
+            .receive(&mut bytes, &mut fds)
+            .expect("a call waits with the message read");
+
+        assert_eq!(&first.unwrap().data()[..], &msg.data()[..]);
+        assert!(
+            matches!(&second, Err(Error::InputOutput(e)) if e.kind() == io::ErrorKind::InvalidData),
+            "{second:?}",
+        );
+    }
+
+    /// A read half that hands out the reads of a script, and waits for ever once it is out, as a
+    /// socket whose peer sends nothing more.
+    ///
+    /// A read that has less room than the next one of the script takes in what it has room for,
+    /// and leaves the rest for the next, which no descriptors come with: the kernel hands them over
+    /// with the first read that takes in any of the bytes that they came with.
+    #[derive(Debug, Default)]
+    struct Scripted {
+        reads: VecDeque<Read>,
+        /// The most room that a read was given.
+        largest_room: usize,
+    }
+
+    impl Scripted {
+        /// What a call to the default `receive_message` comes to before it waits, if anything. A
+        /// call that waits is dropped.
+        fn receive(
+            &mut self,
+            bytes: &mut Vec<u8>,
+            #[cfg(unix)] fds: &mut Vec<OwnedFd>,
+        ) -> Option<crate::Result<Message>> {
+            let call = self.receive_message(
+                0,
+                bytes,
+                #[cfg(unix)]
+                fds,
+            );
+
+            block_on(poll_once(call))
+        }
+
+        /// Adds a read of `bytes` to the end of the script, which no descriptors come with.
+        fn push(&mut self, bytes: Vec<u8>) {
+            self.reads.push_back(Read::from(bytes));
+        }
+
+        /// Adds a read of `bytes` to the end of the script, which `fds` come with.
+        #[cfg(unix)]
+        fn push_with_fds(&mut self, bytes: Vec<u8>, fds: Vec<OwnedFd>) {
+            self.reads.push_back(Read { bytes, fds });
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ReadHalf for Scripted {
+        async fn recvmsg(&mut self, buffer: &mut [u8]) -> RecvmsgResult {
+            self.largest_room = self.largest_room.max(buffer.len());
+            let Some(mut read) = self.reads.pop_front() else {
+                return std::future::pending().await;
+            };
+            let len = read.bytes.len().min(buffer.len());
+            buffer[..len].copy_from_slice(&read.bytes[..len]);
+            if len < read.bytes.len() {
+                self.reads.push_front(Read::from(read.bytes.split_off(len)));
+            }
+
+            #[cfg(unix)]
+            let received = (len, read.fds);
+            #[cfg(not(unix))]
+            let received = len;
+
+            Ok(received)
+        }
+    }
+
+    /// A read of a script: the bytes that it takes in, and the file descriptors that come with
+    /// them.
+    #[derive(Debug)]
+    struct Read {
+        bytes: Vec<u8>,
+        #[cfg(unix)]
+        fds: Vec<OwnedFd>,
+    }
+
+    impl From<Vec<u8>> for Read {
+        /// A read of `bytes`, which no descriptors come with.
+        fn from(bytes: Vec<u8>) -> Self {
+            Self {
+                bytes,
+                #[cfg(unix)]
+                fds: vec![],
+            }
+        }
+    }
+
+    /// `bytes` cut into the reads that they come in: one of each of `sizes` in turn, over and over,
+    /// but for the last, which takes what is left.
+    fn pieces(mut bytes: &[u8], sizes: &[usize]) -> VecDeque<Vec<u8>> {
+        let mut sizes = sizes.iter().cycle();
+        let mut pieces = VecDeque::new();
+        while !bytes.is_empty() {
+            let (piece, rest) = bytes.split_at((*sizes.next().unwrap()).min(bytes.len()));
+            pieces.push_back(piece.to_vec());
+            bytes = rest;
+        }
+
+        pieces
+    }
+
+    /// The read end of a new pipe, whose write end is closed.
+    #[cfg(unix)]
+    fn pipe() -> OwnedFd {
+        std::io::pipe().unwrap().0.into()
+    }
+
+    /// New descriptors of the files that `fds` are open on.
+    #[cfg(unix)]
+    fn clones(fds: &[OwnedFd]) -> Vec<OwnedFd> {
+        fds.iter().map(|fd| fd.try_clone().unwrap()).collect()
+    }
+
+    /// The inode of the file that `fd` is open on.
+    #[cfg(unix)]
+    fn inode(fd: &impl AsFd) -> u64 {
+        std::fs::File::from(fd.as_fd().try_clone_to_owned().unwrap())
+            .metadata()
+            .unwrap()
+            .ino()
+    }
+
+    /// Raises the limit on the descriptors that the process may have open to `count`, if it is
+    /// lower: the limit of 1024 that many systems set leaves no room for a test that has that many
+    /// open, besides those of the others.
+    #[cfg(unix)]
+    fn allow_open_fds(count: u64) {
+        use rustix::process::{Resource, getrlimit, setrlimit};
+
+        let mut limit = getrlimit(Resource::Nofile);
+        if limit.current.is_some_and(|current| current < count) {
+            limit.current = Some(count);
+            setrlimit(Resource::Nofile, limit).expect("too low a hard limit on open descriptors");
+        }
     }
 }

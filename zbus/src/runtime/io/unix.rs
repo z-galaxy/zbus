@@ -60,6 +60,16 @@ impl SocketOps for UnixOps {
         cfg!(unix)
     }
 
+    #[cfg(unix)]
+    fn peer_credentials(
+        &self,
+        source: &IoSource,
+        runtime: &Runtime,
+    ) -> impl Future<Output = io::Result<ConnectionCredentials>> + Send {
+        peer_credentials(source.as_fd(), Some(runtime))
+    }
+
+    #[cfg(windows)]
     fn peer_credentials(
         &self,
         source: &IoSource,
@@ -105,18 +115,19 @@ pub(crate) fn unix_socket_address(
     SocketAddr::from_pathname(path)
 }
 
-/// The credentials of the peer of a unix socket.
+/// The credentials of the peer of the unix socket `fd`.
 ///
 /// The socket itself is asked on the calling thread: those are plain socket options. The
 /// supplementary groups the D-Bus specification asks for come out of NSS, which may go to a file,
-/// a daemon or the network, so that part goes to `runtime` — on the platforms that have such a
-/// lookup to make at all.
+/// a daemon or the network, so that part goes off the calling thread, on the platforms that have
+/// such a lookup to make at all: to `runtime`, that of the connection over the socket, if there is
+/// one, and as `unblock` tells otherwise.
 #[cfg(unix)]
-async fn peer_credentials(
-    source: &IoSource,
-    runtime: &Runtime,
+pub(crate) async fn peer_credentials(
+    fd: BorrowedFd<'_>,
+    runtime: Option<&Runtime>,
 ) -> io::Result<ConnectionCredentials> {
-    let (credentials, lookup) = socket_credentials(source.as_fd())?;
+    let (credentials, lookup) = socket_credentials(fd)?;
 
     Ok(lookup.complete(credentials, runtime).await)
 }
@@ -161,13 +172,16 @@ fn fd_recvmsg(fd: BorrowedFd<'_>, buffer: &mut [u8]) -> RecvmsgResult {
     let mut cmsg_buffer = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(FDS_MAX))];
     let mut ancillary = RecvAncillaryBuffer::new(&mut cmsg_buffer);
 
-    let msg = recvmsg(fd, &mut iov, &mut ancillary, RecvFlags::empty())?;
-    if msg.bytes == 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::BrokenPipe,
-            "failed to read from socket",
-        ));
-    }
+    // A read of nothing is the end of the input, as with any other socket, which the reader tells
+    // apart from an error. On Linux, a peer that closes its socket while bytes that it was sent
+    // are still unread in it makes a read fail with ECONNRESET instead, but only once the reads
+    // before it took all that the peer sent, and the reads after it read nothing: that is the
+    // end of the input too, with nothing lost.
+    let msg = match recvmsg(fd, &mut iov, &mut ancillary, RecvFlags::empty()) {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        Err(e) if e == rustix::io::Errno::CONNRESET => return Ok((0, vec![])),
+        msg => msg?,
+    };
     let mut fds = vec![];
     for msg in ancillary.drain() {
         match msg {
@@ -230,20 +244,18 @@ fn fd_sendmsg(
 fn socket_credentials(fd: BorrowedFd<'_>) -> io::Result<(ConnectionCredentials, GroupLookup)> {
     let mut creds = ConnectionCredentials::default();
     #[cfg(any(target_os = "android", target_os = "linux"))]
-    let uid;
-    #[cfg(any(target_os = "android", target_os = "linux"))]
-    let gid;
+    let nss;
 
     #[cfg(any(target_os = "android", target_os = "linux"))]
     {
-        use rustix::net::sockopt::socket_peercred;
-
-        let ucred = socket_peercred(fd)?;
-        uid = ucred.uid.as_raw();
-        gid = ucred.gid.as_raw();
-        let pid = ucred.pid.as_raw_nonzero().get() as u32;
-
-        creds = creds.set_unix_user_id(uid).set_process_id(pid);
+        let ucred = peer_ucred(fd)?;
+        let (uid, gid) = (ucred.uid, ucred.gid);
+        creds = creds.set_unix_user_id(uid);
+        // The kernel gives 0 for a peer whose process has no ID in the PID namespace of the caller,
+        // which names no process here. Its process descriptor, below, still does.
+        if let Some(pid) = u32::try_from(ucred.pid).ok().filter(|&pid| pid != 0) {
+            creds = creds.set_process_id(pid);
+        }
 
         #[cfg(target_os = "linux")]
         {
@@ -273,11 +285,34 @@ fn socket_credentials(fd: BorrowedFd<'_>) -> io::Result<(ConnectionCredentials, 
                 creds = creds.set_process_fd(unsafe { OwnedFd::from_raw_fd(pidfd).into() });
             } else if ret < 0 {
                 let err = io::Error::last_os_error();
-                // ENOPROTOOPT means the kernel doesn't support this feature.
-                if err.raw_os_error() != Some(libc::ENOPROTOOPT) {
+                // The kernel may have no descriptor to give, which leaves it out, as dbus-broker
+                // does: one older than 6.5 has no such option (ENOPROTOOPT), the socket may have
+                // no peer process (ENODATA), and one older than 6.16 has none for a process that
+                // has exited (EINVAL or ESRCH), as one that connected and went may have.
+                if !matches!(
+                    err.raw_os_error(),
+                    Some(libc::ENOPROTOOPT | libc::ENODATA | libc::EINVAL | libc::ESRCH)
+                ) {
                     return Err(err);
                 }
             }
+        }
+
+        // The groups that the process of the peer had as it connected, which the socket tells on
+        // Linux, rather than those that NSS has for its user now, which zbus looks up otherwise.
+        #[cfg(target_os = "linux")]
+        match peer_groups(fd, gid)? {
+            Some(groups) => {
+                for group in groups {
+                    creds = creds.add_unix_group_id(group);
+                }
+                nss = None;
+            }
+            None => nss = Some((uid, gid)),
+        }
+        #[cfg(target_os = "android")]
+        {
+            nss = Some((uid, gid));
         }
     }
 
@@ -311,41 +346,82 @@ fn socket_credentials(fd: BorrowedFd<'_>) -> io::Result<(ConnectionCredentials, 
         creds,
         GroupLookup {
             #[cfg(any(target_os = "android", target_os = "linux"))]
-            uid,
-            #[cfg(any(target_os = "android", target_os = "linux"))]
-            gid,
+            nss,
         },
     ))
 }
 
-/// The identity a peer's supplementary groups are looked up from.
+/// The credentials that the peer of the socket `fd` had as it connected, from `SO_PEERCRED`.
+///
+/// rustix has this call, but it holds the process ID in a type that has no 0, which the kernel
+/// gives for a peer in another PID namespace, and fails for such a peer.
+#[cfg(any(target_os = "android", target_os = "linux"))]
+fn peer_ucred(fd: BorrowedFd<'_>) -> io::Result<libc::ucred> {
+    use std::os::fd::AsRawFd;
+
+    let mut ucred = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: `ucred` has room for the `len` bytes that `SO_PEERCRED` fills in, and `fd` stays open
+    // for as long as the call lasts.
+    let ret = unsafe {
+        libc::getsockopt(
+            fd.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            std::ptr::from_mut(&mut ucred).cast(),
+            &mut len,
+        )
+    };
+    if ret < 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    Ok(ucred)
+}
+
+/// The identity a peer's supplementary groups are looked up from, if they are to be looked up.
 ///
 /// Linux and Android report a peer's user and group through `SO_PEERCRED`, macOS and the BSDs
-/// through `getpeereid`. Only on the first two does zbus go on to look that identity up for the
-/// supplementary groups the D-Bus specification asks for, which is why there is nothing to carry
-/// here anywhere else.
+/// through `getpeereid`. On Linux, the socket also tells the groups, through `SO_PEERGROUPS`,
+/// from Linux 4.13 on. Elsewhere, on older kernels and on Android, zbus goes on to look that
+/// identity up in NSS for the supplementary groups the D-Bus specification asks for, which is why
+/// there is nothing to carry here on the other platforms.
 #[cfg(unix)]
 #[derive(Debug)]
 struct GroupLookup {
+    /// The user and the primary group of the peer, to look its groups up for, unless the socket
+    /// told them.
     #[cfg(any(target_os = "android", target_os = "linux"))]
-    uid: libc::uid_t,
-    #[cfg(any(target_os = "android", target_os = "linux"))]
-    gid: libc::gid_t,
+    nss: Option<(libc::uid_t, libc::gid_t)>,
 }
 
 #[cfg(unix)]
 impl GroupLookup {
-    /// `credentials`, with the peer's groups looked up on `runtime` and added to them.
+    /// `credentials`, with the peer's groups looked up and added to them.
     ///
     /// The groups come out of NSS, which may go to a file, a daemon or the network, so the lookup
-    /// is blocking work for the runtime rather than for the thread the connection is polled on.
+    /// is blocking work, rather than work for the thread that the caller is polled on. It goes to
+    /// `runtime`, that of the connection over the socket, if there is one, and to `unblock`
+    /// otherwise. Nothing goes anywhere if there is nothing to look up.
     #[cfg(any(target_os = "android", target_os = "linux"))]
     async fn complete(
         self,
         mut credentials: ConnectionCredentials,
-        runtime: &Runtime,
+        runtime: Option<&Runtime>,
     ) -> ConnectionCredentials {
-        for group in runtime.spawn_blocking(move || self.groups()).await {
+        let Some((uid, gid)) = self.nss else {
+            return credentials;
+        };
+        let lookup = move || Self::groups(uid, gid);
+        let groups = match runtime {
+            Some(runtime) => runtime.spawn_blocking(lookup).await,
+            None => unblock(lookup).await,
+        };
+        for group in groups {
             credentials = credentials.add_unix_group_id(group);
         }
 
@@ -360,20 +436,18 @@ impl GroupLookup {
     async fn complete(
         self,
         credentials: ConnectionCredentials,
-        _runtime: &Runtime,
+        _runtime: Option<&Runtime>,
     ) -> ConnectionCredentials {
         credentials
     }
 
-    /// The peer's primary and supplementary groups, numerically sorted as the D-Bus
-    /// specification requires them.
+    /// The primary and supplementary groups of the user `uid`, whose primary group is `gid`,
+    /// numerically sorted as the D-Bus specification requires them.
     ///
     /// The lookup goes through NSS, which blocks.
     #[cfg(any(target_os = "android", target_os = "linux"))]
-    fn groups(self) -> Vec<u32> {
+    fn groups(uid: libc::uid_t, gid: libc::gid_t) -> Vec<u32> {
         use crate::log::debug;
-
-        let Self { uid, gid } = self;
 
         // The dbus spec requires groups to be either absent or complete (primary +
         // secondary groups).
@@ -402,29 +476,109 @@ impl GroupLookup {
         }
 
         let username = unsafe { std::ffi::CStr::from_ptr((*result).pw_name) };
-        let mut ngroups = 64i32;
-        let mut groups = vec![0u32; ngroups as usize];
+        let mut groups = vec![0u32; INITIAL_GROUPS];
+        loop {
+            let mut ngroups = libc::c_int::try_from(groups.len()).unwrap_or(libc::c_int::MAX);
+            // SAFETY: `username` ends with a 0, and `groups` has room for the `ngroups` groups that
+            // `getgrouplist` is given.
+            let found = unsafe {
+                libc::getgrouplist(
+                    username.as_ptr(),
+                    gid,
+                    groups.as_mut_ptr() as *mut libc::gid_t,
+                    &mut ngroups,
+                )
+            };
+            let ngroups = usize::try_from(ngroups).unwrap_or(0);
+            if found >= 0 {
+                groups.truncate(ngroups);
 
-        let found = unsafe {
-            libc::getgrouplist(
-                username.as_ptr(),
-                gid,
-                groups.as_mut_ptr() as *mut libc::gid_t,
-                &mut ngroups,
-            )
-        };
-        if found < 0 {
-            debug!("Group lookup failed for user {:?}", username);
+                break;
+            }
+            // The user has more groups than there is room for, and `ngroups` is how many it has.
+            // Anything else is a failure, which leaves the groups out, as they must be complete.
+            if ngroups <= groups.len() {
+                debug!("Group lookup failed for user {:?}", username);
 
-            return vec![];
+                return vec![];
+            }
+            groups.resize(ngroups, 0);
         }
-
-        groups.truncate(ngroups as usize);
         groups.sort();
+        groups.dedup();
 
         groups
     }
 }
+
+/// Runs `work` off the calling thread, with no connection to run it on the runtime of: on the
+/// blocking pool of Tokio if the `tokio` feature is enabled and a Tokio runtime is current, as for
+/// a connection built there, and on the threads that zbus keeps for blocking work otherwise, which
+/// need no runtime to be running.
+#[cfg(any(target_os = "android", target_os = "linux"))]
+async fn unblock<T>(work: impl FnOnce() -> T + Send + 'static) -> T
+where
+    T: Send + 'static,
+{
+    #[cfg(feature = "tokio")]
+    if let Some(runtime) = crate::runtime::Tokio::current() {
+        return crate::runtime::traits::Runtime::spawn_blocking(&runtime, work).await;
+    }
+
+    zruntime::unblock(work).await
+}
+
+/// The groups that the process of the peer of the socket `fd` had as it connected, from
+/// `SO_PEERGROUPS`, with `gid`, its primary group, numerically sorted as the D-Bus specification
+/// requires them: none if the kernel is older than 4.13, which has no such option, or holds no
+/// credentials of the peer.
+#[cfg(target_os = "linux")]
+fn peer_groups(fd: BorrowedFd<'_>, gid: libc::gid_t) -> io::Result<Option<Vec<u32>>> {
+    use std::{mem::size_of, os::fd::AsRawFd};
+
+    let mut groups: Vec<libc::gid_t> = vec![0; INITIAL_GROUPS];
+    loop {
+        let room = groups.len() * size_of::<libc::gid_t>();
+        let mut len = libc::socklen_t::try_from(room).unwrap_or(libc::socklen_t::MAX);
+        // SAFETY: `groups` has room for the `len` bytes that `SO_PEERGROUPS` fills in, and `fd`
+        // stays open for as long as the call lasts.
+        let ret = unsafe {
+            libc::getsockopt(
+                fd.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_PEERGROUPS,
+                groups.as_mut_ptr().cast(),
+                &mut len,
+            )
+        };
+        let len = usize::try_from(len).unwrap_or(usize::MAX);
+        if ret == 0 {
+            groups.truncate(len / size_of::<libc::gid_t>());
+
+            break;
+        }
+        let err = io::Error::last_os_error();
+        match err.raw_os_error() {
+            // The peer has more groups than there is room for, and `len` is the room they take.
+            Some(libc::ERANGE) if len > room => {
+                groups.resize(len.div_ceil(size_of::<libc::gid_t>()), 0);
+            }
+            Some(libc::ENOPROTOOPT | libc::ENODATA) => return Ok(None),
+            _ => return Err(err),
+        }
+    }
+    // The kernel gives the supplementary groups alone.
+    groups.push(gid);
+    groups.sort_unstable();
+    groups.dedup();
+
+    Ok(Some(groups))
+}
+
+/// How many groups a lookup of the groups of a peer makes room for at first, which is enough for
+/// most users: it makes room for more if the user has more.
+#[cfg(any(target_os = "android", target_os = "linux"))]
+const INITIAL_GROUPS: usize = 64;
 
 /// Sends the zero byte that opens the `EXTERNAL` handshake as an `SCM_CREDS` message of its own.
 ///
@@ -469,5 +623,85 @@ pub(super) fn send_credentials_byte(fd: std::os::fd::RawFd) -> io::Result<usize>
         Err(io::Error::last_os_error())
     } else {
         Ok(ret as usize)
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use std::os::{fd::AsFd, unix::net::UnixStream};
+
+    use rustix::process::{getegid, geteuid, getgroups};
+
+    use super::GroupLookup;
+    #[cfg(feature = "bus-impl")]
+    use crate::Error;
+    use crate::{block_on, fdo::ConnectionCredentials};
+
+    /// The credentials of a peer come from its socket: its user, its process, and the groups that
+    /// its process has, along with its primary group, with nothing to look up in NSS.
+    #[test]
+    fn credentials_of_a_peer() {
+        let (socket, _peer) = UnixStream::pair().unwrap();
+
+        let (credentials, lookup) = super::socket_credentials(socket.as_fd()).unwrap();
+        assert_ours(&credentials);
+        assert!(lookup.nss.is_none());
+    }
+
+    /// The groups of a peer that the socket doesn't tell are looked up in NSS off the calling
+    /// thread, with no connection to look them up on the runtime of too.
+    #[test]
+    fn groups_are_looked_up_with_no_connection() {
+        let (uid, gid) = (geteuid().as_raw(), getegid().as_raw());
+        let lookup = GroupLookup {
+            nss: Some((uid, gid)),
+        };
+
+        let credentials = block_on(lookup.complete(ConnectionCredentials::default(), None));
+
+        let groups = credentials.unix_group_ids().cloned().unwrap_or_default();
+        assert_eq!(groups, GroupLookup::groups(uid, gid));
+    }
+
+    /// The credentials of the peer of a socket that no connection runs over are those that a
+    /// connection over it would have.
+    #[cfg(feature = "bus-impl")]
+    #[test]
+    fn credentials_of_the_peer_of_a_socket_of_its_own() {
+        let (socket, _peer) = UnixStream::pair().unwrap();
+
+        let credentials = block_on(ConnectionCredentials::of_peer(&socket)).unwrap();
+
+        assert_ours(&credentials);
+    }
+
+    /// A descriptor that is not a socket has no peer to tell the credentials of.
+    #[cfg(feature = "bus-impl")]
+    #[test]
+    fn a_descriptor_that_is_no_socket_has_no_credentials() {
+        let (read, _write) = std::io::pipe().unwrap();
+
+        let credentials = block_on(ConnectionCredentials::of_peer(&read));
+
+        let Err(Error::InputOutput(e)) = &credentials else {
+            panic!("a pipe has credentials: {credentials:?}");
+        };
+        assert_eq!(e.raw_os_error(), Some(libc::ENOTSOCK), "{e}");
+    }
+
+    /// Asserts that `credentials` are those of this process, as the peer of a socket pair that it
+    /// made has them.
+    fn assert_ours(credentials: &ConnectionCredentials) {
+        assert_eq!(credentials.unix_user_id(), Some(geteuid().as_raw()));
+        assert_eq!(credentials.process_id(), Some(std::process::id()));
+        let mut groups: Vec<_> = getgroups()
+            .unwrap()
+            .into_iter()
+            .map(|group| group.as_raw())
+            .chain([getegid().as_raw()])
+            .collect();
+        groups.sort_unstable();
+        groups.dedup();
+        assert_eq!(credentials.unix_group_ids(), Some(&groups));
     }
 }

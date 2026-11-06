@@ -24,7 +24,7 @@ use std::{
 };
 
 use async_executor::Executor;
-use async_io::{Async, Timer};
+use async_io::{Async, ReadableOwned, Timer, WritableOwned};
 use socket2::{Domain, SockAddr};
 
 #[cfg(unix)]
@@ -228,7 +228,11 @@ impl traits::Runtime for ReadinessFirst {
         T: Send + 'static;
 
     fn register_io_source(&self, source: IoSource) -> io::Result<ReadinessFirstRegistration> {
-        Async::new(source).map(ReadinessFirstRegistration)
+        Ok(ReadinessFirstRegistration {
+            source: Arc::new(Async::new(source)?),
+            readable: Mutex::new(None),
+            writable: Mutex::new(None),
+        })
     }
 
     fn sleep(&self, duration: Duration) -> Sleep {
@@ -590,8 +594,20 @@ impl traits::PollIo for Registration {
 }
 
 /// A registration on async-io's reactor that waits for readiness first.
+///
+/// It waits through a future of async-io's for each direction, which it keeps from one poll to the
+/// next until it resolves. async-io takes a readiness event that comes in the tick of the reactor
+/// that a wait was registered in for one from before the wait, and ignores it. A future remembers
+/// the tick of its first poll, so the next event resolves it. `Async::poll_writable` and
+/// `Async::poll_readable` take the tick of each poll that registers again instead. On a source
+/// that is ready already, such as a socket with room to write, the event of each new registration
+/// can then come in that same tick, poll after poll, holding the operation up for seconds.
 #[derive(Debug)]
-pub(crate) struct ReadinessFirstRegistration(Async<IoSource>);
+pub(crate) struct ReadinessFirstRegistration {
+    source: Arc<Async<IoSource>>,
+    readable: Mutex<Option<ReadableOwned<IoSource>>>,
+    writable: Mutex<Option<WritableOwned<IoSource>>>,
+}
 
 impl traits::PollIo for ReadinessFirstRegistration {
     fn poll_io<T>(
@@ -601,11 +617,15 @@ impl traits::PollIo for ReadinessFirstRegistration {
         mut operation: impl FnMut() -> io::Result<T>,
     ) -> Poll<io::Result<T>> {
         loop {
-            // async-io re-arms the interest and returns `Pending` unless a readiness event newer
-            // than the one it last reported is already there, so this loop cannot spin.
+            // A future polled for the first time returns `Pending`, as it registers its wait, so
+            // this loop cannot spin.
             let ready = match interest {
-                Interest::Readable => self.0.poll_readable(cx),
-                Interest::Writable => self.0.poll_writable(cx),
+                Interest::Readable => {
+                    poll_ready(&self.readable, cx, || self.source.clone().readable_owned())
+                }
+                Interest::Writable => {
+                    poll_ready(&self.writable, cx, || self.source.clone().writable_owned())
+                }
             };
             if let Err(e) = std::task::ready!(ready) {
                 return Poll::Ready(Err(e));
@@ -616,6 +636,23 @@ impl traits::PollIo for ReadinessFirstRegistration {
             }
         }
     }
+}
+
+/// Polls the future that `slot` keeps, or a new one that `wait` makes, and lets it go once it
+/// resolves.
+fn poll_ready<F>(
+    slot: &Mutex<Option<F>>,
+    cx: &mut Context<'_>,
+    wait: impl FnOnce() -> F,
+) -> Poll<F::Output>
+where
+    F: Future + Unpin,
+{
+    let mut slot = slot.lock().unwrap_or_else(PoisonError::into_inner);
+    let ready = std::task::ready!(Pin::new(slot.get_or_insert_with(wait)).poll(cx));
+    *slot = None;
+
+    Poll::Ready(ready)
 }
 
 /// A timer with the completion instant dropped.

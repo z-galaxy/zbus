@@ -174,6 +174,32 @@ impl Message {
         })
     }
 
+    /// The message, at position `recv_seq` of those that a connection received.
+    ///
+    /// The position is set on the message itself, unless a clone of it is held elsewhere, such as
+    /// by the sender of one that came over a channel. That clone keeps its own position, so the
+    /// message is then a new one, which shares the bytes and the file descriptors of this one,
+    /// and what was parsed of them.
+    #[cfg(feature = "p2p")]
+    pub(crate) fn at_position(mut self, recv_seq: u64) -> Self {
+        if let Some(inner) = Arc::get_mut(&mut self.inner) {
+            inner.recv_seq = Sequence { recv_seq };
+
+            return self;
+        }
+        let inner = &self.inner;
+
+        Self {
+            inner: Arc::new(Inner {
+                primary_header: inner.primary_header.clone(),
+                quick_fields: inner.quick_fields.clone(),
+                bytes: inner.bytes.clone(),
+                body_offset: inner.body_offset,
+                recv_seq: Sequence { recv_seq },
+            }),
+        }
+    }
+
     /// The primary header of the message.
     ///
     /// This is the part of the message header that every message has, whatever its type.
@@ -620,6 +646,31 @@ mod tests {
                 assert_eq!(new.data().fds().len(), msg.data().fds().len());
             }
         }
+    }
+
+    /// A message that nothing else holds gets its position in place, and one held elsewhere
+    /// becomes a new message, which leaves the position of the one held elsewhere as it was.
+    #[cfg(feature = "p2p")]
+    #[test]
+    fn at_position() {
+        use std::sync::Arc;
+
+        use super::Sequence;
+
+        let msg = Message::method_call("/", "Test").build(&()).unwrap();
+        let held = msg.clone();
+
+        let msg = msg.at_position(1);
+        assert_eq!(msg.recv_position(), Sequence { recv_seq: 1 });
+        assert_eq!(held.recv_position(), Sequence::default());
+        assert!(!Arc::ptr_eq(&msg.inner, &held.inner));
+        assert_eq!(msg.data().bytes(), held.data().bytes());
+
+        drop(held);
+        let inner = Arc::as_ptr(&msg.inner);
+        let msg = msg.at_position(2);
+        assert_eq!(msg.recv_position(), Sequence { recv_seq: 2 });
+        assert_eq!(Arc::as_ptr(&msg.inner), inner, "the message was copied");
     }
 
     #[test]

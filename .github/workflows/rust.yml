@@ -36,7 +36,7 @@ jobs:
           cargo --locked check -p zbus --no-default-features --target x86_64-unknown-netbsd
           cargo --locked check -p zbus --no-default-features --target aarch64-linux-android
           # The external-runtime-only build: neither the default-rt nor the tokio feature.
-          EXT=proxy,service,object-manager,unixexec,ibus,tracing,p2p
+          EXT=proxy,service,object-manager,unixexec,ibus,tracing,p2p,handover
           cargo --locked check -p zbus --no-default-features --features $EXT
           cargo --locked check -p zbus --no-default-features --features $EXT \
             --target x86_64-pc-windows-gnu
@@ -117,10 +117,10 @@ jobs:
           cargo --locked clippy -p zbus --no-default-features --all-targets \
             --features proxy,service,ibus
           # The bus API, which benchmarks of what checking bodies and receiving messages cost a bus
-          # measure, `connection`'s with byte arrays.
-          cargo --locked clippy -p zbus --all-targets --features bus-impl,serde_bytes
+          # measure, `connection`'s with byte arrays, and the hand-over of a connection.
+          cargo --locked clippy -p zbus --all-targets --features bus-impl,handover,serde_bytes
           # The external-runtime-only build: neither the default-rt nor the tokio feature.
-          EXT=proxy,service,object-manager,unixexec,ibus,tracing,p2p
+          EXT=proxy,service,object-manager,unixexec,ibus,tracing,p2p,handover
           cargo --locked clippy -p zbus --no-default-features --all-targets --features $EXT
           # The service-only fixture has to be built on its own: in a workspace-wide build, the
           # features of its `zbus` dependency are unified with those of the other members.
@@ -189,7 +189,7 @@ jobs:
         run: |
           dbus-run-session --config-file /tmp/dbus-session.conf -- \
             cargo --locked test --release --verbose -p zbus \
-              --features uuid,url,time,chrono,option-as-array,bus-impl,unixexec,ibus \
+              --features uuid,url,time,chrono,option-as-array,bus-impl,handover,unixexec,ibus \
               -- --skip fdpass_systemd
       - name: Test the doc examples with the proxy or service API disabled
         if: matrix.suite == 'zruntime'
@@ -207,7 +207,7 @@ jobs:
         run: |
           dbus-run-session --config-file /tmp/dbus-session.conf -- \
             cargo --locked test --release --verbose --tests -p zbus --no-default-features \
-              --features tokio,proxy,service -- --skip fdpass_systemd
+              --features tokio,proxy,service,handover -- --skip fdpass_systemd
           # The doc examples have to build without the default-rt feature, driven by tokio
           # instead. `-p zbus` is load-bearing: a workspace-wide `--no-default-features` is undone
           # by zbus_xmlgen's default-featured zbus dependency.
@@ -221,12 +221,13 @@ jobs:
         run: |
           # The features are additive, so the backend is then chosen at run time.
           dbus-run-session --config-file /tmp/dbus-session.conf -- \
-            cargo --locked test --release --verbose -p zbus --features tokio,p2p,unixexec,ibus \
+            cargo --locked test --release --verbose -p zbus \
+              --features tokio,p2p,handover,unixexec,ibus \
               -- --skip fdpass_systemd
       - name: Test the external-runtime-only build
         if: matrix.suite == 'external'
         run: |
-          FEATURES=proxy,service,object-manager,unixexec,ibus,tracing,p2p
+          FEATURES=proxy,service,object-manager,unixexec,ibus,tracing,p2p,handover
           # `--tests` over `--lib`: the integration test targets have to build in this feature
           # set too, not only the library's own unit tests. `--doc` is left out: the rendered
           # examples connect to a bus, which a build with neither backend has no runtime for.
@@ -360,7 +361,7 @@ jobs:
           for target in wasm32-wasip1 wasm32-wasip2; do
             cargo --locked clippy -p zbus --no-default-features --target $target
             cargo --locked clippy -p zbus --target $target
-            cargo --locked clippy -p zbus --features p2p,bus-impl --target $target
+            cargo --locked clippy -p zbus --features p2p,bus-impl,handover --target $target
             cargo --locked clippy -p zbus --no-default-features --features $EXT --target $target
             RUSTFLAGS="-D warnings --cfg tokio_unstable" cargo --locked clippy -p zbus \
               --no-default-features --features tokio,$EXT --target $target

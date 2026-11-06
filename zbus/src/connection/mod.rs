@@ -20,6 +20,8 @@ use zruntime::{
 use crate::ObjectServer;
 #[cfg(feature = "service")]
 use crate::log::debug;
+#[cfg(all(feature = "handover", any(unix, windows)))]
+use crate::runtime::IoSource;
 use crate::{
     DBusError, Error, MatchRule, ObjectPath, OwnedGuid, OwnedMatchRule, Result,
     fdo::{ConnectionCredentials, ReleaseNameReply, RequestNameFlags, RequestNameReply},
@@ -38,6 +40,15 @@ pub use builder::Builder;
 
 pub mod socket;
 pub use socket::Socket;
+
+#[cfg(feature = "handover")]
+pub mod handover;
+#[cfg(all(feature = "handover", any(unix, windows)))]
+use handover::SocketKind;
+#[cfg(feature = "handover")]
+pub use handover::{Handover, HandoverSocket};
+#[cfg(feature = "handover")]
+use handover::{SocketWrite, StopStatus};
 
 mod socket_reader;
 use socket_reader::{SocketReader, SocketStatus};
@@ -63,7 +74,7 @@ pub(crate) struct ConnectionInner {
     registered_names: Mutex<HashMap<WellKnownName<'static>, NameStatus>>,
 
     socket_status: Arc<SocketStatus>,
-    socket_write: Mutex<Box<dyn socket::WriteHalf>>,
+    socket_write: Mutex<SocketWrite>,
 
     // Socket reader task
     #[allow(unused)]
@@ -117,6 +128,10 @@ impl Drop for ConnectionInner {
         self.drop_event.notify(usize::MAX);
     }
 }
+
+/// What a connection writes its socket through.
+#[cfg(not(feature = "handover"))]
+type SocketWrite = Box<dyn socket::WriteHalf>;
 
 type Subscriptions = HashMap<OwnedMatchRule, (u64, InactiveReceiver<Result<Message>>)>;
 
@@ -430,7 +445,11 @@ impl Connection {
 
             Ok(None)
         } else {
-            let pending_call = self.inner.pending_method_calls.register_call(serial);
+            let pending_call = self.inner.pending_method_calls.register_call(serial)?;
+            // The reader fails the calls that wait for their replies once it stops, which can be
+            // a while after it was asked to, but a call made since is not to go out at all.
+            #[cfg(feature = "handover")]
+            self.inner.socket_status.stop.ensure_reading()?;
             self.send(&msg).await?;
 
             Ok(Some(pending_call))
@@ -1122,12 +1141,12 @@ impl Connection {
     ) -> Result<Receiver<Result<Message>>> {
         use std::collections::hash_map::Entry;
 
+        // A connection asked to stop reading makes no more streams, though its reader may be yet
+        // to stop and close the channels of the others.
+        #[cfg(feature = "handover")]
+        self.inner.socket_status.stop.ensure_reading()?;
         if self.inner.msg_senders.lock().await.is_empty() {
-            // This only happens if socket reader task has errored out.
-            return Err(Error::InputOutput(Arc::new(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "Socket reader task has errored out",
-            ))));
+            return Err(self.reader_ended_error());
         }
 
         let mut subscriptions = self.inner.subscriptions.lock().await;
@@ -1147,12 +1166,16 @@ impl Connection {
                     )
                     .await?;
                 }
+                // The reader may have ended or stopped in the meantime, and closed the channels of
+                // the others. The subscription is only recorded once its channel is in place.
+                {
+                    let mut senders = self.inner.msg_senders.lock().await;
+                    if senders.is_empty() {
+                        return Err(self.reader_ended_error());
+                    }
+                    senders.insert(Some(rule), sender);
+                }
                 e.insert((1, receiver.clone().deactivate()));
-                self.inner
-                    .msg_senders
-                    .lock()
-                    .await
-                    .insert(Some(rule), sender);
 
                 Ok(receiver)
             }
@@ -1168,6 +1191,20 @@ impl Connection {
                 Ok(receiver.activate_cloned())
             }
         }
+    }
+
+    /// The error of a stream that can't be made, as the reader closed the channels of the others.
+    fn reader_ended_error(&self) -> Error {
+        #[cfg(feature = "handover")]
+        if let Err(e) = self.inner.socket_status.stop.ensure_reading() {
+            return e;
+        }
+
+        // The reader ended on an error.
+        Error::InputOutput(Arc::new(io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "Socket reader task has errored out",
+        )))
     }
 
     pub(crate) async fn remove_match(&self, rule: OwnedMatchRule) -> Result<bool> {
@@ -1222,6 +1259,10 @@ impl Connection {
 
     pub(crate) async fn new(
         auth: Authenticated,
+        #[cfg(all(feature = "handover", any(unix, windows)))] source: Option<(
+            IoSource,
+            SocketKind,
+        )>,
         #[allow(unused)] bus_connection: bool,
         runtime: Runtime,
         method_timeout: Option<Duration>,
@@ -1246,6 +1287,14 @@ impl Connection {
         let msg_senders = Arc::new(Mutex::new(msg_senders));
         let pending_method_calls = PendingMethodCalls::default();
         let subscriptions = Mutex::new(HashMap::new());
+        #[cfg(feature = "handover")]
+        let socket_write = SocketWrite::new(
+            auth.socket_write,
+            #[cfg(any(unix, windows))]
+            source,
+        );
+        #[cfg(not(feature = "handover"))]
+        let socket_write = auth.socket_write;
 
         let connection = Self {
             inner: Arc::new(ConnectionInner {
@@ -1253,8 +1302,10 @@ impl Connection {
                     activity_event: Event::new(),
                     closed: AtomicBool::new(false),
                     closed_event: Event::new(),
+                    #[cfg(feature = "handover")]
+                    stop: StopStatus::new(),
                 }),
-                socket_write: Mutex::new(auth.socket_write),
+                socket_write: Mutex::new(socket_write),
                 server_guid: auth.server_guid,
                 #[cfg(unix)]
                 cap_unix_fd,
@@ -1274,7 +1325,10 @@ impl Connection {
                 runtime,
                 drop_event: Event::new(),
                 method_timeout,
-                credentials: OnceLock::new(),
+                credentials: auth
+                    .peer_credentials
+                    .map(|credentials| OnceLock::from(Arc::new(credentials)))
+                    .unwrap_or_default(),
             }),
         };
 
@@ -1308,6 +1362,11 @@ impl Connection {
     ///
     /// A connection is considered closed either when the remote peer disconnects, an I/O error
     /// occurs on the socket, or [`Connection::close`] is called.
+    #[cfg_attr(
+        feature = "handover",
+        doc = "It is also closed once it was handed over \
+               ([`MessageStream::hand_over`](crate::MessageStream::hand_over))."
+    )]
     pub fn is_closed(&self) -> bool {
         self.inner.is_closed()
     }
@@ -1316,6 +1375,11 @@ impl Connection {
     ///
     /// A connection is considered closed either when the remote peer disconnects, an I/O error
     /// occurs on the socket, or [`Connection::close`] is called.
+    #[cfg_attr(
+        feature = "handover",
+        doc = "It is also closed once it was handed over \
+               ([`MessageStream::hand_over`](crate::MessageStream::hand_over))."
+    )]
     ///
     /// Returns immediately if the connection is already closed.
     pub async fn closed(&self) {
@@ -1333,12 +1397,18 @@ impl Connection {
     /// The fields are populated on the best effort basis. Some or all fields may not even make
     /// sense for certain sockets or on certain platforms and hence will be set to `None`.
     ///
-    /// This method caches the credentials on the first call for you.
+    /// This method caches the credentials on the first call for you. The server side of a
+    /// peer-to-peer connection has them from its handshake already. Once they are known, this
+    /// method doesn't wait for the socket, which a send to a peer that doesn't read can take long
+    /// to be done with.
     ///
     /// # Caveats
     ///
     /// Currently `linux_security_label` field is not populated.
     pub async fn peer_creds(&self) -> io::Result<&Arc<ConnectionCredentials>> {
+        if let Some(creds) = self.inner.credentials.get() {
+            return Ok(creds);
+        }
         let mut socket_write = self.inner.socket_write.lock().await;
 
         // Keeping the `socket_write` lock guard ensures that this isn't racy.
@@ -1361,6 +1431,13 @@ impl Connection {
     /// Close the connection.
     ///
     /// After this call, all reading and writing operations will fail.
+    #[cfg_attr(
+        feature = "handover",
+        doc = "",
+        doc = "On a connection that was handed over \
+               ([`MessageStream::hand_over`](crate::MessageStream::hand_over)), this does nothing \
+               to the socket, which is no longer the connection's."
+    )]
     pub async fn close(self) -> Result<()> {
         self.inner.socket_status.activity_event.notify(usize::MAX);
         let result = self
@@ -1445,6 +1522,12 @@ impl Connection {
         #[cfg(feature = "bus-impl")] validate_bodies: bool,
     ) {
         let inner = &self.inner;
+        #[cfg(feature = "handover")]
+        inner
+            .socket_status
+            .stop
+            .can_stop
+            .store(socket_read.can_take_unread(), Ordering::Release);
         inner
             .socket_reader_task
             .set(
@@ -1911,6 +1994,25 @@ mod p2p_tests {
                 .build(),
             Builder::tcp_stream(p1).p2p().build(),
         )
+    }
+
+    // The server side of a connection keeps the credentials of the client that its handshake
+    // looked up, and gives them while a send holds the socket up.
+    #[cfg(unix)]
+    #[test]
+    #[timeout(15000)]
+    fn server_keeps_the_credentials_of_its_handshake() {
+        crate::utils::block_on(async {
+            // The client comes first.
+            let (_client, server) = unix_p2p_pipe().await.unwrap();
+
+            let _sending = server.inner.socket_write.lock().await;
+            let credentials = server.peer_creds().await.unwrap();
+            assert_eq!(
+                credentials.unix_user_id(),
+                Some(rustix::process::geteuid().as_raw())
+            );
+        });
     }
 
     #[cfg(unix)]

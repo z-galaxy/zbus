@@ -47,6 +47,8 @@ pub(crate) use pipe::PipeOps;
 pub(crate) use tcp::TcpOps;
 #[cfg(any(unix, windows))]
 pub(crate) use unix::UnixOps;
+#[cfg(all(unix, feature = "bus-impl"))]
+pub(crate) use unix::peer_credentials;
 #[cfg(all(unix, any(feature = "default-rt", feature = "tokio")))]
 pub(crate) use unix::unix_socket_address;
 
@@ -84,6 +86,12 @@ where
             runtime: runtime.clone(),
             ops,
         })
+    }
+
+    /// The socket itself, which a connection that is handed over gives a descriptor of.
+    #[cfg(all(feature = "handover", any(unix, windows)))]
+    pub(crate) fn source(&self) -> &IoSource {
+        &self.source
     }
 
     /// Receives bytes, and on a unix socket the file descriptors that came with them, as soon as

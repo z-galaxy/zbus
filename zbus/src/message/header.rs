@@ -354,6 +354,20 @@ impl<'m> Header<'m> {
     }
 }
 
+/// The serial number that the next message built in this process gets.
+#[cfg(feature = "handover")]
+pub(crate) fn next_serial() -> NonZeroU32 {
+    // 0 is no serial number, and the next message skips it.
+    NonZeroU32::new(SERIAL_NUM.load(Relaxed)).unwrap_or(NonZeroU32::MIN)
+}
+
+/// Make the messages built in this process from now on get serial numbers from `next` on, unless
+/// they already would.
+#[cfg(feature = "handover")]
+pub(crate) fn raise_next_serial(next: NonZeroU32) {
+    SERIAL_NUM.fetch_max(next.get(), Relaxed);
+}
+
 static SERIAL_NUM: AtomicU32 = AtomicU32::new(0);
 
 #[cfg(test)]

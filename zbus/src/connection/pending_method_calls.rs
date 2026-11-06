@@ -19,39 +19,38 @@ pub struct PendingMethodCalls {
 }
 
 impl PendingMethodCalls {
-    pub fn register_call(&self, serial: NonZeroU32) -> PendingMethodCall {
+    /// Register a method call, for its reply to complete it.
+    ///
+    /// Once no reply can come in any more, this fails with the error that the calls that were
+    /// pending then failed with, for the call to fail before it is sent.
+    pub fn register_call(&self, serial: NonZeroU32) -> Result<PendingMethodCall> {
         use std::collections::hash_map::Entry;
 
-        let (reply_sender, reply_receiver) = channel(NonZeroUsize::MIN);
-        let closed_error = {
+        let reply_receiver = {
             let mut state = self.inner.lock().unwrap();
             if let Some(error) = &state.closed_error {
-                Some(error.clone())
-            } else {
-                match state.calls.entry(serial) {
-                    Entry::Vacant(entry) => {
-                        entry.insert(reply_sender.clone());
-                    }
-                    Entry::Occupied(_) => {
-                        unreachable!(
-                            "Serial number `{serial}` reused while a method call is still pending"
-                        );
-                    }
-                }
-
-                None
+                return Err(error.clone());
             }
+            let (reply_sender, reply_receiver) = channel(NonZeroUsize::MIN);
+            match state.calls.entry(serial) {
+                Entry::Vacant(entry) => {
+                    entry.insert(reply_sender);
+                }
+                Entry::Occupied(_) => {
+                    unreachable!(
+                        "Serial number `{serial}` reused while a method call is still pending"
+                    );
+                }
+            }
+
+            reply_receiver
         };
 
-        if let Some(error) = closed_error {
-            send_reply(reply_sender, Sequence::LAST, Err(error));
-        }
-
-        PendingMethodCall {
+        Ok(PendingMethodCall {
             serial,
             reply_receiver,
             pending_method_calls: self.clone(),
-        }
+        })
     }
 
     pub fn complete_call(&self, serial: NonZeroU32, ordering: Sequence, reply: Result<Message>) {
