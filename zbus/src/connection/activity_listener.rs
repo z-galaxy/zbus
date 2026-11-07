@@ -11,8 +11,10 @@ use zruntime::EventListener;
 /// The connection notifies activity in three places, each as an operation starts rather than once
 /// it has succeeded:
 ///
-/// * [`Connection::send`] notifies on entry, before it waits for its turn to write and before
-///   anything is written.
+/// * [`Connection::send`], [`Connection::send_all`] and [`Connection::flush`] notify on entry,
+///   before they wait for their turn to write and before anything is written. A send that fails
+///   with [`Error::Unsupported`] before it sends anything, and a `send_all` given no messages,
+///   return at once without notifying.
 /// * The connection's reader notifies each time it starts to read a message: once as it starts, and
 ///   again after each message it has received and handed on. It notifies no more once a read fails.
 /// * [`Connection::close`] notifies on entry, before it closes anything.
@@ -29,8 +31,11 @@ use zruntime::EventListener;
 /// means that no send, read or close has started for that long, not that none is still under way.
 ///
 /// [`Connection::close`]: crate::Connection::close
+/// [`Connection::flush`]: crate::Connection::flush
 /// [`Connection::monitor_activity`]: crate::Connection::monitor_activity
 /// [`Connection::send`]: crate::Connection::send
+/// [`Connection::send_all`]: crate::Connection::send_all
+/// [`Error::Unsupported`]: crate::Error::Unsupported
 #[derive(Debug)]
 #[must_use = "listeners do nothing unless polled"]
 pub struct ActivityListener(pub(crate) EventListener);

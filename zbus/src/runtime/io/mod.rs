@@ -35,6 +35,7 @@ use std::{
     future::{Future, poll_fn},
     io::{self, IoSlice},
     net::Shutdown,
+    slice,
     sync::Arc,
     task::{Context, Poll},
 };
@@ -56,7 +57,7 @@ use super::{Interest, IoSource, Runtime, erased::ErasedRegistration, traits};
 use crate::{
     Message,
     conn::AuthMechanism,
-    connection::socket::{RecvmsgResult, Socket, Split, WriteHalf},
+    connection::socket::{RecvmsgResult, Socket, Split, WriteHalf, Writes},
     fdo::ConnectionCredentials,
     log::trace,
 };
@@ -89,7 +90,7 @@ where
     }
 
     /// The socket itself, which a connection that is handed over gives a descriptor of.
-    #[cfg(all(feature = "handover", any(unix, windows)))]
+    #[cfg(all(unix, feature = "handover"))]
     pub(crate) fn source(&self) -> &IoSource {
         &self.source
     }
@@ -117,24 +118,328 @@ where
     }
 
     /// Runs `operation` as soon as the socket is ready for `interest`.
-    ///
-    /// A call the kernel interrupts is made again straight away: that is not a readiness
-    /// question, so it never reaches the runtime.
     async fn io<T>(
         &self,
         interest: Interest,
         mut operation: impl FnMut() -> io::Result<T>,
     ) -> io::Result<T> {
-        self.registration
-            .io(interest, move || {
-                loop {
-                    match operation() {
-                        Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                        result => return result,
-                    }
+        poll_fn(|cx| self.poll_io(cx, interest, &mut operation)).await
+    }
+
+    /// [`RegisteredIo::io`], polled.
+    ///
+    /// A call the kernel interrupts is made again straight away: that is not a readiness
+    /// question, so it never reaches the runtime.
+    fn poll_io<T>(
+        &self,
+        cx: &mut Context<'_>,
+        interest: Interest,
+        mut operation: impl FnMut() -> io::Result<T>,
+    ) -> Poll<io::Result<T>> {
+        self.registration.poll_io(cx, interest, || {
+            loop {
+                match operation() {
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                    result => return result,
                 }
-            })
-            .await
+            }
+        })
+    }
+}
+
+/// A socket that zbus drives itself, as a connection that runs over it writes it.
+///
+/// It stands for a [`RegisteredIo`] whatever its [`SocketOps`], so that a connection can keep
+/// the socket that it runs over, and write it directly, several messages at a time, rather than
+/// through its [`WriteHalf`].
+pub(crate) trait PollSend: fmt::Debug + Send + Sync {
+    /// Sends the bytes of `buffers`, in order, and on a unix socket `fds` along with them, as soon
+    /// as the socket is writable.
+    ///
+    /// Each send that this gets to is one attempt at the syscall, and what it wrote is what this
+    /// gives, in the same poll. So a future that polls this and is dropped before it gets that has
+    /// written nothing.
+    fn poll_send(
+        &self,
+        cx: &mut Context<'_>,
+        buffers: &[IoSlice<'_>],
+        #[cfg(unix)] fds: &[BorrowedFd<'_>],
+    ) -> Poll<io::Result<usize>>;
+
+    /// Sends the bytes of `buffers`, in order, and on a unix socket `fds` along with them, at once,
+    /// whatever the runtime knows of the socket: one attempt at the syscall, made again straight
+    /// away where the kernel interrupts it, which fails with an I/O error of kind `WouldBlock`
+    /// where the socket takes nothing now.
+    fn try_send(
+        &self,
+        buffers: &[IoSlice<'_>],
+        #[cfg(unix)] fds: &[BorrowedFd<'_>],
+    ) -> io::Result<usize>;
+}
+
+impl<O> PollSend for RegisteredIo<O>
+where
+    O: SocketOps,
+{
+    fn poll_send(
+        &self,
+        cx: &mut Context<'_>,
+        buffers: &[IoSlice<'_>],
+        #[cfg(unix)] fds: &[BorrowedFd<'_>],
+    ) -> Poll<io::Result<usize>> {
+        self.poll_io(cx, Interest::Writable, || {
+            self.ops.send(
+                &self.source,
+                buffers,
+                #[cfg(unix)]
+                fds,
+            )
+        })
+    }
+
+    fn try_send(
+        &self,
+        buffers: &[IoSlice<'_>],
+        #[cfg(unix)] fds: &[BorrowedFd<'_>],
+    ) -> io::Result<usize> {
+        loop {
+            match self.ops.send(
+                &self.source,
+                buffers,
+                #[cfg(unix)]
+                fds,
+            ) {
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                sent => return sent,
+            }
+        }
+    }
+}
+
+/// How the writes of messages to a socket go, as [`write_messages`] makes them: what is noted of
+/// how far each takes the messages, and whether they stop, rather than wait for the socket to take
+/// more.
+pub(crate) trait Progress {
+    /// Note how far a write took the messages: the first `done` of them are written whole, and
+    /// `cut` is the one after them, with how many of its bytes are written, if the write ended in
+    /// the middle of it.
+    fn wrote(&mut self, done: usize, cut: Option<(&Message, usize)>);
+
+    /// Whether to stop, rather than wait for the socket to take more, as it takes no more for now.
+    /// Unless this says to stop, the task of `cx` is woken once it is to be asked again, if the
+    /// socket doesn't take more first.
+    fn stops(&mut self, cx: &mut Context<'_>) -> bool;
+}
+
+/// Notes nothing, and never stops.
+impl Progress for () {
+    fn wrote(&mut self, _done: usize, _cut: Option<(&Message, usize)>) {}
+
+    fn stops(&mut self, _cx: &mut Context<'_>) -> bool {
+        false
+    }
+}
+
+/// Writes `msgs` to `socket`, in order, with as few writes as the socket takes.
+///
+/// Each write starts at a message, and takes the messages after it that carry no file descriptors,
+/// up to `MESSAGES_PER_WRITE` in all, until it has `BYTES_PER_WRITE` or more. A message with file
+/// descriptors goes in a write of its own, which sends them with its first byte. Whatever part of a
+/// write the socket doesn't take goes in the next write, without the descriptors.
+///
+/// The write of its own is for dbus-broker, which gives the descriptors that a read returns to the
+/// message that the read ends in. Linux ends a read that returns descriptors with the data of the
+/// write that they came with, if not sooner, so that is a byte of their message only if the write
+/// holds nothing but their message. dbus-broker disconnects a peer whose message comes without the
+/// descriptors that its header counts.
+///
+/// After each write, `progress` is told how far it took the messages ([`Progress::wrote`]). The
+/// messages before the one that it ended in the middle of, if any, are written whole, and none of
+/// those after it, so a future of this that is dropped, or that fails, leaves just what `progress`
+/// was last told unwritten.
+///
+/// Where the socket takes no more for now, `progress` is asked whether to stop rather than wait for
+/// it, and if it says so, the write is made at once instead, as [`poll_write`] tells. Where the
+/// socket takes nothing of that write, this stops, and gives back the messages of which nothing is
+/// written: those after the one that `progress` was last told the write ended in the middle of, if
+/// any, for the caller to send later. Otherwise it gives back none.
+pub(crate) async fn write_messages<'m, S, P>(
+    socket: &S,
+    mut msgs: &'m [Message],
+    progress: &mut P,
+) -> io::Result<&'m [Message]>
+where
+    S: PollSend + ?Sized,
+    P: Progress,
+{
+    // How many of the messages are written whole, for `progress`.
+    let mut done = 0;
+    while !msgs.is_empty() {
+        let mut bytes = msgs[0].data().len();
+        let len = if carries_fds(&msgs[0]) {
+            1
+        } else {
+            1 + msgs[1..]
+                .iter()
+                .take(MESSAGES_PER_WRITE - 1)
+                .take_while(|msg| {
+                    let joins = bytes < BYTES_PER_WRITE && !carries_fds(msg);
+                    bytes += msg.data().len();
+
+                    joins
+                })
+                .count()
+        };
+        let (write, rest) = msgs.split_at(len);
+        let mut buffers = [IoSlice::new(&[]); MESSAGES_PER_WRITE];
+        for (buffer, msg) in buffers.iter_mut().zip(write) {
+            trace!("Sending message: {:?}", msg);
+            *buffer = IoSlice::new(msg.data());
+        }
+        let mut buffers = &mut buffers[..len];
+        #[cfg(unix)]
+        let fds: Vec<_> = write[0].data().fds().iter().map(|fd| fd.as_fd()).collect();
+        #[cfg(unix)]
+        let mut fds = &fds[..];
+
+        while !buffers.is_empty() {
+            let polled = poll_fn(|cx| {
+                poll_write(
+                    socket,
+                    cx,
+                    buffers,
+                    #[cfg(unix)]
+                    fds,
+                    progress,
+                )
+            });
+            let written = match polled.await {
+                Ok(written) => written,
+                // The first buffer left is what is left of the message that the writes stopped in.
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    return Ok(unwritten(msgs, len - buffers.len(), buffers[0].len()));
+                }
+                Err(e) => return Err(e),
+            };
+            #[cfg(unix)]
+            {
+                fds = &[];
+            }
+            IoSlice::advance_slices(&mut buffers, written);
+            // The first buffer left is what is left of the message that the write ended in.
+            let whole = len - buffers.len();
+            let ended_in = buffers.first().and_then(|left| {
+                let msg = &write[whole];
+                let written = msg.data().len() - left.len();
+
+                (written > 0).then_some((msg, written))
+            });
+            progress.wrote(done + whole, ended_in);
+        }
+        for msg in write {
+            trace!(
+                "Sent message with serial: {}",
+                msg.primary_header().serial_num()
+            );
+        }
+        done += len;
+        msgs = rest;
+    }
+
+    Ok(&[])
+}
+
+/// Writes `msg` to `socket`, as [`write_messages`] does given `msg` alone, and gives back what that
+/// does: `msg`, where it stops before anything of `msg` is written, and otherwise nothing.
+// Written out apart from `write_messages` for the send of a single message, which every
+// `Connection::send` is, so that the compiler knows that there is only the one.
+pub(crate) async fn write_message<'m, S, P>(
+    socket: &S,
+    msg: &'m Message,
+    progress: &mut P,
+) -> io::Result<&'m [Message]>
+where
+    S: PollSend + ?Sized,
+    P: Progress,
+{
+    trace!("Sending message: {:?}", msg);
+    let data = msg.data();
+    #[cfg(unix)]
+    let fds: Vec<_> = data.fds().iter().map(|fd| fd.as_fd()).collect();
+    #[cfg(unix)]
+    let mut fds = &fds[..];
+    let mut written = 0;
+    while written < data.len() {
+        let buffers = [IoSlice::new(&data[written..])];
+        let polled = poll_fn(|cx| {
+            poll_write(
+                socket,
+                cx,
+                &buffers,
+                #[cfg(unix)]
+                fds,
+                progress,
+            )
+        });
+        let sent = match polled.await {
+            Ok(sent) => sent,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                return Ok(if written > 0 {
+                    &[]
+                } else {
+                    slice::from_ref(msg)
+                });
+            }
+            Err(e) => return Err(e),
+        };
+        #[cfg(unix)]
+        {
+            fds = &[];
+        }
+        written += sent;
+        let cut = (written < data.len()).then_some((msg, written));
+        progress.wrote(usize::from(cut.is_none()), cut);
+    }
+    trace!(
+        "Sent message with serial: {}",
+        msg.primary_header().serial_num()
+    );
+
+    Ok(&[])
+}
+
+/// One write of `buffers` to `socket`, and on a unix socket of `fds` along with them, as soon as
+/// the socket is writable: what it wrote.
+///
+/// Where the socket takes no more for now, `progress` is asked whether to stop rather than wait
+/// ([`Progress::stops`]). If it says so, the write is made at once instead, as one attempt at the
+/// syscall, whatever the runtime knows of the socket, as a runtime can hold a write back before it
+/// makes one, such as until it hears that the socket is writable. That fails with an I/O error of
+/// kind `WouldBlock` where the socket takes nothing then, which a write that waits never fails
+/// with.
+pub(crate) fn poll_write<S, P>(
+    socket: &S,
+    cx: &mut Context<'_>,
+    buffers: &[IoSlice<'_>],
+    #[cfg(unix)] fds: &[BorrowedFd<'_>],
+    progress: &mut P,
+) -> Poll<io::Result<usize>>
+where
+    S: PollSend + ?Sized,
+    P: Progress,
+{
+    match socket.poll_send(
+        cx,
+        buffers,
+        #[cfg(unix)]
+        fds,
+    ) {
+        Poll::Pending if progress.stops(cx) => Poll::Ready(socket.try_send(
+            buffers,
+            #[cfg(unix)]
+            fds,
+        )),
+        polled => polled,
     }
 }
 
@@ -250,15 +555,6 @@ pub(crate) enum Registration {
 }
 
 impl Registration {
-    /// Runs `operation` every time the source is ready for `interest`, until it no longer blocks.
-    pub(crate) async fn io<T>(
-        &self,
-        interest: Interest,
-        mut operation: impl FnMut() -> io::Result<T>,
-    ) -> io::Result<T> {
-        poll_fn(|cx| self.poll_io(cx, interest, &mut operation)).await
-    }
-
     /// [`Registration::poll_io`] on the runtime this registration was made on.
     pub(crate) fn poll_io<T>(
         &self,
@@ -287,73 +583,9 @@ impl<O> WriteHalf for Arc<RegisteredIo<O>>
 where
     O: SocketOps,
 {
-    // `msgs` go with as few writes as the socket takes. Each write starts at a message, and takes
-    // the messages after it that carry no file descriptors, up to `MESSAGES_PER_WRITE` in all,
-    // until it has `BYTES_PER_WRITE` or more. A message with file descriptors goes in a write of
-    // its own, which sends them with its first byte. Whatever part of a write the socket doesn't
-    // take goes in the next write, without the descriptors.
-    //
-    // The write of its own is for dbus-broker, which gives the descriptors that a read returns to
-    // the message that the read ends in. Linux ends a read that returns descriptors with the data
-    // of the write that they came with, if not sooner, so that is a byte of their message only if
-    // the write holds nothing but their message. dbus-broker disconnects a peer whose message
-    // comes without the descriptors that its header counts.
-    async fn send_messages(&mut self, mut msgs: &[Message]) -> crate::Result<()> {
-        let socket = &**self;
-
-        while !msgs.is_empty() {
-            let mut bytes = msgs[0].data().len();
-            let len = if carries_fds(&msgs[0]) {
-                1
-            } else {
-                1 + msgs[1..]
-                    .iter()
-                    .take(MESSAGES_PER_WRITE - 1)
-                    .take_while(|msg| {
-                        let joins = bytes < BYTES_PER_WRITE && !carries_fds(msg);
-                        bytes += msg.data().len();
-
-                        joins
-                    })
-                    .count()
-            };
-            let (write, rest) = msgs.split_at(len);
-            let mut buffers = [IoSlice::new(&[]); MESSAGES_PER_WRITE];
-            for (buffer, msg) in buffers.iter_mut().zip(write) {
-                trace!("Sending message: {:?}", msg);
-                *buffer = IoSlice::new(msg.data());
-            }
-            let mut buffers = &mut buffers[..len];
-            #[cfg(unix)]
-            let fds: Vec<_> = write[0].data().fds().iter().map(|fd| fd.as_fd()).collect();
-            #[cfg(unix)]
-            let mut fds = &fds[..];
-
-            while !buffers.is_empty() {
-                let written = socket
-                    .write_with(|| {
-                        socket.ops.send(
-                            &socket.source,
-                            buffers,
-                            #[cfg(unix)]
-                            fds,
-                        )
-                    })
-                    .await?;
-                #[cfg(unix)]
-                {
-                    fds = &[];
-                }
-                IoSlice::advance_slices(&mut buffers, written);
-            }
-            for msg in write {
-                trace!(
-                    "Sent message with serial: {}",
-                    msg.primary_header().serial_num()
-                );
-            }
-            msgs = rest;
-        }
+    // With as few writes as the socket takes, as `write_messages` tells.
+    async fn send_messages(&mut self, msgs: &[Message]) -> crate::Result<()> {
+        write_messages(&**self, msgs, &mut ()).await?;
 
         Ok(())
     }
@@ -404,6 +636,20 @@ where
     async fn peer_credentials(&mut self) -> io::Result<ConnectionCredentials> {
         self.ops.peer_credentials(&self.source, &self.runtime).await
     }
+
+    // Each call to `sendmsg` is one attempt at the syscall, as soon as the socket is writable, and
+    // nothing underneath holds on to what it wrote.
+    fn can_resume_writes(&self) -> bool {
+        true
+    }
+}
+
+/// The messages of `msgs` of which nothing is written, where the writes stopped in the one numbered
+/// `next`, of which `left` bytes were left to write.
+fn unwritten(msgs: &[Message], next: usize, left: usize) -> &[Message] {
+    let started = left < msgs[next].data().len();
+
+    &msgs[next + usize::from(started)..]
 }
 
 /// Whether `msg` carries file descriptors, which only a message on unix can.
@@ -422,7 +668,7 @@ fn carries_fds(_msg: &Message) -> bool {
 ///
 /// Each message is a buffer of its own in the write, and 16 buffers are as many as POSIX lets a
 /// platform limit a write to.
-const MESSAGES_PER_WRITE: usize = 16;
+pub(crate) const MESSAGES_PER_WRITE: usize = 16;
 
 /// How many bytes of messages a write of several takes before it ends.
 ///
@@ -442,10 +688,16 @@ where
     type ReadHalf = Reader<O>;
     type WriteHalf = Arc<Self>;
 
+    // A connection writes the socket directly, several messages at a time, as `write_messages`
+    // tells, rather than through the write half.
     fn split(self) -> Split<Reader<O>, Arc<Self>> {
         let socket = Arc::new(self);
 
-        Split::new(Reader::new(socket.clone()), socket)
+        Split::with_writes(
+            Reader::new(socket.clone()),
+            socket.clone(),
+            Some(Writes::Driven(socket)),
+        )
     }
 }
 

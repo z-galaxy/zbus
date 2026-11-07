@@ -34,7 +34,7 @@ use super::{
 #[cfg(feature = "unixexec")]
 use crate::{
     Message,
-    connection::socket::{BoxedSplit, ReadHalf, Split, WriteHalf},
+    connection::socket::{BoxedSplit, ReadHalf, Split, WriteHalf, Writes},
     fdo::ConnectionCredentials,
 };
 
@@ -109,19 +109,23 @@ pub(crate) struct Child {
 
 #[cfg(feature = "unixexec")]
 impl Child {
-    /// The child's standard output and input, as the halves a connection reads and writes.
+    /// The child's standard output and input, as the halves a connection reads and writes. The
+    /// connection writes the standard input directly, as it does a socket that zbus drives.
     ///
     /// [`Connection::close`] closes the helper's standard input, which is what tells the program
     /// to exit; a pipe has no shutdown of its own, so closing here is letting go of the
-    /// descriptor.
+    /// descriptor, which the connection does for the pipe that it writes directly too.
     ///
     /// [`Connection::close`]: crate::Connection::close
     pub(crate) fn into_split(self) -> BoxedSplit {
         let Self { stdin, stdout } = self;
 
-        Split::new(
+        Split::with_writes(
             Box::new(Reader::new(stdout)) as Box<dyn ReadHalf>,
-            Box::new(Stdin { pipe: Some(stdin) }) as Box<dyn WriteHalf>,
+            Box::new(Stdin {
+                pipe: Some(stdin.clone()),
+            }) as Box<dyn WriteHalf>,
+            Some(Writes::Driven(stdin)),
         )
     }
 }
@@ -165,6 +169,12 @@ impl WriteHalf for Stdin {
 
     async fn peer_credentials(&mut self) -> io::Result<ConnectionCredentials> {
         WriteHalf::peer_credentials(self.pipe()?).await
+    }
+
+    // `sendmsg` writes through that of the pipe, which can resume writes, or fails, with nothing
+    // written, once the half is closed.
+    fn can_resume_writes(&self) -> bool {
+        true
     }
 }
 
