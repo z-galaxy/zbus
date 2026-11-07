@@ -99,10 +99,11 @@ impl SocketWrite {
     /// Whether the connection can be prepared for a hand-over, as
     /// `Connection::prepare_hand_over` does: whether its sends can keep what the socket doesn't
     /// take at once, as they keep track of how far each write takes the messages, over a socket
-    /// that zbus drives or through a write half that can resume writes.
+    /// that zbus drives or through a write half that can resume writes, or as the socket queues
+    /// each message whole or not at all, as a channel does.
     #[cfg(all(unix, feature = "handover"))]
     pub(super) fn can_prepare_hand_over(&self) -> bool {
-        matches!(self.writes, Some(Writes::Driven(_))) || self.half_resumes
+        self.writes.is_some() || self.half_resumes
     }
 
     /// Send `msg`, unless the connection was handed over, as [`SocketWrite::send_messages`] does,
@@ -130,6 +131,12 @@ impl SocketWrite {
 
                 return Ok(());
             }
+            #[cfg(all(unix, feature = "handover", feature = "p2p"))]
+            Some(Writes::Whole) => {
+                let half = self.half.as_deref_mut().ok_or_else(handed_over)?;
+
+                return queue(half, msgs, &mut self.rest).await;
+            }
             _ => (),
         }
         let half = self.half.as_deref_mut().ok_or_else(handed_over)?;
@@ -155,7 +162,8 @@ impl SocketWrite {
     /// [`write_messages`] does, or through the `sendmsg` of a half that can resume writes, a
     /// message at a time, flushing the half once they are all written. Once a hand-over of the
     /// connection is prepared, it writes what the socket takes at once, and keeps the rest in
-    /// `rest`. Otherwise it hands them whole to [`WriteHalf::send_messages`].
+    /// `rest`, as it then does for a channel, which takes each message whole or not at all.
+    /// Otherwise it hands them whole to [`WriteHalf::send_messages`].
     pub(super) async fn send_messages(&mut self, msgs: &[Message]) -> Result<()> {
         match &self.writes {
             Some(Writes::Driven(socket)) => {
@@ -175,6 +183,12 @@ impl SocketWrite {
                 send_through(half, msgs, &mut self.rest).await?;
 
                 return Ok(());
+            }
+            #[cfg(all(unix, feature = "handover", feature = "p2p"))]
+            Some(Writes::Whole) => {
+                let half = self.half.as_deref_mut().ok_or_else(handed_over)?;
+
+                return queue(half, msgs, &mut self.rest).await;
             }
             _ => (),
         }
@@ -296,6 +310,11 @@ impl SocketWrite {
             None if self.half_resumes => {
                 let half = self.half.as_deref_mut().ok_or_else(handed_over)?;
                 write_unwritten_through(half, &mut writing).await?;
+            }
+            #[cfg(all(unix, feature = "handover", feature = "p2p"))]
+            Some(Writes::Whole) => {
+                let half = self.half.as_deref_mut().ok_or_else(handed_over)?;
+                queue_kept(half, &mut writing).await?;
             }
             // Only a send that keeps track of how far each write takes it leaves anything.
             _ => (),
@@ -568,6 +587,71 @@ where
         polled => polled,
     })
     .await
+}
+
+/// Queue `msgs` on the channel that `half` writes, after the messages that sends kept, if any,
+/// waiting for room until a hand-over of the connection is prepared, and from then on as far as the
+/// channel has room for them at once, keeping the rest in `rest`.
+#[cfg(all(unix, feature = "handover", feature = "p2p"))]
+async fn queue(half: &mut dyn WriteHalf, msgs: &[Message], rest: &mut Rest) -> Result<()> {
+    let mut writing = Writing::sending(rest);
+    if !writing.rest.is_empty() && !queue_kept(half, &mut writing).await? {
+        writing.rest.keep(msgs);
+
+        return Ok(());
+    }
+    let left = queue_all(half, msgs, &mut writing).await?;
+    writing.rest.keep(left);
+
+    Ok(())
+}
+
+/// Queue the messages that sends kept, if any, on the channel that `half` writes, as far as
+/// `writing` has the sends go. Whether it queued them all.
+#[cfg(all(unix, feature = "handover", feature = "p2p"))]
+async fn queue_kept(half: &mut dyn WriteHalf, writing: &mut Writing<'_>) -> Result<bool> {
+    while !writing.rest.kept.is_empty() {
+        let copies = writing.rest.kept_copies();
+        let mut taking = TakingKept::new(writing);
+        if !queue_all(half, &copies, &mut taking).await?.is_empty() {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
+/// Queue `msgs` on the channel that `half` writes, in order, telling `progress` as each is queued.
+///
+/// The channel takes each message whole or not at all, as [`WriteHalf::send_message`] of its write
+/// half sends it, and a send whose future is dropped before it resolves queues nothing. So where
+/// `progress` says to stop rather than wait for room ([`Progress::stops`]), the send of the next
+/// message is given up on, and this gives back the messages that it didn't queue, for the caller to
+/// send later. Otherwise it gives back none.
+#[cfg(all(unix, feature = "handover", feature = "p2p"))]
+async fn queue_all<'m, P>(
+    half: &mut dyn WriteHalf,
+    msgs: &'m [Message],
+    progress: &mut P,
+) -> Result<&'m [Message]>
+where
+    P: Progress,
+{
+    for (done, msg) in msgs.iter().enumerate() {
+        let mut queueing = half.send_message(msg);
+        let queued = poll_fn(|cx| match queueing.as_mut().poll(cx) {
+            Poll::Pending if progress.stops(cx) => Poll::Ready(None),
+            polled => polled.map(Some),
+        })
+        .await;
+        let Some(queued) = queued else {
+            return Ok(&msgs[done..]);
+        };
+        queued?;
+        progress.wrote(done + 1, None);
+    }
+
+    Ok(&[])
 }
 
 /// The writes of a send, or of a flush, which keep track in `rest` of how far each takes the
@@ -1652,6 +1736,77 @@ mod tests {
             assert_eq!(reading.join().unwrap(), sent);
             assert_eq!(conn.unwritten_len(), 0);
             assert_eq!(counts.flushes.load(Ordering::Relaxed), flushes + 1);
+        });
+    }
+
+    /// Once a hand-over of a connection over a channel is prepared, sends to the full channel
+    /// don't wait for room: a send that waits for room as it is prepared is woken, and stops
+    /// waiting, and the connection keeps the messages whole, which a flush queues as the peer
+    /// takes the others.
+    #[cfg(feature = "handover")]
+    #[test]
+    #[timeout(15000)]
+    fn sends_to_a_full_channel_dont_wait_once_prepared() {
+        under_every_runtime(|runtime| async move {
+            let (ours, theirs) = Channel::pair();
+            let conn = on(
+                Builder::authenticated_socket(ours, Guid::generate()),
+                &runtime,
+            )
+            .p2p()
+            .build()
+            .await
+            .unwrap();
+            let (mut peer, _sends_nothing) = Socket::split(theirs).take();
+            let msgs: Vec<_> = (0..64).map(signal).collect();
+            // Signals until the channel takes no more, the last of which waits for room.
+            let mut queued = 0;
+            let mut sending = loop {
+                let mut sending = Box::pin(conn.send(&msgs[queued]));
+                match poll_once(sending.as_mut()).await {
+                    Some(sent) => sent.unwrap(),
+                    None => break sending,
+                }
+                queued += 1;
+            };
+            let woken = Arc::new(Woken::default());
+            let waker = Waker::from(woken.clone());
+            let mut cx = Context::from_waker(&waker);
+            assert!(sending.as_mut().poll(&mut cx).is_pending());
+            assert!(!woken.0.load(Ordering::Relaxed));
+
+            assert!(conn.prepare_hand_over());
+
+            assert!(woken.0.load(Ordering::Relaxed), "the send wasn't woken");
+            let sent = sending.as_mut().poll(&mut cx);
+            assert!(matches!(sent, Poll::Ready(Ok(()))), "{sent:?}");
+            drop(sending);
+            assert_eq!(conn.unwritten_len(), msgs[queued].data().len());
+            without_waiting(&runtime, conn.send_all(&msgs[queued + 1..queued + 3])).await;
+            let kept: usize = msgs[queued..queued + 3]
+                .iter()
+                .map(|msg| msg.data().len())
+                .sum();
+            assert_eq!(conn.unwritten_len(), kept);
+            let receiving = async {
+                let (mut bytes, mut fds) = (vec![], vec![]);
+                let mut received = vec![];
+                for seq in 0..queued + 3 {
+                    let msg = peer.receive_message(seq as u64, &mut bytes, &mut fds).await;
+                    received.push(msg.unwrap().data().to_vec());
+                }
+
+                received
+            };
+            let (flushed, received) = futures_util::join!(conn.flush(), receiving);
+
+            flushed.unwrap();
+            let sent: Vec<_> = msgs[..queued + 3]
+                .iter()
+                .map(|msg| msg.data().to_vec())
+                .collect();
+            assert_eq!(received, sent);
+            assert_eq!(conn.unwritten_len(), 0);
         });
     }
 
