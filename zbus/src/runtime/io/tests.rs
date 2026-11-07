@@ -1291,13 +1291,15 @@ fn descriptors_taken_over_wait_as_one_set() {
     }
 }
 
-/// A reader that takes over the start of a message longer than its buffer grows the buffer to hold
-/// it, and gives that room back once the message moves into an allocation of its own: the read
-/// after the message has no more room than that of a reader that took nothing over.
+/// A reader that takes over the start of a message longer than its buffer reads the rest of it
+/// straight into an allocation of the message's own: the one that it takes over, if it takes
+/// nothing else over, or else one that the start moves into, out of the buffer, which grew to hold
+/// what the reader took over and then gives that room back. Either way, the read after the message
+/// has no more room than that of a reader that took nothing over.
 #[cfg(all(unix, feature = "handover"))]
 #[test]
 #[timeout(15000)]
-fn a_reader_gives_back_the_room_that_it_grew_its_buffer_by() {
+fn the_start_of_a_long_message_taken_over_is_read_into_an_allocation_of_its_own() {
     let long = Message::method_call("/", "Test")
         .build(&vec![0u8; 64 * 1024])
         .unwrap();
@@ -1314,27 +1316,125 @@ fn a_reader_gives_back_the_room_that_it_grew_its_buffer_by() {
                 "the buffer of a reader holds {buffer} bytes"
             );
 
-            let rooms = Arc::new(Mutex::new(vec![]));
-            let script = VecDeque::from([
-                (long.data()[taken_over..].to_vec(), vec![]),
-                (short.data().to_vec(), vec![]),
-            ]);
-            let ops = Rooms(Scripted(Mutex::new(script)), rooms.clone());
-            let (mut reader, _peer) = scripted(&runtime, ops);
-            let mut unread = long.data()[..taken_over].to_vec();
-            for (seq, sent) in [long, short].into_iter().enumerate() {
-                let received = reader
-                    .receive_message(seq as u64, &mut unread, &mut vec![])
+            // Whether a whole message comes before the start of the long one.
+            for before in [false, true] {
+                let rooms = Arc::new(Mutex::new(vec![]));
+                let script = VecDeque::from([
+                    (long.data()[taken_over..].to_vec(), vec![]),
+                    (short.data().to_vec(), vec![]),
+                ]);
+                let ops = Rooms(Scripted(Mutex::new(script)), rooms.clone());
+                let (mut reader, _peer) = scripted(&runtime, ops);
+                let mut unread = long.data()[..taken_over].to_vec();
+                let mut sent = vec![long, short];
+                if before {
+                    unread.splice(..0, short.data().iter().copied());
+                    sent.insert(0, short);
+                }
+                for (seq, sent) in sent.into_iter().enumerate() {
+                    let received = reader
+                        .receive_message(seq as u64, &mut unread, &mut vec![])
+                        .await
+                        .unwrap();
+                    assert_eq!(&received.data()[..], &sent.data()[..], "before: {before}");
+                }
+
+                // The first read is into the allocation of the long message, the second into the
+                // buffer.
+                let rest = long.data().len() - taken_over;
+                assert_eq!(*rooms.lock().unwrap(), [rest, buffer], "before: {before}");
+            }
+        }
+    });
+}
+
+/// A reader hands over the buffer that it reads into, room and all, with what it holds moved to
+/// its start, rather than a copy of what it holds, where nothing comes before that. It hands over
+/// the allocation of a message longer than its buffer that it was stopped in the middle of as it
+/// is too, with room for the rest of the message, which a reader that takes it over reads the rest
+/// into: the message that it yields is in that very allocation.
+#[cfg(all(unix, feature = "handover"))]
+#[test]
+#[timeout(15000)]
+fn a_reader_hands_its_buffer_over_as_it_is() {
+    let short = Message::method_call("/", "Test")
+        .build(&vec![0u8; 100])
+        .unwrap();
+    let long = Message::method_call("/", "Test")
+        .build(&vec![0u8; 64 * 1024])
+        .unwrap();
+
+    under_every_runtime(|runtime| {
+        let (short, long) = (&short, &long);
+
+        async move {
+            // Where the reader is stopped in each message.
+            for (msg, at) in [(short, 10), (long, 32 * 1024)] {
+                let stalled = Arc::new(AtomicBool::new(false));
+                let script = VecDeque::from([(msg.data()[..at].to_vec(), vec![])]);
+                let ops = Stalling(Scripted(Mutex::new(script)), stalled.clone());
+                let (mut stopped, _peer) = scripted(&runtime, ops);
+                let (mut bytes, mut fds) = (vec![], vec![]);
+                let call = stopped.receive_message(0, &mut bytes, &mut fds);
+                drop_once_stalled(call, &stalled).await;
+                let (mut unread, mut fds) = (vec![], vec![]);
+
+                stopped.take_unread(&mut unread, &mut fds);
+
+                assert_eq!(unread, &msg.data()[..at]);
+                assert!(
+                    unread.capacity() > at,
+                    "the reader handed over a copy of what it read"
+                );
+                let allocation = unread.as_ptr();
+                let rest = VecDeque::from([(msg.data()[at..].to_vec(), vec![])]);
+                let (mut taking_over, _peer) = scripted(&runtime, Scripted(Mutex::new(rest)));
+                let received = taking_over
+                    .receive_message(0, &mut unread, &mut fds)
                     .await
                     .unwrap();
-                assert_eq!(&received.data()[..], &sent.data()[..]);
+                assert_eq!(&received.data()[..], &msg.data()[..]);
+                if at > 10 {
+                    assert_eq!(
+                        received.data().as_ptr(),
+                        allocation,
+                        "the message was copied"
+                    );
+                }
             }
-
-            // The first read is into the allocation of the long message, the second into the
-            // buffer.
-            let rest = long.data().len() - taken_over;
-            assert_eq!(*rooms.lock().unwrap(), [rest, buffer]);
         }
+    });
+}
+
+/// A reader that handed its buffer over, and isn't given back what it held, as nothing else does,
+/// reads on into a new buffer.
+#[cfg(all(unix, feature = "handover"))]
+#[test]
+#[timeout(15000)]
+fn a_reader_that_handed_its_buffer_over_reads_into_a_new_one() {
+    under_every_runtime(|runtime| async move {
+        let (ours, peer) = UnixStream::pair().unwrap();
+        let probe = ours.try_clone().unwrap();
+        let mut reader = Reader::new(half(&runtime, ours, UnixOps));
+        let msg = Message::method_call("/", "Test").build(&()).unwrap();
+        (&peer).write_all(&msg.data()[..10]).unwrap();
+        let (mut bytes, mut fds) = (vec![], vec![]);
+        {
+            let mut call = reader.receive_message(0, &mut bytes, &mut fds);
+            while rustix::io::ioctl_fionread(&probe).unwrap() > 0 {
+                let received = futures_lite::future::poll_once(&mut call).await;
+                assert!(received.is_none(), "a message came out of part of one");
+                runtime.sleep(std::time::Duration::from_millis(1)).await;
+            }
+        }
+        let (mut unread, mut fds) = (vec![], vec![]);
+        reader.take_unread(&mut unread, &mut fds);
+        assert_eq!(unread, &msg.data()[..10]);
+
+        (&peer).write_all(&msg.data()[..]).unwrap();
+        let received = reader.receive_message(1, &mut vec![], &mut vec![]).await;
+
+        assert_eq!(&received.unwrap().data()[..], &msg.data()[..]);
     });
 }
 

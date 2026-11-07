@@ -81,12 +81,20 @@ where
 
     /// Puts what the handshake read past its own end, or what a connection that was handed over
     /// left unread, ahead of what this half has read itself.
+    ///
+    /// A message longer than the buffer, or the start of one, and nothing else, as a reader that
+    /// was stopped in the middle of one hands it over, becomes the allocation of the message
+    /// itself, as it is, rather than go through the buffer.
     fn take_over(&mut self, bytes: &mut Vec<u8>, #[cfg(unix)] fds: &mut Vec<OwnedFd>) {
         debug_assert!(
             self.long.is_empty() || bytes.is_empty(),
             "bytes read before a message partly read would come after it",
         );
-        if !bytes.is_empty() {
+        if let Some(len) = self.long_start(bytes) {
+            self.long = mem::take(bytes);
+            self.long_filled = self.long.len();
+            self.long.resize(len, 0);
+        } else if !bytes.is_empty() {
             let mut buffer = mem::take(bytes);
             buffer.extend_from_slice(&self.buffer[self.start..self.end]);
             self.start = 0;
@@ -100,6 +108,17 @@ where
         if !fds.is_empty() {
             self.fds.push_front(mem::take(fds));
         }
+    }
+
+    /// The length of the message that `bytes` start, if they hold no more than that message,
+    /// which is longer than the buffer, while this half holds nothing.
+    fn long_start(&self, bytes: &[u8]) -> Option<usize> {
+        if self.start < self.end || !self.long.is_empty() || bytes.len() < MIN_MESSAGE_SIZE {
+            return None;
+        }
+        let (_, len) = read_primary_header(bytes).ok()?;
+
+        (len > BUFFER_SIZE && bytes.len() <= len).then_some(len)
     }
 
     /// Gives back the room that the buffer grew by, once what it holds fits in a buffer of the
@@ -127,6 +146,10 @@ where
             self.buffer.copy_within(self.start..self.end, 0);
             self.end -= self.start;
             self.start = 0;
+        }
+        // A half that handed its buffer over with what it held reads into a new one.
+        if self.buffer.len() < BUFFER_SIZE {
+            self.buffer.resize(BUFFER_SIZE, 0);
         }
         let received = self.socket.recv(&mut self.buffer[self.end..]).await;
         self.end += self.received(received)?;
@@ -299,6 +322,12 @@ where
     /// Moves out the message partly read into an allocation of its own, if any, then what the
     /// buffer holds, and the file descriptors that wait, all of their sets in one list.
     ///
+    /// Where nothing comes before them in `bytes`, as for a connection that stops reading once it
+    /// received a message, the allocation of the message, room for the rest of it included, or
+    /// the buffer, with what it holds moved to its start, goes into `bytes` as it is, rather than a
+    /// copy of what it holds, for a reader that takes over to take it as its own, as a message can
+    /// be as long as D-Bus allows. This half then reads into a new buffer, if it reads again.
+    ///
     /// A reader that takes them over puts that list ahead of what it reads as one set. It stands
     /// for the sets that waited here, of which there was at least one, so no more sets wait in
     /// that reader than would have in this one, and a sender that counts its descriptors still
@@ -308,19 +337,21 @@ where
         if !self.long.is_empty() {
             let mut long = mem::take(&mut self.long);
             long.truncate(self.long_filled);
-            // The allocation has room for the whole message, which can be up to 128 MiB long,
-            // while little of it may have come in.
-            long.shrink_to_fit();
             self.long_filled = 0;
             if bytes.is_empty() {
-                // The message can be as long as D-Bus allows, so it is moved rather than copied
-                // where nothing comes before it.
                 *bytes = long;
             } else {
                 bytes.append(&mut long);
             }
         }
-        bytes.extend_from_slice(&self.buffer[self.start..self.end]);
+        let buffered = self.start..self.end;
+        if bytes.is_empty() && !buffered.is_empty() {
+            self.buffer.copy_within(buffered, 0);
+            self.buffer.truncate(self.end - self.start);
+            *bytes = mem::take(&mut self.buffer);
+        } else {
+            bytes.extend_from_slice(&self.buffer[buffered]);
+        }
         self.start = 0;
         self.end = 0;
         fds.extend(self.fds.drain(..).flatten());
