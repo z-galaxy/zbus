@@ -449,14 +449,15 @@ impl Connection {
     /// writes what the sends kept before it commits, waiting on the socket.
     ///
     /// This can't be undone. It returns `true` once the connection is prepared, the second time
-    /// too, which changes nothing. That is so over the sockets that zbus drives itself, a unix or
-    /// TCP socket or the pipe to a `unixexec:` helper process, and over a write half of your own
-    /// that can resume writes ([`WriteHalf::can_resume_writes`]). Over a [`Socket`] of your own
-    /// whose write half can't resume writes, and over a
-    #[cfg_attr(feature = "p2p", doc = "[`Channel`](socket::Channel),")]
-    #[cfg_attr(not(feature = "p2p"), doc = "`Channel`,")]
-    /// this returns `false`, changing nothing, as a send over either has to wait for the write half
-    /// to take each message whole.
+    /// too, which changes nothing. That is so over the sockets that zbus creates, a
+    #[cfg_attr(feature = "p2p", doc = "[`Channel`](socket::Channel)")]
+    #[cfg_attr(not(feature = "p2p"), doc = "`Channel`")]
+    /// among them, and over a write half of your own that can resume writes
+    /// ([`WriteHalf::can_resume_writes`]). A channel takes each message whole or not at all, and a
+    /// peer that doesn't read fills it up as it does a socket: what a send to a full channel keeps
+    /// is whole messages, which wait for room. Over a [`Socket`] of your own whose write half can't
+    /// resume writes, this returns `false`, changing nothing, as a send over it has to wait for the
+    /// half.
     ///
     /// This method is only available on unix, with the `handover` feature.
     ///
