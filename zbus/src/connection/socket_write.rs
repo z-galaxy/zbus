@@ -254,21 +254,6 @@ impl SocketWrite {
         half.close().await
     }
 
-    /// Write what the connection has left to write, for the connection to be handed over, waiting
-    /// on the socket for as long as it takes. If the peer receives nothing more, nothing that
-    /// follows what it got can be misread, so what is left is let go of instead.
-    #[cfg(all(unix, feature = "handover"))]
-    pub(super) async fn write_unwritten_for_hand_over(&mut self) -> Result<()> {
-        match self.write_unwritten().await {
-            Err(Error::InputOutput(e)) if receives_nothing_more(&e) => {
-                self.rest.clear();
-
-                Ok(())
-            }
-            written => written,
-        }
-    }
-
     /// Whether a send of whole messages through `half` failed or was given up on midway, which can
     /// leave part of a message in the socket.
     #[cfg(all(unix, feature = "handover"))]
@@ -290,14 +275,15 @@ impl SocketWrite {
 
     /// Take the write half out, for the connection to be handed over, with how the connection
     /// writes the socket, if zbus made it, for a connection that goes on over the half to write it
-    /// the same way. Let go of all else that the connection holds of the socket. Nothing is
-    /// written through the connection from then on.
+    /// the same way, and with what is left to write, for that connection to write first. Let go of
+    /// all else that the connection holds of the socket. Nothing is written through the connection
+    /// from then on.
     #[cfg(all(unix, feature = "handover"))]
-    pub(super) fn take_half(&mut self) -> Option<(Box<dyn WriteHalf>, Option<Writes>)> {
+    pub(super) fn take_half(&mut self) -> Option<(Box<dyn WriteHalf>, Option<Writes>, Unwritten)> {
         self.source = None;
         let half = self.half.take()?;
 
-        Some((half, self.writes.take()))
+        Some((half, self.writes.take(), self.rest.take()))
     }
 
     /// Write what the connection has left to write, if anything, waiting on the socket for as
@@ -902,6 +888,19 @@ impl Rest {
         self.store();
     }
 
+    /// Take all that is left out, for the connection that takes over to write it.
+    #[cfg(all(unix, feature = "handover"))]
+    fn take(&mut self) -> Unwritten {
+        let unwritten = Unwritten {
+            cut: self.cut.take(),
+            kept: mem::take(&mut self.kept),
+        };
+        self.kept_len = 0;
+        self.store();
+
+        unwritten
+    }
+
     /// Let go of all that is left.
     fn clear(&mut self) {
         self.cut = None;
@@ -1399,22 +1398,31 @@ mod tests {
         });
     }
 
-    /// A send through a write half of your own that can resume writes, cut off midway, fails no
-    /// hand-over: the hand-over writes the rest of its message through the half first, once the
-    /// peer reads.
+    /// A send through a write half of your own that can resume writes, cut off midway, leaves the
+    /// rest of its message for the hand-over, which hands it over with the halves, and the
+    /// connection that takes over over them writes it through the half, once the peer reads.
     #[cfg(feature = "handover")]
     #[test]
     #[timeout(15000)]
-    fn the_rest_of_a_send_through_a_half_that_can_resume_writes_goes_out_before_a_hand_over() {
+    fn the_rest_of_a_send_through_a_half_that_can_resume_writes_is_handed_over() {
         under_every_runtime(|runtime| async move {
             let (conn, peer, _) = over_a_half_of_your_own(&runtime, Some(BIG_CAP), None).await;
             let big = big_signal();
             stuck(&runtime, pin!(conn.send(&big)), &peer).await;
+            let unwritten = conn.unwritten_len();
 
+            let handover = MessageStream::from(&conn).hand_over().await.unwrap();
+
+            assert_eq!(handover.unwritten_len(), unwritten);
+            assert_eq!(handover.saved_len(), None);
+            assert_eq!(conn.unwritten_len(), 0);
+            let conn = on(Builder::take_over(handover), &runtime)
+                .build()
+                .await
+                .unwrap();
+            assert_eq!(conn.unwritten_len(), unwritten);
             let reading = read_in_the_background(&peer, big.data().len());
-            let handed_over = MessageStream::from(&conn).hand_over().await;
-
-            assert!(handed_over.is_ok(), "{handed_over:?}");
+            conn.flush().await.unwrap();
             assert_eq!(reading.join().unwrap(), &big.data()[..]);
             assert_eq!(conn.unwritten_len(), 0);
         });
@@ -1854,25 +1862,98 @@ mod tests {
         });
     }
 
-    /// A hand-over of a connection whose sends kept messages, once it was prepared, writes them
-    /// before it commits, once the peer reads.
+    /// A hand-over of a connection whose sends kept messages, once it was prepared, hands them
+    /// over, without waiting for the peer to take them, and the connection that takes over writes
+    /// them, once the peer reads.
     #[cfg(feature = "handover")]
     #[test]
     #[timeout(15000)]
-    fn what_sends_kept_goes_out_before_a_hand_over() {
+    fn what_sends_kept_is_handed_over() {
         under_every_runtime(|runtime| async move {
             let (conn, peer) = served(&runtime).await;
             let (big, next) = (big_signal(), signal(1));
             assert!(conn.prepare_hand_over());
             without_waiting(&runtime, conn.send(&big)).await;
             without_waiting(&runtime, conn.send(&next)).await;
+            let unwritten = conn.unwritten_len();
 
+            let handover = MessageStream::from(&conn).hand_over().await.unwrap();
+
+            assert_eq!(handover.unwritten_len(), unwritten);
+            assert_eq!(conn.unwritten_len(), 0);
+            let conn = on(Builder::take_over(handover), &runtime)
+                .build()
+                .await
+                .unwrap();
             let sent = [&big.data()[..], &next.data()[..]].concat();
             let reading = read_in_the_background(&peer, sent.len());
-            let handed_over = MessageStream::from(&conn).hand_over().await;
-
-            assert!(handed_over.is_ok(), "{handed_over:?}");
+            conn.flush().await.unwrap();
             assert_eq!(reading.join().unwrap(), sent);
+            assert_eq!(conn.unwritten_len(), 0);
+        });
+    }
+
+    /// A hand-over of a connection over a full channel doesn't wait for room either: it hands over
+    /// the messages that sends kept, and a send that waited for room as it started, whole, with
+    /// the halves of the channel, and the connection that takes over queues them ahead of its own
+    /// sends, as the peer takes the others.
+    #[cfg(feature = "handover")]
+    #[test]
+    #[timeout(15000)]
+    fn what_sends_to_a_full_channel_kept_is_handed_over() {
+        under_every_runtime(|runtime| async move {
+            let (ours, theirs) = Channel::pair();
+            let conn = on(
+                Builder::authenticated_socket(ours, Guid::generate()),
+                &runtime,
+            )
+            .p2p()
+            .build()
+            .await
+            .unwrap();
+            let (mut peer, _sends_nothing) = Socket::split(theirs).take();
+            let msgs: Vec<_> = (0..64).map(signal).collect();
+            // Signals until the channel takes no more, the last of which waits for room.
+            let mut queued = 0;
+            let sending = loop {
+                let mut sending = Box::pin(conn.send(&msgs[queued]));
+                match poll_once(sending.as_mut()).await {
+                    Some(sent) => sent.unwrap(),
+                    None => break sending,
+                }
+                queued += 1;
+            };
+            let mut stream = MessageStream::from(&conn);
+
+            let (handed_over, sent) = futures_util::join!(stream.hand_over(), sending);
+
+            sent.unwrap();
+            let handover = handed_over.unwrap();
+            assert_eq!(handover.unwritten_len(), msgs[queued].data().len());
+            assert_eq!(handover.saved_len(), None);
+            let conn = on(Builder::take_over(handover), &runtime)
+                .build()
+                .await
+                .unwrap();
+            let next = &msgs[queued + 1];
+            let receiving = async {
+                let (mut bytes, mut fds) = (vec![], vec![]);
+                let mut received = vec![];
+                for seq in 0..queued + 2 {
+                    let msg = peer.receive_message(seq as u64, &mut bytes, &mut fds).await;
+                    received.push(msg.unwrap().data().to_vec());
+                }
+
+                received
+            };
+            let (sent, received) = futures_util::join!(conn.send(next), receiving);
+
+            sent.unwrap();
+            let sent: Vec<_> = msgs[..queued + 2]
+                .iter()
+                .map(|msg| msg.data().to_vec())
+                .collect();
+            assert_eq!(received, sent);
             assert_eq!(conn.unwritten_len(), 0);
         });
     }

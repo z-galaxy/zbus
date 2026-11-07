@@ -551,7 +551,7 @@ pub trait WriteHalf: std::fmt::Debug + Send + Sync + 'static {
     /// With the `handover` feature, on unix, once a hand-over of the connection is prepared
     /// (`Connection::prepare_hand_over`), a send drops the future of a call to `sendmsg` or `flush`
     /// that waits, rather than wait for it, and the connection keeps what is left, for a later send
-    /// or [`Connection::flush`].
+    /// or [`Connection::flush`], or for a hand-over to hand over.
     ///
     /// The default implementation returns `false`, which suits a half that sends whole messages
     /// through `send_message` and `send_messages`. Over such a half, a send that is dropped, or
