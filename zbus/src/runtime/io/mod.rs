@@ -199,7 +199,16 @@ where
 /// write that they came with, if not sooner, so that is a byte of their message only if the write
 /// holds nothing but their message. dbus-broker disconnects a peer whose message comes without the
 /// descriptors that its header counts.
-pub(crate) async fn write_messages<S>(socket: &S, mut msgs: &[Message]) -> io::Result<()>
+///
+/// After each write, `cut` is given the message that the write ended in the middle of, with how
+/// many of its bytes are written by then, or `None` where it ended at the end of a message. The
+/// messages before that one are written whole, and none of those after it, so a future of this that
+/// is dropped, or that fails, leaves just what `cut` was last given unwritten.
+pub(crate) async fn write_messages<S>(
+    socket: &S,
+    mut msgs: &[Message],
+    mut cut: impl FnMut(Option<(&Message, usize)>),
+) -> io::Result<()>
 where
     S: PollSend + ?Sized,
 {
@@ -246,6 +255,14 @@ where
                 fds = &[];
             }
             IoSlice::advance_slices(&mut buffers, written);
+            // The first buffer left is what is left of the message that the write ended in.
+            let ended_in = buffers.first().and_then(|left| {
+                let msg = &write[len - buffers.len()];
+                let written = msg.data().len() - left.len();
+
+                (written > 0).then_some((msg, written))
+            });
+            cut(ended_in);
         }
         for msg in write {
             trace!(
@@ -401,7 +418,7 @@ where
 {
     // With as few writes as the socket takes, as `write_messages` tells.
     async fn send_messages(&mut self, msgs: &[Message]) -> crate::Result<()> {
-        write_messages(&**self, msgs).await?;
+        write_messages(&**self, msgs, |_| ()).await?;
 
         Ok(())
     }
