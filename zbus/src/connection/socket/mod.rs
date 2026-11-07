@@ -138,6 +138,12 @@ pub(crate) type RecvmsgResult = io::Result<usize>;
 ///     async fn close(&mut self) -> io::Result<()> {
 ///         self.0.shutdown().await
 ///     }
+///
+///     fn can_resume_writes(&self) -> bool {
+///         // `write` takes nothing in a call that is dropped before it returns, and `flush` sends
+///         // on what a buffered stream holds, so a send can stop midway and go on later.
+///         true
+///     }
 /// }
 /// # }
 /// #
@@ -412,7 +418,8 @@ pub trait WriteHalf: std::fmt::Debug + Send + Sync + 'static {
     /// This is the higher-level method to send a full D-Bus message.
     ///
     /// The default implementation uses `sendmsg` to send the message, and then `flush`.
-    /// Implementers should override either this or `sendmsg`.
+    /// Implementers should override either this or `sendmsg`. A connection over a half that can
+    /// resume writes ([`WriteHalf::can_resume_writes`]) doesn't call this.
     async fn send_message(&mut self, msg: &Message) -> crate::Result<()> {
         let data = msg.data();
         let serial = msg.primary_header().serial_num();
@@ -453,6 +460,9 @@ pub trait WriteHalf: std::fmt::Debug + Send + Sync + 'static {
     ///
     /// If this fails, the messages before the one that it failed on have been sent in full, and
     /// that one may have been sent in part.
+    ///
+    /// A connection over a half that can resume writes ([`WriteHalf::can_resume_writes`]) doesn't
+    /// call this.
     async fn send_messages(&mut self, msgs: &[Message]) -> crate::Result<()> {
         for msg in msgs {
             self.send_message(msg).await?;
@@ -465,7 +475,7 @@ pub trait WriteHalf: std::fmt::Debug + Send + Sync + 'static {
     ///
     /// On success, return the number of bytes written. There may be a partial write, in
     /// which case the caller is responsible for sending the remaining data by calling this
-    /// method again until everything is written or it returns an error of kind `WouldBlock`.
+    /// method again until everything is written, or it fails.
     ///
     /// If at least one byte has been written, then all the provided file descriptors will
     /// have been sent as well, and should not be provided again in subsequent calls.
@@ -474,7 +484,8 @@ pub trait WriteHalf: std::fmt::Debug + Send + Sync + 'static {
     /// will return `Err(ErrorKind::InvalidInput)`.
     ///
     /// The default implementation simply panics. Implementers must override either `send_message`
-    /// or this method.
+    /// or this method. A half that can resume writes ([`WriteHalf::can_resume_writes`]) must
+    /// override this one, which zbus then calls directly.
     async fn sendmsg(
         &mut self,
         _buffer: &[u8],
@@ -485,12 +496,13 @@ pub trait WriteHalf: std::fmt::Debug + Send + Sync + 'static {
 
     /// Flush whatever the socket holds on to of the bytes `sendmsg` was given.
     ///
-    /// The default `send_message` calls this once it has handed a whole message to `sendmsg`. The
-    /// authentication handshake calls it each time before it waits for the peer to answer, so the
-    /// commands it pipelines go out together, and [`Connection::flush`] calls it last. A socket
-    /// that holds on to what it is given, such as one over a buffered or encrypted stream, has to
-    /// send it on here: zbus has no other way to flush it, and the peer would never see it
-    /// otherwise.
+    /// The default `send_message` calls this once it has handed a whole message to `sendmsg`, and a
+    /// connection over a half that can resume writes ([`WriteHalf::can_resume_writes`]) once a send
+    /// has handed it all of its messages. The authentication handshake calls it each time before
+    /// it waits for the peer to answer, so the commands it pipelines go out together, and
+    /// [`Connection::flush`] calls it last. A socket that holds on to what it is given, such as one
+    /// over a buffered or encrypted stream, has to send it on here: zbus has no other way to flush
+    /// it, and the peer would never see it otherwise.
     ///
     /// The default implementation does nothing, which suits a socket that sends what it is given
     /// right away.
@@ -524,6 +536,46 @@ pub trait WriteHalf: std::fmt::Debug + Send + Sync + 'static {
     /// The peer credentials.
     async fn peer_credentials(&mut self) -> io::Result<ConnectionCredentials> {
         Ok(ConnectionCredentials::default())
+    }
+
+    /// Whether zbus may write through [`WriteHalf::sendmsg`] itself, counting what each call
+    /// takes, so that a send that is dropped, or that fails, in the middle of a message can go on
+    /// from where it stopped, with the next send or [`Connection::flush`].
+    ///
+    /// A half that returns `true` promises that `sendmsg`:
+    ///
+    /// * takes the bytes that it is given as they are, in order, for the peer;
+    /// * returns exactly how many of them it took;
+    /// * sends the file descriptors that it is given along with the first byte that it takes;
+    /// * takes nothing in a call whose future is dropped before it returns;
+    ///
+    /// and that [`WriteHalf::flush`] sends on whatever the half holds on to of what `sendmsg` took.
+    ///
+    /// zbus then writes through `sendmsg`, a message at a time, and calls neither
+    /// [`WriteHalf::send_message`] nor [`WriteHalf::send_messages`]: it hands `sendmsg` the file
+    /// descriptors of each message along with its first byte, and calls `flush` once a send wrote
+    /// all of its messages. A call that takes none of what it is given fails the send, with an I/O
+    /// error of kind [`WriteZero`](io::ErrorKind::WriteZero). A send over the half that is dropped,
+    /// or that fails, midway leaves the rest of its message for the connection to write ahead of
+    /// anything else, as [`Connection::send`] tells.
+    ///
+    /// The default implementation returns `false`, which suits a half that sends whole messages
+    /// through `send_message` and `send_messages`. A send over such a half that is dropped, or that
+    /// fails, in the middle of a message can leave part of it on the socket, after which the peer
+    /// can make no sense of anything that the connection sends.
+    #[cfg_attr(
+        feature = "handover",
+        doc = "A hand-over ([`MessageStream::hand_over`](crate::MessageStream::hand_over)) of a \
+               connection over such a half waits for a send under way, and fails once one was \
+               cut off midway."
+    )]
+    ///
+    /// zbus asks this once, as the connection is built.
+    ///
+    /// [`Connection::flush`]: crate::Connection::flush
+    /// [`Connection::send`]: crate::Connection::send
+    fn can_resume_writes(&self) -> bool {
+        false
     }
 }
 
@@ -712,6 +764,10 @@ impl WriteHalf for Box<dyn WriteHalf> {
 
     async fn peer_credentials(&mut self) -> io::Result<ConnectionCredentials> {
         (**self).peer_credentials().await
+    }
+
+    fn can_resume_writes(&self) -> bool {
+        (**self).can_resume_writes()
     }
 }
 

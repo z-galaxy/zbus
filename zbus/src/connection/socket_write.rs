@@ -2,6 +2,8 @@
 
 #[cfg(feature = "handover")]
 use std::mem;
+#[cfg(unix)]
+use std::os::fd::{AsFd, BorrowedFd};
 use std::{
     future::poll_fn,
     io::{self, IoSlice},
@@ -33,6 +35,10 @@ pub(super) struct SocketWrite {
     /// How the connection writes the socket, if zbus made it, as [`Writes`] tells, until the
     /// connection is closed. A socket of yours is written through `half` alone.
     writes: Option<Writes>,
+    /// Whether `half` can resume writes ([`WriteHalf::can_resume_writes`]), as it said as the
+    /// connection was built. Where `writes` doesn't say otherwise, the connection then writes
+    /// through the `sendmsg` of `half` itself, rather than hand it whole messages.
+    half_resumes: bool,
     /// What is left to write of the message that a write ended in the middle of, if any.
     rest: Rest,
     /// The socket itself, if zbus drives it and so can give a descriptor of it for a hand-over.
@@ -66,6 +72,7 @@ impl SocketWrite {
         )>,
     ) -> Self {
         Self {
+            half_resumes: half.can_resume_writes(),
             half: Some(half),
             writes,
             rest: Rest { cut: None, status },
@@ -82,13 +89,26 @@ impl SocketWrite {
     // Written out apart from `send_messages`, rather than as a call to it with the one message,
     // so that the compiler knows that there is only the one: every `Connection::send` runs this.
     pub(super) async fn send_message(&mut self, msg: &Message) -> Result<()> {
-        if let Some(Writes::Driven(socket)) = &self.writes {
-            if !self.rest.is_empty() {
-                write_rest_to(&**socket, &mut self.rest).await?;
-            }
-            write_messages(&**socket, slice::from_ref(msg), |cut| self.rest.set(cut)).await?;
+        match &self.writes {
+            Some(Writes::Driven(socket)) => {
+                if !self.rest.is_empty() {
+                    write_rest_to(&**socket, &mut self.rest).await?;
+                }
+                write_messages(&**socket, slice::from_ref(msg), |cut| self.rest.set(cut)).await?;
 
-            return Ok(());
+                return Ok(());
+            }
+            None if self.half_resumes => {
+                let half = self.half.as_deref_mut().ok_or_else(handed_over)?;
+                if !self.rest.is_empty() {
+                    write_rest_through(half, &mut self.rest).await?;
+                }
+                write_through(half, msg, &mut self.rest).await?;
+                half.flush().await?;
+
+                return Ok(());
+            }
+            _ => (),
         }
         let half = self.half.as_deref_mut().ok_or_else(handed_over)?;
         #[cfg(feature = "handover")]
@@ -108,18 +128,34 @@ impl SocketWrite {
 
     /// Send `msgs`, unless the connection was handed over.
     ///
-    /// The connection writes them itself to a socket that zbus drives, as [`write_messages`] does,
-    /// after what is left of a message that a write ended in the middle of, if anything, keeping
-    /// track in `rest` of how far each write takes them. Otherwise it hands them whole to
-    /// [`WriteHalf::send_messages`].
+    /// The connection writes them itself, after what is left of a message that a write ended in
+    /// the middle of, if anything, keeping track in `rest` of how far each write takes them: to a
+    /// socket that zbus drives, as [`write_messages`] does, or through the `sendmsg` of a half that
+    /// can resume writes, a message at a time, flushing the half once they are all written.
+    /// Otherwise it hands them whole to [`WriteHalf::send_messages`].
     pub(super) async fn send_messages(&mut self, msgs: &[Message]) -> Result<()> {
-        if let Some(Writes::Driven(socket)) = &self.writes {
-            if !self.rest.is_empty() {
-                write_rest_to(&**socket, &mut self.rest).await?;
-            }
-            write_messages(&**socket, msgs, |cut| self.rest.set(cut)).await?;
+        match &self.writes {
+            Some(Writes::Driven(socket)) => {
+                if !self.rest.is_empty() {
+                    write_rest_to(&**socket, &mut self.rest).await?;
+                }
+                write_messages(&**socket, msgs, |cut| self.rest.set(cut)).await?;
 
-            return Ok(());
+                return Ok(());
+            }
+            None if self.half_resumes => {
+                let half = self.half.as_deref_mut().ok_or_else(handed_over)?;
+                if !self.rest.is_empty() {
+                    write_rest_through(half, &mut self.rest).await?;
+                }
+                for msg in msgs {
+                    write_through(half, msg, &mut self.rest).await?;
+                }
+                half.flush().await?;
+
+                return Ok(());
+            }
+            _ => (),
         }
         let half = self.half.as_deref_mut().ok_or_else(handed_over)?;
         #[cfg(feature = "handover")]
@@ -234,7 +270,13 @@ impl SocketWrite {
     async fn write_rest(&mut self) -> io::Result<()> {
         match &self.writes {
             Some(Writes::Driven(socket)) => write_rest_to(&**socket, &mut self.rest).await,
-            // Only a write to a socket that zbus drives can leave the rest of a message.
+            None if self.half_resumes => {
+                let half = self.half.as_deref_mut().ok_or_else(handed_over)?;
+
+                write_rest_through(half, &mut self.rest).await
+            }
+            // Only a send that keeps track of how far each write takes it leaves the rest of a
+            // message.
             _ => Ok(()),
         }
     }
@@ -270,6 +312,76 @@ async fn write_rest_to(socket: &dyn PollSend, rest: &mut Rest) -> io::Result<()>
     }
 
     Ok(())
+}
+
+/// Write what is left of a message that a write ended in the middle of, if anything, through the
+/// `sendmsg` of `half`. Its file descriptors went with its first byte.
+async fn write_rest_through(half: &mut dyn WriteHalf, rest: &mut Rest) -> io::Result<()> {
+    while let Some(left) = rest.left() {
+        let written = sendmsg(
+            half,
+            left,
+            #[cfg(unix)]
+            &[],
+        )
+        .await?;
+        rest.advance(written);
+    }
+
+    Ok(())
+}
+
+/// Write `msg` through the `sendmsg` of `half`, the file descriptors of the message along with its
+/// first byte, keeping track in `rest` of how far each call takes it.
+async fn write_through(half: &mut dyn WriteHalf, msg: &Message, rest: &mut Rest) -> io::Result<()> {
+    trace!("Sending message: {:?}", msg);
+    let data = msg.data();
+    let mut written = 0;
+    while written < data.len() {
+        #[cfg(unix)]
+        let fds: Vec<_> = if written == 0 {
+            data.fds().iter().map(|fd| fd.as_fd()).collect()
+        } else {
+            vec![]
+        };
+        written += sendmsg(
+            half,
+            &data[written..],
+            #[cfg(unix)]
+            &fds,
+        )
+        .await?;
+        rest.set((written < data.len()).then_some((msg, written)));
+    }
+    trace!(
+        "Sent message with serial: {}",
+        msg.primary_header().serial_num()
+    );
+
+    Ok(())
+}
+
+/// One call to the `sendmsg` of `half`. A call that takes none of `buffer` fails, rather than leave
+/// the connection to call again for ever.
+async fn sendmsg(
+    half: &mut dyn WriteHalf,
+    buffer: &[u8],
+    #[cfg(unix)] fds: &[BorrowedFd<'_>],
+) -> io::Result<usize> {
+    match half
+        .sendmsg(
+            buffer,
+            #[cfg(unix)]
+            fds,
+        )
+        .await?
+    {
+        0 => Err(io::Error::new(
+            io::ErrorKind::WriteZero,
+            "the write half took none of what it was given",
+        )),
+        written => Ok(written),
+    }
 }
 
 /// What is left to write of the message that a write ended in the middle of, if any.
@@ -370,7 +482,7 @@ mod tests {
         future::Future,
         io::{self, ErrorKind, IoSlice, Read, Write},
         os::{
-            fd::{AsFd, BorrowedFd},
+            fd::{AsFd, BorrowedFd, OwnedFd},
             unix::net::UnixStream,
         },
         pin::{Pin, pin},
@@ -397,11 +509,11 @@ mod tests {
         Connection, Error, Fd, Guid, Message, Result,
         connection::{
             Builder,
-            socket::{Channel, ReadHalf, RecvmsgResult, Socket},
+            socket::{Channel, ReadHalf, RecvmsgResult, Socket, Split, WriteHalf},
         },
         runtime::{
             IoSource, Runtime,
-            io::{Reader, SocketOps, UnixOps, registered, tests::Recording},
+            io::{Reader, RegisteredIo, SocketOps, UnixOps, registered, tests::Recording},
             test_runtime::under_every_runtime,
         },
     };
@@ -413,21 +525,8 @@ mod tests {
     fn a_send_dropped_midway_is_finished_by_the_next_send() {
         under_every_runtime(|runtime| async move {
             let (conn, peer) = served(&runtime).await;
-            let (big, next) = (big_signal(), signal(1));
-            stuck(&runtime, pin!(conn.send(&big)), &peer).await;
 
-            let unwritten = conn.unwritten_len();
-            assert!(
-                0 < unwritten && unwritten < big.data().len(),
-                "{unwritten} of {} bytes left to write",
-                big.data().len(),
-            );
-            let reading = read_in_the_background(&peer, big.data().len() + next.data().len());
-            conn.send(&next).await.unwrap();
-
-            let received = reading.join().unwrap();
-            assert_eq!(received, [&big.data()[..], &next.data()[..]].concat());
-            assert_eq!(conn.unwritten_len(), 0);
+            finish_a_send_dropped_midway(&runtime, &conn, &peer).await;
         });
     }
 
@@ -643,6 +742,156 @@ mod tests {
         });
     }
 
+    /// A connection over a write half of your own that can resume writes writes through its
+    /// `sendmsg`, with the file descriptors of each message along with its first byte, and flushes
+    /// it once a send wrote all of its messages. It never hands it a whole message.
+    #[test]
+    #[timeout(15000)]
+    fn a_half_that_can_resume_writes_is_written_through_sendmsg() {
+        under_every_runtime(|runtime| async move {
+            let (conn, peer, counts) = over_a_half_of_your_own(&runtime, true, None).await;
+            let pipes = [pipe(), pipe(), pipe()];
+            let fd = |i: usize| Fd::from(pipes[i].as_fd());
+            let msgs = [
+                signal(1),
+                Message::signal(PATH, INTERFACE, "WithFds")
+                    .build(&fd(0))
+                    .unwrap(),
+                signal(2),
+                Message::signal(PATH, INTERFACE, "WithFds")
+                    .build(&(fd(1), fd(2)))
+                    .unwrap(),
+            ];
+
+            conn.send_all(&msgs[..3]).await.unwrap();
+            assert_eq!(counts.flushes.load(Ordering::Relaxed), 1);
+            conn.send(&msgs[3]).await.unwrap();
+            assert_eq!(counts.flushes.load(Ordering::Relaxed), 2);
+            conn.flush().await.unwrap();
+            assert_eq!(counts.flushes.load(Ordering::Relaxed), 3);
+
+            let mut peer = Reader::new(Arc::new(registered(&runtime, peer, UnixOps).unwrap()));
+            let (mut bytes, mut fds) = (vec![], vec![]);
+            for (seq, sent) in msgs.iter().enumerate() {
+                let received = peer.receive_message(seq as u64, &mut bytes, &mut fds).await;
+                let received = received.unwrap();
+                assert_eq!(&received.data()[..], &sent.data()[..]);
+                assert_eq!(received.data().fds().len(), sent.data().fds().len());
+            }
+        });
+    }
+
+    /// A send through a write half of your own that can resume writes, dropped midway, is finished
+    /// by the next send, as one over a socket that zbus drives is.
+    #[test]
+    #[timeout(15000)]
+    fn a_send_through_a_half_that_can_resume_writes_dropped_midway_is_finished() {
+        under_every_runtime(|runtime| async move {
+            let (conn, peer, _) = over_a_half_of_your_own(&runtime, true, None).await;
+
+            finish_a_send_dropped_midway(&runtime, &conn, &peer).await;
+        });
+    }
+
+    /// A send through a write half of your own that can resume writes, which fails midway, leaves
+    /// the rest of its message, which the next send writes first.
+    #[test]
+    #[timeout(15000)]
+    fn a_send_through_a_half_that_can_resume_writes_that_fails_midway_leaves_the_rest() {
+        under_every_runtime(|runtime| async move {
+            // The second call to `sendmsg` fails, once the first took `CAP` bytes.
+            let (conn, peer, _) = over_a_half_of_your_own(&runtime, true, Some(2)).await;
+            let (msg, next) = (signal(1), signal(2));
+
+            let failed = conn.send(&msg).await;
+
+            let Err(Error::InputOutput(e)) = &failed else {
+                panic!("the send didn't fail on the write: {failed:?}");
+            };
+            assert_eq!(e.kind(), ErrorKind::Other, "{e}");
+            assert_eq!(conn.unwritten_len(), msg.data().len() - CAP);
+            conn.send(&next).await.unwrap();
+            let mut received = vec![0; msg.data().len() + next.data().len()];
+            (&peer).read_exact(&mut received).unwrap();
+            assert_eq!(received, [&msg.data()[..], &next.data()[..]].concat());
+            assert_eq!(conn.unwritten_len(), 0);
+        });
+    }
+
+    /// A connection over a write half of your own that can't resume writes hands it each send as a
+    /// whole, so a send dropped midway leaves nothing for the connection to write, and a flush
+    /// only flushes the half.
+    #[test]
+    #[timeout(15000)]
+    fn a_half_that_cant_resume_writes_is_given_whole_messages() {
+        under_every_runtime(|runtime| async move {
+            let (conn, peer, counts) = over_a_half_of_your_own(&runtime, false, None).await;
+            let msgs = [signal(1), signal(2), signal(3)];
+
+            conn.send(&msgs[0]).await.unwrap();
+            conn.send_all(&msgs[1..]).await.unwrap();
+            assert_eq!(counts.whole.load(Ordering::Relaxed), 2);
+            let mut received = vec![0; msgs.iter().map(|msg| msg.data().len()).sum()];
+            (&peer).read_exact(&mut received).unwrap();
+            let sent: Vec<u8> = msgs.iter().flat_map(|msg| msg.data().to_vec()).collect();
+            assert_eq!(received, sent);
+
+            stuck(&runtime, pin!(conn.send(&big_signal())), &peer).await;
+
+            assert_eq!(conn.unwritten_len(), 0);
+            let flushed = poll_once(pin!(conn.flush())).await;
+            assert!(matches!(flushed, Some(Ok(()))), "{flushed:?}");
+            assert_eq!(counts.flushes.load(Ordering::Relaxed), 1);
+        });
+    }
+
+    /// The halves of a socket that zbus drives, given to a connection as halves of your own, can
+    /// resume writes, so a send dropped midway is finished by the next send, as over the socket.
+    #[test]
+    #[timeout(15000)]
+    fn the_halves_of_a_socket_that_zbus_drives_resume_writes_as_halves_of_your_own() {
+        under_every_runtime(|runtime| async move {
+            let (ours, peer) = UnixStream::pair().unwrap();
+            let socket = registered(&runtime, ours, UnixOps).unwrap();
+            let (read, write) = Socket::split(socket).take();
+            let split = Split::new(
+                Box::new(read) as Box<dyn ReadHalf>,
+                Box::new(write) as Box<dyn WriteHalf>,
+            );
+            let conn = on(
+                Builder::authenticated_socket(split, Guid::generate()),
+                &runtime,
+            )
+            .p2p()
+            .build()
+            .await
+            .unwrap();
+
+            finish_a_send_dropped_midway(&runtime, &conn, &peer).await;
+        });
+    }
+
+    /// A send through a write half of your own that can resume writes, cut off midway, fails no
+    /// hand-over: the hand-over writes the rest of its message through the half first, once the
+    /// peer reads.
+    #[cfg(feature = "handover")]
+    #[test]
+    #[timeout(15000)]
+    fn the_rest_of_a_send_through_a_half_that_can_resume_writes_goes_out_before_a_hand_over() {
+        under_every_runtime(|runtime| async move {
+            let (conn, peer, _) = over_a_half_of_your_own(&runtime, true, None).await;
+            let big = big_signal();
+            stuck(&runtime, pin!(conn.send(&big)), &peer).await;
+
+            let reading = read_in_the_background(&peer, big.data().len());
+            let handed_over = MessageStream::from(&conn).hand_over().await;
+
+            assert!(handed_over.is_ok(), "{handed_over:?}");
+            assert_eq!(reading.join().unwrap(), &big.data()[..]);
+            assert_eq!(conn.unwritten_len(), 0);
+        });
+    }
+
     /// A connection over a socket that zbus drives writes the messages of a send several at a
     /// time, as the write half of the socket does: each write starts at a message and takes up to
     /// 16 of them, and a message with file descriptors goes in a write of its own, which they go
@@ -792,6 +1041,140 @@ mod tests {
         }
     }
 
+    /// A peer-to-peer connection over one end of a unix socket pair, on `runtime`, through a write
+    /// half of your own, and the other end of the pair. The half can resume writes as `resumes`
+    /// says, takes at most `CAP` bytes in each call to `sendmsg` if it can, and fails the call
+    /// numbered `fail_at`, if any.
+    async fn over_a_half_of_your_own(
+        runtime: &Runtime,
+        resumes: bool,
+        fail_at: Option<usize>,
+    ) -> (Connection, UnixStream, Arc<Counts>) {
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        let socket = Arc::new(registered(runtime, ours, UnixOps).unwrap());
+        let counts = Arc::new(Counts::default());
+        let half = OfYourOwn {
+            socket: socket.clone(),
+            resumes,
+            calls: 0,
+            fail_at,
+            counts: counts.clone(),
+        };
+        let split = Split::new(
+            Box::new(Reader::new(socket)) as Box<dyn ReadHalf>,
+            Box::new(half) as Box<dyn WriteHalf>,
+        );
+        let conn = on(
+            Builder::authenticated_socket(split, Guid::generate()),
+            runtime,
+        )
+        .p2p()
+        .build()
+        .await
+        .unwrap();
+
+        (conn, theirs, counts)
+    }
+
+    /// A write half of your own, over a unix socket that zbus drives.
+    #[derive(Debug)]
+    struct OfYourOwn {
+        socket: Arc<RegisteredIo<UnixOps>>,
+        /// Whether it can resume writes. If it can, it takes at most `CAP` bytes in each call to
+        /// `sendmsg`, and fails if it is handed a whole message.
+        resumes: bool,
+        /// How many calls to `sendmsg` were made.
+        calls: usize,
+        /// The call to `sendmsg` that fails, if any.
+        fail_at: Option<usize>,
+        counts: Arc<Counts>,
+    }
+
+    /// What was asked of an [`OfYourOwn`].
+    #[derive(Debug, Default)]
+    struct Counts {
+        /// How many sends it was handed whole.
+        whole: AtomicUsize,
+        /// How many times it was flushed.
+        flushes: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl WriteHalf for OfYourOwn {
+        async fn send_message(&mut self, msg: &Message) -> Result<()> {
+            assert!(
+                !self.resumes,
+                "a half that can resume writes was handed {msg:?}"
+            );
+            self.counts.whole.fetch_add(1, Ordering::Relaxed);
+
+            WriteHalf::send_message(&mut self.socket, msg).await
+        }
+
+        async fn send_messages(&mut self, msgs: &[Message]) -> Result<()> {
+            assert!(
+                !self.resumes,
+                "a half that can resume writes was handed {msgs:?}"
+            );
+            self.counts.whole.fetch_add(1, Ordering::Relaxed);
+
+            WriteHalf::send_messages(&mut self.socket, msgs).await
+        }
+
+        async fn sendmsg(&mut self, buffer: &[u8], fds: &[BorrowedFd<'_>]) -> io::Result<usize> {
+            self.calls += 1;
+            if self.fail_at == Some(self.calls) {
+                return Err(io::Error::other("the test failed this write"));
+            }
+            let len = if self.resumes {
+                buffer.len().min(CAP)
+            } else {
+                buffer.len()
+            };
+
+            WriteHalf::sendmsg(&mut self.socket, &buffer[..len], fds).await
+        }
+
+        async fn flush(&mut self) -> io::Result<()> {
+            self.counts.flushes.fetch_add(1, Ordering::Relaxed);
+
+            Ok(())
+        }
+
+        async fn close(&mut self) -> io::Result<()> {
+            WriteHalf::close(&mut self.socket).await
+        }
+
+        fn can_pass_unix_fd(&self) -> bool {
+            true
+        }
+
+        fn can_resume_writes(&self) -> bool {
+            self.resumes
+        }
+    }
+
+    /// Has a send of a message longer than the socket of `peer` holds dropped midway, as `peer`
+    /// doesn't read, then makes another send as it reads at last: `peer` gets the first message
+    /// whole, then the second.
+    async fn finish_a_send_dropped_midway(runtime: &Runtime, conn: &Connection, peer: &UnixStream) {
+        let (big, next) = (big_signal(), signal(1));
+        stuck(runtime, pin!(conn.send(&big)), peer).await;
+
+        let unwritten = conn.unwritten_len();
+        assert!(
+            0 < unwritten && unwritten < big.data().len(),
+            "{unwritten} of {} bytes left to write",
+            big.data().len(),
+        );
+        let reading = read_in_the_background(peer, big.data().len() + next.data().len());
+        conn.send(&next).await.unwrap();
+
+        let received = reading.join().unwrap();
+        assert_eq!(received, [&big.data()[..], &next.data()[..]].concat());
+        assert_eq!(conn.unwritten_len(), 0);
+    }
+
     /// Polls `sending` until it wrote part of its message to the socket of `peer`, which doesn't
     /// read, and waits for room for the rest, then drops it.
     async fn stuck<F>(runtime: &Runtime, mut sending: Pin<&mut F>, peer: &UnixStream)
@@ -851,6 +1234,11 @@ mod tests {
         }
     }
 
+    /// The read end of a pipe of its own.
+    fn pipe() -> OwnedFd {
+        io::pipe().unwrap().0.into()
+    }
+
     /// A signal that carries `n`.
     fn signal(n: u32) -> Message {
         Message::signal(PATH, INTERFACE, "Test").build(&n).unwrap()
@@ -865,6 +1253,8 @@ mod tests {
 
     /// How many bytes the first send of a `FailingMidway` takes.
     const CUT: usize = 16;
+    /// The most that a write half of your own that can resume writes takes in a call to `sendmsg`.
+    const CAP: usize = 16;
     const PATH: &str = "/org/zbus/Test";
     const INTERFACE: &str = "org.zbus.Test";
 }
