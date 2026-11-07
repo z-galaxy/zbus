@@ -140,8 +140,7 @@ use zruntime::{
 use crate::runtime::IoSource;
 use crate::{
     Connection, Error, Message, OwnedGuid, Result,
-    connection::socket::{BoxedSplit, ReadHalf, Split, WriteHalf},
-    fdo::ConnectionCredentials,
+    connection::socket::{BoxedSplit, ReadHalf, Split},
     message,
     names::OwnedUniqueName,
 };
@@ -463,7 +462,7 @@ impl Connection {
     async fn ensure_whole(&self) -> Result<()> {
         let mut lock = pin!(self.inner.socket_write.lock());
         let write = poll_fn(|cx| Poll::Ready(lock.as_mut().poll(cx))).await;
-        if matches!(write, Poll::Ready(write) if write.torn) {
+        if matches!(write, Poll::Ready(write) if write.is_torn()) {
             return Err(torn());
         }
 
@@ -560,13 +559,13 @@ impl Connection {
         // Set before the socket is shut down, under the lock that is held here, so a closed
         // connection whose reader then came to the end of the input is not taken for one whose
         // peer closed its end.
-        if write.shut_down {
+        if write.is_shut_down() {
             return Err(not_connected("the connection was closed").into());
         }
         if !matches!(*end, ReaderEnd::Stopped(_) | ReaderEnd::Ended(_)) {
             return Err(not_connected("the connection ended before it stopped reading").into());
         }
-        if write.torn {
+        if write.is_torn() {
             return Err(torn());
         }
         // The last steps that can fail, so that a failure commits nothing. The messages may be
@@ -580,8 +579,7 @@ impl Connection {
             .collect::<io::Result<Vec<_>>>()?;
         #[cfg(any(unix, windows))]
         let duplicate = write
-            .source
-            .as_ref()
+            .source()
             .map(|(source, kind)| dup(source).map(|socket| (socket, *kind)))
             .transpose()?;
 
@@ -594,14 +592,9 @@ impl Connection {
         };
         drop(end);
         stop.reader_end_event.notify(usize::MAX);
-        let write_half = write
-            .half
-            .take()
+        let (write_half, writes) = write
+            .take_half()
             .expect("the write half is only taken by a hand-over, which there was none of");
-        #[cfg(any(unix, windows))]
-        {
-            write.source = None;
-        }
         inner.socket_status.closed.store(true, Ordering::Release);
         inner.socket_status.closed_event.notify(usize::MAX);
         drop(guard);
@@ -633,18 +626,21 @@ impl Connection {
         #[cfg(any(unix, windows))]
         let socket = match duplicate {
             Some((socket, kind)) => {
-                // The runtime stops watching the socket as the halves go, while their descriptor
-                // of it is still open, and then that descriptor is closed.
+                // The runtime stops watching the socket as the halves, and the handle that the
+                // connection wrote it directly through, go, while their descriptor of it is still
+                // open, and then that descriptor is closed.
                 drop(read_half);
                 drop(write_half);
+                drop(writes);
 
                 kind.stream(socket)
             }
-            None => HandoverSocket::Socket(Split::new(read_half, write_half)),
+            // A connection that goes on over the halves writes the socket as this one did.
+            None => HandoverSocket::Socket(Split::with_writes(read_half, write_half, writes)),
         };
         // WASI can't duplicate a descriptor.
         #[cfg(not(any(unix, windows)))]
-        let socket = HandoverSocket::Socket(Split::new(read_half, write_half));
+        let socket = HandoverSocket::Socket(Split::with_writes(read_half, write_half, writes));
 
         Ok(Handover {
             socket,
@@ -694,93 +690,6 @@ impl Clone for Backlog {
             items: self.items.clone(),
             stream: None,
         }
-    }
-}
-
-/// What a connection writes its socket through, which those that write it, shut it down or hand it
-/// over take in turn.
-#[derive(Debug)]
-pub(super) struct SocketWrite {
-    /// The write half of the socket, until the connection is handed over.
-    half: Option<Box<dyn WriteHalf>>,
-    /// The socket itself, if zbus drives it and so can give a descriptor of it for a hand-over.
-    #[cfg(any(unix, windows))]
-    source: Option<(IoSource, SocketKind)>,
-    /// Whether a send failed or was given up on midway, which can leave part of a message in the
-    /// socket. The peer can then make no sense of anything sent after it, so the connection can't
-    /// be handed over any more. A send that failed as the peer receives nothing more leaves this
-    /// as it was, as nothing sent after it reaches the peer.
-    torn: bool,
-    /// Whether the connection was closed, which shuts the socket down. It is set before the
-    /// socket is shut down, so it also tells a reader that came to the end of the input as the
-    /// connection was closed apart from one whose peer closed its end.
-    shut_down: bool,
-}
-
-impl SocketWrite {
-    pub(super) fn new(
-        half: Box<dyn WriteHalf>,
-        #[cfg(any(unix, windows))] source: Option<(IoSource, SocketKind)>,
-    ) -> Self {
-        Self {
-            half: Some(half),
-            #[cfg(any(unix, windows))]
-            source,
-            torn: false,
-            shut_down: false,
-        }
-    }
-
-    /// Send `msg`, as [`WriteHalf::send_message`] does, unless the connection was handed over.
-    pub(super) async fn send_message(&mut self, msg: &Message) -> Result<()> {
-        let half = self.half.as_mut().ok_or_else(handed_over)?;
-        // Until the message is through, the socket may hold a part of it.
-        let torn = mem::replace(&mut self.torn, true);
-        let sent = half.send_message(msg).await;
-        self.through(torn, &sent);
-
-        sent
-    }
-
-    /// Send `msgs`, as [`WriteHalf::send_messages`] does, unless the connection was handed over.
-    pub(super) async fn send_messages(&mut self, msgs: &[Message]) -> Result<()> {
-        let half = self.half.as_mut().ok_or_else(handed_over)?;
-        // Until the messages are through, the socket may hold a part of one.
-        let torn = mem::replace(&mut self.torn, true);
-        let sent = half.send_messages(msgs).await;
-        self.through(torn, &sent);
-
-        sent
-    }
-
-    /// The credentials of the peer, as [`WriteHalf::peer_credentials`] gives them, unless the
-    /// connection was handed over.
-    pub(super) async fn peer_credentials(&mut self) -> io::Result<ConnectionCredentials> {
-        let half = self.half.as_mut().ok_or_else(handed_over)?;
-
-        half.peer_credentials().await
-    }
-
-    /// Shut the socket down, as [`WriteHalf::close`] does, unless the connection was handed over,
-    /// which leaves the socket alone: it is no longer the connection's.
-    pub(super) async fn close(&mut self) -> io::Result<()> {
-        let Some(half) = self.half.as_mut() else {
-            return Ok(());
-        };
-        // Set before the socket is shut down, as the shutdown can be given up on midway, and as
-        // the reader can come to the end of the input as soon as it is.
-        self.shut_down = true;
-
-        half.close().await
-    }
-
-    /// Put back `torn`, whether the socket was torn before a send, now that the send is through
-    /// with `sent`, unless the send failed while the peer may still receive what follows it.
-    fn through(&mut self, torn: bool, sent: &Result<()>) {
-        if sent.as_ref().is_err_and(|e| !receives_nothing_more(e)) {
-            return;
-        }
-        self.torn = torn;
     }
 }
 
@@ -1073,30 +982,6 @@ fn torn() -> Error {
         "a send was cut off midway: the socket may hold part of a message",
     )
     .into()
-}
-
-/// Whether `error`, which a send failed with, says that the peer receives nothing more, as one
-/// that closed its end of the socket does: an I/O error of kind `BrokenPipe`, `ConnectionReset`
-/// or `ConnectionAborted`. Nothing sent from then on reaches the peer, so part of a message that
-/// the send left in the socket is followed by nothing that the peer could misread.
-///
-/// A connection that was closed fails its sends with `BrokenPipe` too, as the close shuts the
-/// socket down, but `SocketWrite::shut_down` keeps it from being handed over anyway.
-fn receives_nothing_more(error: &Error) -> bool {
-    matches!(
-        error,
-        Error::InputOutput(e) if matches!(
-            e.kind(),
-            io::ErrorKind::BrokenPipe
-                | io::ErrorKind::ConnectionReset
-                | io::ErrorKind::ConnectionAborted
-        )
-    )
-}
-
-/// The error of what a connection that was handed over can no longer do.
-fn handed_over() -> io::Error {
-    not_connected("the connection was handed over")
 }
 
 /// The error, for `reason`, of what a connection can no longer do, or of a hand-over that the

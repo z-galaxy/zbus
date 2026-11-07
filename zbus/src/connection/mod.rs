@@ -46,12 +46,15 @@ pub mod handover;
 #[cfg(all(feature = "handover", any(unix, windows)))]
 use handover::SocketKind;
 #[cfg(feature = "handover")]
-pub use handover::{Handover, HandoverSocket};
+use handover::StopStatus;
 #[cfg(feature = "handover")]
-use handover::{SocketWrite, StopStatus};
+pub use handover::{Handover, HandoverSocket};
 
 mod socket_reader;
 use socket_reader::{SocketReader, SocketStatus};
+
+mod socket_write;
+use socket_write::SocketWrite;
 
 mod pending_method_calls;
 use pending_method_calls::{PendingMethodCall, PendingMethodCalls};
@@ -128,10 +131,6 @@ impl Drop for ConnectionInner {
         self.drop_event.notify(usize::MAX);
     }
 }
-
-/// What a connection writes its socket through.
-#[cfg(not(feature = "handover"))]
-type SocketWrite = Box<dyn socket::WriteHalf>;
 
 type Subscriptions = HashMap<OwnedMatchRule, (u64, InactiveReceiver<Result<Message>>)>;
 
@@ -1259,6 +1258,7 @@ impl Connection {
 
     pub(crate) async fn new(
         auth: Authenticated,
+        writes: Option<socket::Writes>,
         #[cfg(all(feature = "handover", any(unix, windows)))] source: Option<(
             IoSource,
             SocketKind,
@@ -1287,14 +1287,12 @@ impl Connection {
         let msg_senders = Arc::new(Mutex::new(msg_senders));
         let pending_method_calls = PendingMethodCalls::default();
         let subscriptions = Mutex::new(HashMap::new());
-        #[cfg(feature = "handover")]
         let socket_write = SocketWrite::new(
             auth.socket_write,
-            #[cfg(any(unix, windows))]
+            writes,
+            #[cfg(all(feature = "handover", any(unix, windows)))]
             source,
         );
-        #[cfg(not(feature = "handover"))]
-        let socket_write = auth.socket_write;
 
         let connection = Self {
             inner: Arc::new(ConnectionInner {

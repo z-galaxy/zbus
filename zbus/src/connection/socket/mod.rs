@@ -9,6 +9,7 @@ pub mod channel;
 pub use channel::Channel;
 
 mod split;
+pub(crate) use split::Writes;
 pub use split::{BoxedSplit, Split};
 
 use std::{io, mem};

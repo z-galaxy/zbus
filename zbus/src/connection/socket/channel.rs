@@ -55,10 +55,7 @@ impl super::Socket for Channel {
     type WriteHalf = Writer;
 
     fn split(self) -> super::Split<Self::ReadHalf, Self::WriteHalf> {
-        super::Split {
-            read: self.reader,
-            write: self.writer,
-        }
+        super::Split::new(self.reader, self.writer)
     }
 }
 
