@@ -237,7 +237,13 @@ impl MessageStream {
     ///    there gets that room before it stops.
     /// 3. It waits for a message that is being sent, if any, to have gone. Then it writes what is
     ///    left of a message that a send was dropped, or failed, in the middle of, if any
-    ///    ([`Connection::send`] tells more), waiting for the peer to take it.
+    ///    ([`Connection::send`] tells more),
+    #[cfg_attr(
+        unix,
+        doc = "   then the messages that sends kept once the hand-over was prepared \
+               ([`Connection::prepare_hand_over`]),"
+    )]
+    ///    waiting for the peer to take it.
     /// 4. It commits. From then on nothing is written to the socket through the connection or any
     ///    clone of it: sends and flushes fail, and [`Connection::close`] does nothing to the
     ///    socket. The connection is closed, as [`Connection::is_closed`] and [`Connection::closed`]
@@ -312,12 +318,12 @@ impl MessageStream {
     /// # Cancellation
     ///
     /// The future can be dropped before it resolves, such as to bound the hand-over by a timeout:
-    /// a peer that doesn't read can hold a send under way, or what is left of a message, up for as
-    /// long as it likes. If the future was polled by then, the connection has stopped reading, for
-    /// good, and this stream keeps what the hand-over took off its queue, as told above: hand the
-    /// connection over through this stream again, or take the messages off the stream and close
-    /// the connection. A future dropped before it was ever polled does nothing to the connection,
-    /// which reads on.
+    /// a peer that doesn't read can hold a send under way, or what the connection has left to
+    /// write, up for as long as it likes. If the future was polled by then, the connection has
+    /// stopped reading, for good, and this stream keeps what the hand-over took off its queue, as
+    /// told above: hand the connection over through this stream again, or take the messages off the
+    /// stream and close the connection. A future dropped before it was ever polled does nothing to
+    /// the connection, which reads on.
     ///
     /// # Errors
     ///
@@ -339,9 +345,9 @@ impl MessageStream {
     ///     this before anything is done to the connection, which reads on. A send that failed with
     ///     an I/O error of kind `BrokenPipe`, `ConnectionReset` or `ConnectionAborted`, as one to a
     ///     peer that closed its end does, doesn't count: the peer receives nothing that follows it;
-    ///   * writing what is left of a message that a send was cut off in the middle of fails, with
-    ///     the error that it fails with, unless that is an I/O error of one of the kinds above, as
-    ///     the peer then receives nothing more;
+    ///   * writing what the connection has left to write ([`Connection::unwritten_len`]) fails,
+    ///     with the error that it fails with, unless that is an I/O error of one of the kinds
+    ///     above, as the peer then receives nothing more;
     ///   * the socket or a file descriptor of a message fails to be duplicated, as when the process
     ///     has too many file descriptors open.
     ///

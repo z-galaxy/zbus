@@ -78,6 +78,10 @@ pub(crate) struct ConnectionInner {
 
     socket_status: Arc<SocketStatus>,
     socket_write: Mutex<SocketWrite>,
+    /// Whether the connection can be prepared for a hand-over, as
+    /// [`Connection::prepare_hand_over`] tells.
+    #[cfg(all(unix, feature = "handover"))]
+    can_prepare_hand_over: bool,
 
     // Socket reader task
     #[allow(unused)]
@@ -276,6 +280,16 @@ impl Connection {
     ///
     /// If `msg` carries file descriptors and the connection can't pass them, this fails with
     /// [`Error::Unsupported`] before it sends anything.
+    #[cfg_attr(
+        all(unix, feature = "handover"),
+        doc = "",
+        doc = "Once a hand-over of the connection is prepared \
+               ([`Connection::prepare_hand_over`]), this doesn't wait for the socket: it writes \
+               what the connection has left to write, then `msg`, as far as the socket takes \
+               them at once, and keeps the rest, for the next send or [`Connection::flush`] to \
+               write.",
+        doc = ""
+    )]
     ///
     /// # Cancellation
     ///
@@ -318,6 +332,16 @@ impl Connection {
     ///
     /// If any of `msgs` carries file descriptors and the connection can't pass them, this fails
     /// with [`Error::Unsupported`] before it sends anything.
+    #[cfg_attr(
+        all(unix, feature = "handover"),
+        doc = "",
+        doc = "Once a hand-over of the connection is prepared \
+               ([`Connection::prepare_hand_over`]), this doesn't wait for the socket: it writes \
+               what the connection has left to write, then `msgs`, as far as the socket takes \
+               them at once, and keeps the rest, for the next send or [`Connection::flush`] to \
+               write.",
+        doc = ""
+    )]
     ///
     /// # Cancellation
     ///
@@ -360,6 +384,13 @@ impl Connection {
     /// [`Connection::unwritten_len`] counts. The next send writes it too, ahead of its own
     /// messages, so this is for a connection that is to send nothing more for a while, or for one
     /// that is about to be closed, whose peer would otherwise wait for the rest of that message.
+    #[cfg_attr(
+        all(unix, feature = "handover"),
+        doc = "",
+        doc = "Once a hand-over of the connection is prepared \
+               ([`Connection::prepare_hand_over`]), it is also the messages that sends kept, after \
+               that rest, as sends no longer wait for the socket, while this does."
+    )]
     ///
     /// On a connection closed with [`Connection::close`], which lets go of what is left, this fails
     /// with an I/O error of kind [`NotConnected`](io::ErrorKind::NotConnected). A connection whose
@@ -382,18 +413,64 @@ impl Connection {
         write.flush().await
     }
 
-    /// How many bytes the connection has yet to write of a message that it wrote part of.
+    /// How many bytes the connection took to send and hasn't written yet.
     ///
     /// That is the rest of a message that a send was dropped, or failed, in the middle of
     /// ([`Connection::send`] tells more), which the next send writes ahead of its own messages, and
-    /// so does [`Connection::flush`]. While a send is under way, it is what is left of the message
-    /// that the send is in the middle of, if any: messages of which nothing was written yet don't
-    /// count.
+    /// so does [`Connection::flush`]. While a send is under way, this counts what is left of the
+    /// message that the send is in the middle of, if any, but not the messages that the send is
+    /// yet to write any of.
+    #[cfg_attr(
+        all(unix, feature = "handover"),
+        doc = "",
+        doc = "Once a hand-over of the connection is prepared \
+               ([`Connection::prepare_hand_over`]), this also counts the messages that sends kept, \
+               whole, from the moment that a send kept them."
+    )]
     ///
     /// [`Connection::close`] lets go of these bytes. The peer going away doesn't, so they stay
     /// counted for as long as no write takes them.
     pub fn unwritten_len(&self) -> usize {
         self.inner.socket_status.unwritten.load(Ordering::Relaxed)
+    }
+
+    /// Prepare this connection to be handed over ([`MessageStream::hand_over`]): from now on, for
+    /// good, no send waits for the socket to take what it sends.
+    ///
+    /// A peer that doesn't read holds a send up for as long as it likes, as the socket takes no
+    /// more than its buffer holds. A service that is about to hand its connections over, such as to
+    /// restart, would then wait for the slowest of its peers to read what it sends them meanwhile.
+    /// Once the connection is prepared, each send writes what the socket takes at once, and keeps
+    /// the rest, in order, ahead of the sends after it, which do the same: the next send writes
+    /// what is kept first, as far as the socket takes it then, and [`Connection::flush`] writes all
+    /// of it, waiting on the socket for as long as it takes. A send that waits for the socket as
+    /// this is called stops waiting the same way. Nothing bounds what the sends keep, which
+    /// [`Connection::unwritten_len`] counts. The connection reads on, as before, and a hand-over
+    /// writes what the sends kept before it commits, waiting on the socket.
+    ///
+    /// This can't be undone. It returns `true` once the connection is prepared, the second time
+    /// too, which changes nothing. That is so over the sockets that zbus drives itself, a unix or
+    /// TCP socket or the pipe to a `unixexec:` helper process, and over a write half of your own
+    /// that can resume writes ([`WriteHalf::can_resume_writes`]). Over a [`Socket`] of your own
+    /// whose write half can't resume writes, and over a
+    #[cfg_attr(feature = "p2p", doc = "[`Channel`](socket::Channel),")]
+    #[cfg_attr(not(feature = "p2p"), doc = "`Channel`,")]
+    /// this returns `false`, changing nothing, as a send over either has to wait for the write half
+    /// to take each message whole.
+    ///
+    /// This method is only available on unix, with the `handover` feature.
+    ///
+    /// [`MessageStream::hand_over`]: crate::MessageStream::hand_over
+    /// [`WriteHalf::can_resume_writes`]: socket::WriteHalf::can_resume_writes
+    #[cfg(all(unix, feature = "handover"))]
+    pub fn prepare_hand_over(&self) -> bool {
+        let inner = &*self.inner;
+        if !inner.can_prepare_hand_over {
+            return false;
+        }
+        inner.socket_status.prepared.set();
+
+        true
     }
 
     /// Send a method call.
@@ -1376,6 +1453,8 @@ impl Connection {
             unwritten: AtomicUsize::new(0),
             #[cfg(feature = "handover")]
             stop: StopStatus::new(),
+            #[cfg(all(unix, feature = "handover"))]
+            prepared: Default::default(),
         });
         let socket_write = SocketWrite::new(
             auth.socket_write,
@@ -1384,11 +1463,15 @@ impl Connection {
             #[cfg(all(feature = "handover", any(unix, windows)))]
             source,
         );
+        #[cfg(all(unix, feature = "handover"))]
+        let can_prepare_hand_over = socket_write.can_prepare_hand_over();
 
         let connection = Self {
             inner: Arc::new(ConnectionInner {
                 socket_status,
                 socket_write: Mutex::new(socket_write),
+                #[cfg(all(unix, feature = "handover"))]
+                can_prepare_hand_over,
                 server_guid: auth.server_guid,
                 #[cfg(unix)]
                 cap_unix_fd,

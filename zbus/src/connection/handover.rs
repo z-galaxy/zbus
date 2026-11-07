@@ -583,12 +583,14 @@ impl Connection {
                 return Err(torn());
             }
         }
-        // What is left of a message that a send was dropped, or failed, in the middle of goes out
-        // first, as the peer could make no sense of what the connection that goes on sends after
-        // part of a message. The lock on how the reader ended is let go of meanwhile, as no wait
-        // is to hold it. Once the reader stopped or ended, only a hand-over changes that, under the
-        // lock that is held here, so it holds all the same once this is through.
-        write.write_rest_for_hand_over().await?;
+        // What the connection has left to write goes out first: what is left of a message that a
+        // send was dropped, or failed, in the middle of, as the peer could make no sense of what
+        // the connection that goes on sends after part of a message, and the messages that sends
+        // kept once the hand-over was prepared, which the connection that goes on knows nothing
+        // of. The lock on how the reader ended is let go of meanwhile, as no wait is to hold it.
+        // Once the reader stopped or ended, only a hand-over changes that, under the lock that is
+        // held here, so it holds all the same once this is through.
+        write.write_unwritten_for_hand_over().await?;
         let mut end = stop
             .reader_end
             .lock()

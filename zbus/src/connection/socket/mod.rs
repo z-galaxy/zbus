@@ -549,7 +549,9 @@ pub trait WriteHalf: std::fmt::Debug + Send + Sync + 'static {
     /// * sends the file descriptors that it is given along with the first byte that it takes;
     /// * takes nothing in a call whose future is dropped before it returns;
     ///
-    /// and that [`WriteHalf::flush`] sends on whatever the half holds on to of what `sendmsg` took.
+    /// and that [`WriteHalf::flush`] sends on whatever the half holds on to of what `sendmsg` took,
+    /// and loses none of it in a call whose future is dropped before it returns, which leaves it
+    /// for the next call.
     ///
     /// zbus then writes through `sendmsg`, a message at a time, and calls neither
     /// [`WriteHalf::send_message`] nor [`WriteHalf::send_messages`]: it hands `sendmsg` the file
@@ -558,6 +560,13 @@ pub trait WriteHalf: std::fmt::Debug + Send + Sync + 'static {
     /// error of kind [`WriteZero`](io::ErrorKind::WriteZero). A send over the half that is dropped,
     /// or that fails, midway leaves the rest of its message for the connection to write ahead of
     /// anything else, as [`Connection::send`] tells.
+    #[cfg_attr(
+        all(unix, feature = "handover"),
+        doc = "Once a hand-over of the connection is prepared \
+               ([`Connection::prepare_hand_over`](crate::Connection::prepare_hand_over)), a send \
+               gives up a call to `sendmsg` or `flush` that waits, rather than wait for it, and \
+               the connection keeps what is left, for a later send or flush."
+    )]
     ///
     /// The default implementation returns `false`, which suits a half that sends whole messages
     /// through `send_message` and `send_messages`. A send over such a half that is dropped, or that
@@ -568,6 +577,11 @@ pub trait WriteHalf: std::fmt::Debug + Send + Sync + 'static {
         doc = "A hand-over ([`MessageStream::hand_over`](crate::MessageStream::hand_over)) of a \
                connection over such a half waits for a send under way, and fails once one was \
                cut off midway."
+    )]
+    #[cfg_attr(
+        all(unix, feature = "handover"),
+        doc = "[`Connection::prepare_hand_over`](crate::Connection::prepare_hand_over) returns \
+               `false` for such a connection, as its sends have to wait for the half."
     )]
     ///
     /// zbus asks this once, as the connection is built.
