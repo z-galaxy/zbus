@@ -144,7 +144,7 @@ impl Tcp {
         for socket_address in addresses {
             match runtime.connect_tcp(socket_address).await {
                 Ok(source) => {
-                    #[cfg(all(feature = "handover", any(unix, windows)))]
+                    #[cfg(all(unix, feature = "handover"))]
                     let kept = source.clone();
                     let mut split = BoxedSplit::from(RegisteredIo::new(runtime, source, TcpOps)?);
                     if let Some(nonce) = nonce.as_deref() {
@@ -153,7 +153,7 @@ impl Tcp {
 
                     return Ok(Stream::Tcp {
                         split,
-                        #[cfg(all(feature = "handover", any(unix, windows)))]
+                        #[cfg(all(unix, feature = "handover"))]
                         source: kept,
                     });
                 }

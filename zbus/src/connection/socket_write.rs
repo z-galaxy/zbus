@@ -2,7 +2,7 @@
 
 #[cfg(all(unix, feature = "handover"))]
 use std::collections::VecDeque;
-#[cfg(feature = "handover")]
+#[cfg(all(unix, feature = "handover"))]
 use std::mem;
 #[cfg(unix)]
 use std::os::fd::{AsFd, BorrowedFd};
@@ -20,12 +20,12 @@ use std::{future::Future, pin::Pin, sync::atomic::AtomicBool};
 #[cfg(all(unix, feature = "handover"))]
 use zruntime::{Event, EventListener};
 
-#[cfg(all(feature = "handover", any(unix, windows)))]
+#[cfg(all(unix, feature = "handover"))]
 use super::handover::SocketKind;
 use super::socket_reader::SocketStatus;
-#[cfg(feature = "handover")]
+#[cfg(all(unix, feature = "handover"))]
 use crate::Error;
-#[cfg(all(feature = "handover", any(unix, windows)))]
+#[cfg(all(unix, feature = "handover"))]
 use crate::runtime::IoSource;
 #[cfg(all(unix, feature = "handover"))]
 use crate::runtime::io::MESSAGES_PER_WRITE;
@@ -54,7 +54,7 @@ pub(super) struct SocketWrite {
     /// and the messages that sends kept after it.
     rest: Rest,
     /// The socket itself, if zbus drives it and so can give a descriptor of it for a hand-over.
-    #[cfg(all(feature = "handover", any(unix, windows)))]
+    #[cfg(all(unix, feature = "handover"))]
     source: Option<(IoSource, SocketKind)>,
     /// Whether a send of whole messages through `half` failed or was given up on midway, which can
     /// leave part of a message in the socket. The peer can then make no sense of anything sent
@@ -62,7 +62,7 @@ pub(super) struct SocketWrite {
     /// receives nothing more leaves this as it was, as nothing sent after it reaches the peer, and
     /// so does one through the write half of a channel, which queues each message whole or not at
     /// all.
-    #[cfg(feature = "handover")]
+    #[cfg(all(unix, feature = "handover"))]
     torn: bool,
     /// Whether the connection was closed, which shuts the socket down and lets go of what is left
     /// to write, so that a flush fails from then on. It is set before the socket is shut down, so
@@ -78,19 +78,16 @@ impl SocketWrite {
         half: Box<dyn WriteHalf>,
         writes: Option<Writes>,
         status: Arc<SocketStatus>,
-        #[cfg(all(feature = "handover", any(unix, windows)))] source: Option<(
-            IoSource,
-            SocketKind,
-        )>,
+        #[cfg(all(unix, feature = "handover"))] source: Option<(IoSource, SocketKind)>,
     ) -> Self {
         Self {
             half_resumes: half.can_resume_writes(),
             half: Some(half),
             writes,
             rest: Rest::new(status),
-            #[cfg(all(feature = "handover", any(unix, windows)))]
+            #[cfg(all(unix, feature = "handover"))]
             source,
-            #[cfg(feature = "handover")]
+            #[cfg(all(unix, feature = "handover"))]
             torn: false,
             shut_down: false,
         }
@@ -140,7 +137,7 @@ impl SocketWrite {
             _ => (),
         }
         let half = self.half.as_deref_mut().ok_or_else(handed_over)?;
-        #[cfg(feature = "handover")]
+        #[cfg(all(unix, feature = "handover"))]
         let torn = match self.writes {
             // The channel queues the message whole or not at all.
             #[cfg(feature = "p2p")]
@@ -149,7 +146,7 @@ impl SocketWrite {
             _ => mem::replace(&mut self.torn, true),
         };
         let sent = half.send_message(msg).await;
-        #[cfg(feature = "handover")]
+        #[cfg(all(unix, feature = "handover"))]
         self.through(torn, &sent);
 
         sent
@@ -193,7 +190,7 @@ impl SocketWrite {
             _ => (),
         }
         let half = self.half.as_deref_mut().ok_or_else(handed_over)?;
-        #[cfg(feature = "handover")]
+        #[cfg(all(unix, feature = "handover"))]
         let torn = match self.writes {
             // The channel queues each message whole or not at all.
             #[cfg(feature = "p2p")]
@@ -202,7 +199,7 @@ impl SocketWrite {
             _ => mem::replace(&mut self.torn, true),
         };
         let sent = half.send_messages(msgs).await;
-        #[cfg(feature = "handover")]
+        #[cfg(all(unix, feature = "handover"))]
         self.through(torn, &sent);
 
         sent
@@ -253,7 +250,7 @@ impl SocketWrite {
     /// Write what the connection has left to write, for the connection to be handed over, waiting
     /// on the socket for as long as it takes. If the peer receives nothing more, nothing that
     /// follows what it got can be misread, so what is left is let go of instead.
-    #[cfg(feature = "handover")]
+    #[cfg(all(unix, feature = "handover"))]
     pub(super) async fn write_unwritten_for_hand_over(&mut self) -> Result<()> {
         match self.write_unwritten().await {
             Err(Error::InputOutput(e)) if receives_nothing_more(&e) => {
@@ -267,19 +264,19 @@ impl SocketWrite {
 
     /// Whether a send of whole messages through `half` failed or was given up on midway, which can
     /// leave part of a message in the socket.
-    #[cfg(feature = "handover")]
+    #[cfg(all(unix, feature = "handover"))]
     pub(super) fn is_torn(&self) -> bool {
         self.torn
     }
 
     /// Whether the connection was closed.
-    #[cfg(feature = "handover")]
+    #[cfg(all(unix, feature = "handover"))]
     pub(super) fn is_shut_down(&self) -> bool {
         self.shut_down
     }
 
     /// The socket itself, if zbus drives it and so can give a descriptor of it for a hand-over.
-    #[cfg(all(feature = "handover", any(unix, windows)))]
+    #[cfg(all(unix, feature = "handover"))]
     pub(super) fn source(&self) -> Option<&(IoSource, SocketKind)> {
         self.source.as_ref()
     }
@@ -288,12 +285,9 @@ impl SocketWrite {
     /// writes the socket, if zbus made it, for a connection that goes on over the half to write it
     /// the same way. Let go of all else that the connection holds of the socket. Nothing is
     /// written through the connection from then on.
-    #[cfg(feature = "handover")]
+    #[cfg(all(unix, feature = "handover"))]
     pub(super) fn take_half(&mut self) -> Option<(Box<dyn WriteHalf>, Option<Writes>)> {
-        #[cfg(any(unix, windows))]
-        {
-            self.source = None;
-        }
+        self.source = None;
         let half = self.half.take()?;
 
         Some((half, self.writes.take()))
@@ -325,7 +319,7 @@ impl SocketWrite {
 
     /// Put back `torn`, whether the socket was torn before a send, now that the send is through
     /// with `sent`, unless the send failed while the peer may still receive what follows it.
-    #[cfg(feature = "handover")]
+    #[cfg(all(unix, feature = "handover"))]
     fn through(&mut self, torn: bool, sent: &Result<()>) {
         if sent
             .as_ref()
@@ -921,7 +915,7 @@ impl fmt::Debug for Rest {
 ///
 /// A connection that was closed fails its sends with `BrokenPipe` too, as the close shuts the
 /// socket down, but `SocketWrite::shut_down` keeps it from being handed over anyway.
-#[cfg(feature = "handover")]
+#[cfg(all(unix, feature = "handover"))]
 fn receives_nothing_more(error: &io::Error) -> bool {
     matches!(
         error.kind(),

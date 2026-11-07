@@ -214,7 +214,7 @@ pub trait ReadHalf: std::fmt::Debug + Send + Sync + 'static {
     ///   the buffer containing those bytes (if any). If you're implementing this method, most
     ///   likely you can safely ignore this parameter.
     #[cfg_attr(
-        feature = "handover",
+        all(unix, feature = "handover"),
         doc = "   A half that can take what it left unread ([`ReadHalf::can_take_unread`]) is the \
                exception: it has to take these ahead of anything that it reads, or fail on them if \
                it can't make messages of them, as they are also how a connection that takes over \
@@ -225,7 +225,7 @@ pub trait ReadHalf: std::fmt::Debug + Send + Sync + 'static {
     ///
     /// # Cancellation
     #[cfg_attr(
-        feature = "handover",
+        all(unix, feature = "handover"),
         doc = "A hand-over ([`MessageStream::hand_over`](crate::MessageStream::hand_over)) stops \
                the connection reading by dropping the future of this method wherever it waits, if \
                [`ReadHalf::can_take_unread`] says that it can.",
@@ -372,13 +372,13 @@ pub trait ReadHalf: std::fmt::Debug + Send + Sync + 'static {
     /// connection that takes over ([`Builder::take_over`]) a hand-over that holds unread bytes or
     /// file descriptors.
     ///
-    /// This method is only available when the `handover` feature is enabled.
+    /// This method is only available on unix, with the `handover` feature.
     ///
     /// [`Builder::build`]: crate::connection::Builder::build
     /// [`Builder::take_over`]: crate::connection::Builder::take_over
     /// [`Error::Unsupported`]: crate::Error::Unsupported
     /// [`MessageStream::hand_over`]: crate::MessageStream::hand_over
-    #[cfg(feature = "handover")]
+    #[cfg(all(unix, feature = "handover"))]
     fn can_take_unread(&self) -> bool {
         false
     }
@@ -397,14 +397,12 @@ pub trait ReadHalf: std::fmt::Debug + Send + Sync + 'static {
     /// from one call of `receive_message` to the next, such as one that leaves `receive_message`
     /// to the default implementation.
     ///
-    /// This method is only available when the `handover` feature is enabled.
+    /// This method is only available on unix, with the `handover` feature.
     ///
     /// [`MessageStream::hand_over`]: crate::MessageStream::hand_over
-    #[cfg(feature = "handover")]
-    fn take_unread(&mut self, bytes: &mut Vec<u8>, #[cfg(unix)] fds: &mut Vec<OwnedFd>) {
-        let _ = bytes;
-        #[cfg(unix)]
-        let _ = fds;
+    #[cfg(all(unix, feature = "handover"))]
+    fn take_unread(&mut self, bytes: &mut Vec<u8>, fds: &mut Vec<OwnedFd>) {
+        let _ = (bytes, fds);
     }
 }
 
@@ -573,7 +571,7 @@ pub trait WriteHalf: std::fmt::Debug + Send + Sync + 'static {
     /// fails, in the middle of a message can leave part of it on the socket, after which the peer
     /// can make no sense of anything that the connection sends.
     #[cfg_attr(
-        feature = "handover",
+        all(unix, feature = "handover"),
         doc = "A hand-over ([`MessageStream::hand_over`](crate::MessageStream::hand_over)) of a \
                connection over such a half waits for a send under way, and fails once one was \
                cut off midway."
@@ -720,18 +718,14 @@ impl ReadHalf for Box<dyn ReadHalf> {
         (**self).auth_mechanism()
     }
 
-    #[cfg(feature = "handover")]
+    #[cfg(all(unix, feature = "handover"))]
     fn can_take_unread(&self) -> bool {
         (**self).can_take_unread()
     }
 
-    #[cfg(feature = "handover")]
-    fn take_unread(&mut self, bytes: &mut Vec<u8>, #[cfg(unix)] fds: &mut Vec<OwnedFd>) {
-        (**self).take_unread(
-            bytes,
-            #[cfg(unix)]
-            fds,
-        )
+    #[cfg(all(unix, feature = "handover"))]
+    fn take_unread(&mut self, bytes: &mut Vec<u8>, fds: &mut Vec<OwnedFd>) {
+        (**self).take_unread(bytes, fds)
     }
 }
 

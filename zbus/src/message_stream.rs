@@ -10,7 +10,7 @@ use futures_core::stream::{self, FusedStream};
 use ordered_stream::{OrderedStream, PollResult};
 use zruntime::{EventListener, broadcast::Receiver as ActiveReceiver};
 
-#[cfg(feature = "handover")]
+#[cfg(all(unix, feature = "handover"))]
 use crate::connection::{Handover, handover::Backlog};
 use crate::{
     AsyncDrop, Connection, MatchRule, OwnedMatchRule, Result,
@@ -35,7 +35,7 @@ use crate::{
 /// remote peer going away, an I/O error on the socket, or the runtime taking away the task that
 /// reads it.
 #[cfg_attr(
-    feature = "handover",
+    all(unix, feature = "handover"),
     doc = "",
     doc = "The stream also ends once a hand-over of its connection through another stream \
            ([`MessageStream::hand_over`]) stops the connection reading, after everything that the \
@@ -54,7 +54,7 @@ pub struct MessageStream {
     terminated: bool,
     // What a hand-over through this stream took off its queue and the stream is yet to yield,
     // which it yields first.
-    #[cfg(feature = "handover")]
+    #[cfg(all(unix, feature = "handover"))]
     backlog: Backlog,
 }
 
@@ -66,7 +66,7 @@ impl Clone for MessageStream {
             // listener when it first needs one and runs to its own end.
             closed_listener: None,
             terminated: false,
-            #[cfg(feature = "handover")]
+            #[cfg(all(unix, feature = "handover"))]
             backlog: self.backlog.clone(),
         }
     }
@@ -227,7 +227,7 @@ impl MessageStream {
     /// [`Builder::build_message_stream`] builds along with the connection has. Stop taking
     /// messages off it, and finish what you do with those that you took, before you call this.
     ///
-    /// This method is only available when the `handover` feature is enabled.
+    /// This method is only available on unix, with the `handover` feature.
     ///
     /// This proceeds in order:
     ///
@@ -237,13 +237,8 @@ impl MessageStream {
     ///    there gets that room before it stops.
     /// 3. It waits for a message that is being sent, if any, to have gone. Then it writes what is
     ///    left of a message that a send was dropped, or failed, in the middle of, if any
-    ///    ([`Connection::send`] tells more),
-    #[cfg_attr(
-        unix,
-        doc = "   then the messages that sends kept once the hand-over was prepared \
-               ([`Connection::prepare_hand_over`]),"
-    )]
-    ///    waiting for the peer to take it.
+    ///    ([`Connection::send`] tells more), then the messages that sends kept once the hand-over
+    ///    was prepared ([`Connection::prepare_hand_over`]), waiting for the peer to take it.
     /// 4. It commits. From then on nothing is written to the socket through the connection or any
     ///    clone of it: sends and flushes fail, and [`Connection::close`] does nothing to the
     ///    socket. The connection is closed, as [`Connection::is_closed`] and [`Connection::closed`]
@@ -251,13 +246,9 @@ impl MessageStream {
     ///
     /// The `unread_bytes` of the [`Handover`] that it gives are those of the messages that were
     /// queued on this stream and that it did not yield, oldest first, followed by what the
-    /// connection read off the socket after them and made no message of yet.
-    #[cfg_attr(
-        unix,
-        doc = "Its `unread_fds` are the file descriptors of those messages, in their order, followed \
-               by those that came in with the rest."
-    )]
-    /// The stream then ends: it yields `None`, as it has nothing left to yield.
+    /// connection read off the socket after them and made no message of yet. Its `unread_fds` are
+    /// the file descriptors of those messages, in their order, followed by those that came in with
+    /// the rest. The stream then ends: it yields `None`, as it has nothing left to yield.
     ///
     /// # The messages of the stream
     ///
@@ -360,7 +351,7 @@ impl MessageStream {
     /// [`Error::Unsupported`]: crate::Error::Unsupported
     /// [`ReadHalf::can_take_unread`]: crate::connection::socket::ReadHalf::can_take_unread
     /// [`WriteHalf::can_resume_writes`]: crate::connection::socket::WriteHalf::can_resume_writes
-    #[cfg(feature = "handover")]
+    #[cfg(all(unix, feature = "handover"))]
     pub async fn hand_over(&mut self) -> Result<Handover> {
         if self.inner.match_rule.is_some() {
             return Err(crate::Error::Unsupported);
@@ -390,7 +381,7 @@ impl MessageStream {
             },
             closed_listener: None,
             terminated: false,
-            #[cfg(feature = "handover")]
+            #[cfg(all(unix, feature = "handover"))]
             backlog: Backlog::default(),
         }
     }
@@ -402,7 +393,7 @@ impl stream::Stream for MessageStream {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
 
-        #[cfg(feature = "handover")]
+        #[cfg(all(unix, feature = "handover"))]
         if let Some(item) = this.backlog.pop() {
             return Poll::Ready(Some(item));
         }
@@ -491,7 +482,7 @@ impl OrderedStream for MessageStream {
 impl FusedStream for MessageStream {
     fn is_terminated(&self) -> bool {
         // The queue can be over while the backlog, which comes before it, still holds messages.
-        #[cfg(feature = "handover")]
+        #[cfg(all(unix, feature = "handover"))]
         if !self.backlog.is_empty() {
             return false;
         }
@@ -513,7 +504,7 @@ impl From<Connection> for MessageStream {
             },
             closed_listener: None,
             terminated: false,
-            #[cfg(feature = "handover")]
+            #[cfg(all(unix, feature = "handover"))]
             backlog: Backlog::default(),
         }
     }

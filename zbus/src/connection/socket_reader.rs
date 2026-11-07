@@ -6,7 +6,7 @@ use std::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
-#[cfg(feature = "handover")]
+#[cfg(all(unix, feature = "handover"))]
 use std::{
     future::{Future, poll_fn},
     mem,
@@ -15,7 +15,7 @@ use std::{
 };
 
 use zruntime::Event;
-#[cfg(feature = "handover")]
+#[cfg(all(unix, feature = "handover"))]
 use zruntime::EventListener;
 
 use crate::{
@@ -26,7 +26,7 @@ use crate::{
     runtime::{Runtime, Task, locks::Mutex},
 };
 
-#[cfg(feature = "handover")]
+#[cfg(all(unix, feature = "handover"))]
 use super::handover::{ReadParts, ReaderEnd, StopStatus, ends_input, stopped_error};
 use super::socket::ReadHalf;
 #[cfg(all(unix, feature = "handover"))]
@@ -85,15 +85,15 @@ impl SocketReader {
     async fn receive_msg(mut self) {
         // Armed once, before the flag is first looked at: a stop asked for from now on is seen, by
         // the flag before a read or by the listener during one.
-        #[cfg(feature = "handover")]
+        #[cfg(all(unix, feature = "handover"))]
         let mut stop = self.socket_status.stop.listener();
         loop {
             trace!("Waiting for message on the socket..");
-            #[cfg(feature = "handover")]
+            #[cfg(all(unix, feature = "handover"))]
             let Some(msg) = self.read_unless_stopped(&mut stop).await else {
                 return self.stop().await;
             };
-            #[cfg(not(feature = "handover"))]
+            #[cfg(not(all(unix, feature = "handover")))]
             let msg = self.read_socket().await;
             match &msg {
                 Ok(msg) => {
@@ -148,14 +148,13 @@ impl SocketReader {
                 // end, which takes nothing away from what the connection read, and the connection
                 // that takes over comes to the same end. Nothing waits from here on, so the reader
                 // can't be let go of with them.
-                #[cfg(feature = "handover")]
+                #[cfg(all(unix, feature = "handover"))]
                 {
                     let end = match &msg {
                         Err(e) if stop.is_some() && ends_input(e) => {
                             ReaderEnd::Ended(ReadParts::new(
                                 self.socket.take().expect("the reader ends only once"),
                                 mem::take(&mut self.already_received_bytes),
-                                #[cfg(unix)]
                                 mem::take(&mut self.already_received_fds),
                             ))
                         }
@@ -181,7 +180,7 @@ impl SocketReader {
     ///
     /// A read that comes to a message in the same poll as the stop still yields it. A connection
     /// that can't stop has no `stop` listener, and reads on.
-    #[cfg(feature = "handover")]
+    #[cfg(all(unix, feature = "handover"))]
     async fn read_unless_stopped(
         &mut self,
         stop: &mut Option<EventListener>,
@@ -207,7 +206,7 @@ impl SocketReader {
     ///
     /// The reader only gets here between messages, so each message that it read whole has gone to
     /// every stream that it was due to by now. Nothing is done to the socket itself.
-    #[cfg(feature = "handover")]
+    #[cfg(all(unix, feature = "handover"))]
     async fn stop(mut self) {
         // Each stream yields what is queued for it, then ends. This is the only wait, so a reader
         // let go of here still holds the read half, and ends the connection as one that failed.
@@ -215,7 +214,6 @@ impl SocketReader {
         let parts = ReadParts::new(
             self.socket.take().expect("the reader stops only once"),
             mem::take(&mut self.already_received_bytes),
-            #[cfg(unix)]
             mem::take(&mut self.already_received_fds),
         );
         // The replies to the calls that wait for them can no longer come in through this reader.
@@ -295,7 +293,7 @@ impl SocketReader {
 /// [`MessageStream`]: crate::MessageStream
 impl Drop for SocketReader {
     fn drop(&mut self) {
-        #[cfg(feature = "handover")]
+        #[cfg(all(unix, feature = "handover"))]
         {
             if self.socket.is_none() {
                 return;
@@ -322,7 +320,7 @@ pub(super) struct SocketStatus {
     /// without it. Nothing else is read along with it, so it is stored and loaded `Relaxed`.
     pub unwritten: AtomicUsize,
     /// Whether the reader is to stop, or did, for the connection to be handed over.
-    #[cfg(feature = "handover")]
+    #[cfg(all(unix, feature = "handover"))]
     pub stop: StopStatus,
     /// Whether a hand-over of the connection is prepared, which has its sends stop, rather than
     /// wait for the socket.
