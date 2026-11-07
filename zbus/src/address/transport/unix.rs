@@ -60,7 +60,7 @@ impl Unix {
             })?;
 
         Ok(Stream::Unix {
-            #[cfg(feature = "handover")]
+            #[cfg(all(unix, feature = "handover"))]
             source: source.clone(),
             split: RegisteredIo::new(runtime, source, UnixOps)?.into(),
         })

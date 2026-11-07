@@ -212,17 +212,17 @@ pub trait ReadHalf: std::fmt::Debug + Send + Sync + 'static {
     /// - `already_received_bytes`: Sometimes, zbus already received some bytes from the socket
     ///   belonging to the first message(s) (as part of the connection handshake process). This is
     ///   the buffer containing those bytes (if any). If you're implementing this method, most
-    ///   likely you can safely ignore this parameter. With the `handover` feature, a half that can
-    ///   take what it left unread (`ReadHalf::can_take_unread`) is the exception: it has to take
-    ///   these ahead of anything that it reads, or fail on them if it can't make messages of them,
-    ///   as they are also how a connection that takes over (`Builder::take_over`) gets what the
-    ///   other one left unread.
+    ///   likely you can safely ignore this parameter. With the `handover` feature, on unix, a half
+    ///   that can take what it left unread (`ReadHalf::can_take_unread`) is the exception: it has
+    ///   to take these ahead of anything that it reads, or fail on them if it can't make messages
+    ///   of them, as they are also how a connection that takes over (`Builder::take_over`) gets
+    ///   what the other one left unread.
     /// - `already_received_fds`: Same goes for file descriptors belonging to first messages.
     ///
     /// # Cancellation
     ///
-    /// With the `handover` feature, a hand-over (`MessageStream::hand_over`) stops the connection
-    /// reading by dropping the future of this method wherever it waits, if
+    /// With the `handover` feature, on unix, a hand-over (`MessageStream::hand_over`) stops the
+    /// connection reading by dropping the future of this method wherever it waits, if
     /// `ReadHalf::can_take_unread` says that it can.
     ///
     /// The default implementation keeps what it read of a message in `already_received_bytes`
@@ -363,13 +363,13 @@ pub trait ReadHalf: std::fmt::Debug + Send + Sync + 'static {
     /// connection that takes over ([`Builder::take_over`]) a hand-over that holds unread bytes or
     /// file descriptors.
     ///
-    /// This method is only available when the `handover` feature is enabled.
+    /// This method is only available on unix, with the `handover` feature.
     ///
     /// [`Builder::build`]: crate::connection::Builder::build
     /// [`Builder::take_over`]: crate::connection::Builder::take_over
     /// [`Error::Unsupported`]: crate::Error::Unsupported
     /// [`MessageStream::hand_over`]: crate::MessageStream::hand_over
-    #[cfg(feature = "handover")]
+    #[cfg(all(unix, feature = "handover"))]
     fn can_take_unread(&self) -> bool {
         false
     }
@@ -388,14 +388,12 @@ pub trait ReadHalf: std::fmt::Debug + Send + Sync + 'static {
     /// from one call of `receive_message` to the next, such as one that leaves `receive_message`
     /// to the default implementation.
     ///
-    /// This method is only available when the `handover` feature is enabled.
+    /// This method is only available on unix, with the `handover` feature.
     ///
     /// [`MessageStream::hand_over`]: crate::MessageStream::hand_over
-    #[cfg(feature = "handover")]
-    fn take_unread(&mut self, bytes: &mut Vec<u8>, #[cfg(unix)] fds: &mut Vec<OwnedFd>) {
-        let _ = bytes;
-        #[cfg(unix)]
-        let _ = fds;
+    #[cfg(all(unix, feature = "handover"))]
+    fn take_unread(&mut self, bytes: &mut Vec<u8>, fds: &mut Vec<OwnedFd>) {
+        let _ = (bytes, fds);
     }
 }
 
@@ -563,11 +561,10 @@ pub trait WriteHalf: std::fmt::Debug + Send + Sync + 'static {
     /// that fails, in the middle of a message can leave part of it on the socket, after which the
     /// peer can make no sense of anything that the connection sends.
     ///
-    /// With the `handover` feature, a hand-over (`MessageStream::hand_over`) of a connection over
-    /// such a half waits for a send under way, and fails once one was cut off midway.
-    ///
-    /// With the `handover` feature, on unix, `Connection::prepare_hand_over` returns `false` for
-    /// such a connection, as its sends have to wait for the half.
+    /// With the `handover` feature, on unix, a hand-over (`MessageStream::hand_over`) of a
+    /// connection over such a half waits for a send under way, and fails once one was cut off
+    /// midway. `Connection::prepare_hand_over` returns `false` for such a connection, as its sends
+    /// have to wait for the half.
     ///
     /// zbus asks this once, as the connection is built.
     ///
@@ -705,18 +702,14 @@ impl ReadHalf for Box<dyn ReadHalf> {
         (**self).auth_mechanism()
     }
 
-    #[cfg(feature = "handover")]
+    #[cfg(all(unix, feature = "handover"))]
     fn can_take_unread(&self) -> bool {
         (**self).can_take_unread()
     }
 
-    #[cfg(feature = "handover")]
-    fn take_unread(&mut self, bytes: &mut Vec<u8>, #[cfg(unix)] fds: &mut Vec<OwnedFd>) {
-        (**self).take_unread(
-            bytes,
-            #[cfg(unix)]
-            fds,
-        )
+    #[cfg(all(unix, feature = "handover"))]
+    fn take_unread(&mut self, bytes: &mut Vec<u8>, fds: &mut Vec<OwnedFd>) {
+        (**self).take_unread(bytes, fds)
     }
 }
 

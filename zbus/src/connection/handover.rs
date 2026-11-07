@@ -1,7 +1,7 @@
 //! Handing a connection over, for a connection in this process or in another one to go on from
 //! where it stopped, as a service or a bus that restarts does.
 //!
-//! This is behind the `handover` cargo feature, which is off by default.
+//! This is behind the `handover` cargo feature, which is off by default, and only on unix.
 //!
 //! # How it goes
 //!
@@ -18,17 +18,9 @@
 //!    socket, the messages that were queued on the stream and that it did not yield, what the
 //!    connection read off the socket after them and made no message of yet, the file descriptors
 //!    that came with all of those, and what a connection that goes on needs to know of this one.
-#![cfg_attr(
-    unix,
-    doc = "4. To pass the hand-over to another process, or to keep it while this one restarts, \
-           such as in the file descriptor store of systemd, turn it into bytes and file \
-           descriptors with [`Handover::encode`], and back with [`Handover::decode`]."
-)]
-#![cfg_attr(
-    not(unix),
-    doc = "4. To pass the hand-over to another process, pass its socket on, and build it again \
-           there with [`Handover::new`]."
-)]
+//! 4. To pass the hand-over to another process, or to keep it while this one restarts, such as in
+//!    the file descriptor store of systemd, turn it into bytes and file descriptors with
+//!    [`Handover::encode`], and back with [`Handover::decode`].
 //! 5. Build the connection that goes on, in this process or in another one that the hand-over is
 //!    passed to, with [`Builder::take_over`], and its stream with `build_message_stream`. It yields
 //!    the messages of the hand-over first, then goes on reading the socket where the other one
@@ -64,9 +56,6 @@
 //!     connection::{Builder, Handover},
 //! };
 //!
-//! # #[cfg(not(unix))]
-//! # fn main() {}
-//! # #[cfg(unix)]
 //! # fn main() -> zbus::Result<()> {
 //! block_on(async {
 //!     let mut stream = Builder::session().build_message_stream().await?;
@@ -104,13 +93,6 @@
 //! [`MessageStream`]: crate::MessageStream
 //! [`MessageStream::hand_over`]: crate::MessageStream::hand_over
 
-#[cfg(windows)]
-use std::os::windows::io::{AsSocket, FromRawSocket, IntoRawSocket, OwnedSocket};
-#[cfg(unix)]
-use std::os::{
-    fd::{AsFd, OwnedFd},
-    unix::net::UnixStream,
-};
 use std::{
     collections::VecDeque,
     fmt,
@@ -118,6 +100,10 @@ use std::{
     io, mem,
     net::TcpStream,
     num::NonZeroU32,
+    os::{
+        fd::{AsFd, OwnedFd},
+        unix::net::UnixStream,
+    },
     pin::{Pin, pin},
     sync::{
         Arc, Mutex, PoisonError,
@@ -127,26 +113,18 @@ use std::{
 };
 
 use futures_core::Stream;
-#[cfg(unix)]
 use serde::{Serialize, Serializer};
-#[cfg(windows)]
-use uds_windows::UnixStream;
 use zruntime::{
     Event, EventListener,
     broadcast::{Receiver, TryRecvError},
 };
 
-#[cfg(any(unix, windows))]
-use crate::runtime::IoSource;
 use crate::{
-    Connection, Error, Message, OwnedGuid, Result,
+    Connection, Error, Guid, Message, OwnedGuid, Result,
     connection::socket::{BoxedSplit, ReadHalf, Split},
     message,
     names::OwnedUniqueName,
-};
-#[cfg(unix)]
-use crate::{
-    Guid,
+    runtime::IoSource,
     wire::{
         self, LE, Signature, Type,
         serialized::{Context, Data},
@@ -160,14 +138,13 @@ use crate::{
 /// hand-over is passed to, such as the next instance of a service that restarts, or a helper
 /// process.
 ///
-/// This type is only available when the `handover` feature is enabled.
+/// This type is only available on unix, with the `handover` feature.
 ///
 /// # Passing it to another process
 ///
-/// On unix, `Handover::encode` turns it into bytes and file descriptors, which can be passed on
-/// over a unix socket or kept in the file descriptor store of systemd, and `Handover::decode` turns
-/// those back into a hand-over. Elsewhere, pass on the descriptor of the socket, and the other
-/// fields as data, then build it again there with [`Handover::new`] and set the fields.
+/// [`Handover::encode`] turns it into bytes and file descriptors, which can be passed on over a
+/// unix socket or kept in the file descriptor store of systemd, and [`Handover::decode`] turns
+/// those back into a hand-over.
 ///
 /// `unread_bytes` holds the messages that were queued on the stream, and the start of one that the
 /// peer was in the middle of sending, which can be as long as the longest message that D-Bus
@@ -201,10 +178,8 @@ pub struct Handover {
     /// header says. Those of the messages that were queued are duplicates, which are
     /// close-on-exec, as std makes them, while the others are not, as zbus receives them. To pass
     /// them on through an `exec`, clear the close-on-exec flag of each.
-    #[cfg(unix)]
     pub unread_fds: Vec<OwnedFd>,
     /// Whether the two ends of the connection agreed to pass file descriptors.
-    #[cfg(unix)]
     pub unix_fd_passing: bool,
     /// Whether the connection is a peer-to-peer one rather than one to a bus, as
     /// [`Builder::p2p`] made it.
@@ -232,9 +207,7 @@ impl Handover {
             server_guid,
             unique_name: None,
             unread_bytes: Vec::new(),
-            #[cfg(unix)]
             unread_fds: Vec::new(),
-            #[cfg(unix)]
             unix_fd_passing: false,
             #[cfg(feature = "p2p")]
             p2p: false,
@@ -265,7 +238,6 @@ impl Handover {
     ///
     /// As this takes the hand-over, a failure drops it, which closes its socket. Check its socket
     /// first if it may be a socket of your own.
-    #[cfg(unix)]
     pub fn encode(self) -> Result<(Vec<u8>, Vec<OwnedFd>)> {
         let socket = match self.socket {
             HandoverSocket::UnixStream(stream) => (ENCODED_UNIX_STREAM, OwnedFd::from(stream)),
@@ -317,7 +289,6 @@ impl Handover {
     ///   `encode` gives, or for a number of file descriptors other than the one that they count.
     ///
     /// The file descriptors are closed on an error.
-    #[cfg(unix)]
     pub fn decode(bytes: &[u8], mut fds: Vec<OwnedFd>) -> Result<Handover> {
         let (version, encoded) = bytes.split_first().ok_or_else(malformed)?;
         if *version != ENCODING_VERSION {
@@ -375,7 +346,6 @@ impl fmt::Debug for Handover {
             .field("server_guid", &self.server_guid)
             .field("unique_name", &self.unique_name)
             .field("unread_bytes", &self.unread_bytes.len());
-        #[cfg(unix)]
         handover
             .field("unread_fds", &self.unread_fds.len())
             .field("unix_fd_passing", &self.unix_fd_passing);
@@ -389,7 +359,7 @@ impl fmt::Debug for Handover {
 /// The socket of a connection that was handed over ([`MessageStream::hand_over`]), for
 /// [`Builder::take_over`] to go on over.
 ///
-/// This type is only available when the `handover` feature is enabled.
+/// This type is only available on unix, with the `handover` feature.
 ///
 /// The first two variants hold the only descriptor of the socket that zbus has kept. Dropping one
 /// of them closes the socket, and the peer sees the connection go, unless the descriptor was
@@ -400,8 +370,7 @@ impl fmt::Debug for Handover {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum HandoverSocket {
-    /// A unix-domain stream. On Windows it is that of `uds_windows`, as [`Builder::unix_stream`]
-    /// takes.
+    /// A unix-domain stream.
     ///
     /// This is for a connection over a unix socket that zbus drives itself: one built with
     /// [`Builder::unix_stream`], or one to a `unix:` address, such as that of the session or
@@ -411,11 +380,9 @@ pub enum HandoverSocket {
     /// `set_nonblocking(false)` on the stream to read it with calls that wait.
     ///
     /// To pass it to another process, pass the descriptor on, or clear its close-on-exec flag for
-    /// an `exec` to keep it. On Windows, duplicate it for the other process with
-    /// `WSADuplicateSocketW`.
+    /// an `exec` to keep it.
     ///
     /// [`Builder::unix_stream`]: super::Builder::unix_stream
-    #[cfg(any(unix, windows))]
     UnixStream(UnixStream),
     /// A TCP stream, for a connection over a TCP socket that zbus drives itself: one built with
     /// [`Builder::tcp_stream`], or one to a `tcp:` address. Otherwise as for `UnixStream`.
@@ -423,8 +390,7 @@ pub enum HandoverSocket {
     /// [`Builder::tcp_stream`]: super::Builder::tcp_stream
     TcpStream(TcpStream),
     /// The halves of a socket, for any other connection: one over a [`Socket`] of your own, such as
-    /// a `Channel`, one over the pipes of a `unixexec:` address, or, on WASI, which can't duplicate
-    /// a descriptor, any connection.
+    /// a `Channel`, one over the pipes of a `unixexec:` address.
     ///
     /// The halves can only go on in this process. Those that zbus made run on the runtime of the
     /// connection that they came from, so they need it to keep running. Dropping them is what
@@ -584,14 +550,12 @@ impl Connection {
             .unwrap_or_else(PoisonError::into_inner);
         // The last steps that can fail, so that a failure commits nothing. The messages may be
         // queued for other streams too, so their descriptors are duplicated rather than taken.
-        #[cfg(unix)]
         let mut unread_fds = taken
             .iter()
             .flatten()
             .flat_map(|msg| msg.data().fds())
             .map(|fd| fd.as_fd().try_clone_to_owned())
             .collect::<io::Result<Vec<_>>>()?;
-        #[cfg(any(unix, windows))]
         let duplicate = write
             .source()
             .map(|(source, kind)| dup(source).map(|socket| (socket, *kind)))
@@ -616,8 +580,7 @@ impl Connection {
         let ReadParts {
             half: read_half,
             unread_bytes: read,
-            #[cfg(unix)]
-                unread_fds: read_fds,
+            unread_fds: read_fds,
         } = parts;
         // The error that the reader ended on, if any, is no message to hand over.
         let queued: Vec<Message> = taken.drain(..).flatten().collect();
@@ -635,9 +598,7 @@ impl Connection {
 
             unread_bytes
         };
-        #[cfg(unix)]
         unread_fds.extend(read_fds);
-        #[cfg(any(unix, windows))]
         let socket = match duplicate {
             Some((socket, kind)) => {
                 // The runtime stops watching the socket as the halves, and the handle that the
@@ -652,18 +613,13 @@ impl Connection {
             // A connection that goes on over the halves writes the socket as this one did.
             None => HandoverSocket::Socket(Split::with_writes(read_half, write_half, writes)),
         };
-        // WASI can't duplicate a descriptor.
-        #[cfg(not(any(unix, windows)))]
-        let socket = HandoverSocket::Socket(Split::with_writes(read_half, write_half, writes));
 
         Ok(Handover {
             socket,
             server_guid: inner.server_guid.clone(),
             unique_name: self.unique_name().cloned(),
             unread_bytes,
-            #[cfg(unix)]
             unread_fds,
-            #[cfg(unix)]
             unix_fd_passing: inner.cap_unix_fd,
             #[cfg(feature = "p2p")]
             p2p: !self.is_bus(),
@@ -708,29 +664,17 @@ impl Clone for Backlog {
 }
 
 /// The kind of a socket that zbus drives itself, and so can give a descriptor of for a hand-over.
-#[cfg(any(unix, windows))]
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum SocketKind {
     Unix,
     Tcp,
 }
 
-#[cfg(any(unix, windows))]
 impl SocketKind {
     /// The stream of this kind over `socket`.
-    fn stream(self, socket: Owned) -> HandoverSocket {
+    fn stream(self, socket: OwnedFd) -> HandoverSocket {
         match self {
-            #[cfg(unix)]
             Self::Unix => HandoverSocket::UnixStream(UnixStream::from(socket)),
-            #[cfg(windows)]
-            Self::Unix => {
-                let raw = socket.into_raw_socket();
-                // SAFETY: `raw` is a unix-domain socket that zbus owns, since it duplicated it,
-                // and that nothing else closes, as `socket` gave it up. The stream takes it over.
-                let stream = unsafe { UnixStream::from_raw_socket(raw) };
-
-                HandoverSocket::UnixStream(stream)
-            }
             Self::Tcp => HandoverSocket::TcpStream(TcpStream::from(socket)),
         }
     }
@@ -872,7 +816,6 @@ impl fmt::Debug for ReaderEnd {
         let mut left = f.debug_struct(name);
         left.field("half", &parts.half)
             .field("unread_bytes", &parts.unread_bytes.len());
-        #[cfg(unix)]
         left.field("unread_fds", &parts.unread_fds.len());
 
         left.finish()
@@ -888,7 +831,6 @@ pub(super) struct ReadParts {
     pub unread_bytes: Vec<u8>,
     /// The file descriptors that came in with what was read, and that no message took, in the
     /// order that they came in.
-    #[cfg(unix)]
     pub unread_fds: Vec<OwnedFd>,
 }
 
@@ -901,18 +843,13 @@ impl ReadParts {
     pub(super) fn new(
         mut half: Box<dyn ReadHalf>,
         mut unread_bytes: Vec<u8>,
-        #[cfg(unix)] mut unread_fds: Vec<OwnedFd>,
+        mut unread_fds: Vec<OwnedFd>,
     ) -> Self {
-        half.take_unread(
-            &mut unread_bytes,
-            #[cfg(unix)]
-            &mut unread_fds,
-        );
+        half.take_unread(&mut unread_bytes, &mut unread_fds);
 
         Self {
             half,
             unread_bytes,
-            #[cfg(unix)]
             unread_fds,
         }
     }
@@ -935,35 +872,25 @@ pub(super) fn stopped_error() -> Error {
 }
 
 /// A new descriptor of `source`, for the socket to outlive the one that zbus closes.
-#[cfg(any(unix, windows))]
-fn dup(source: &IoSource) -> io::Result<Owned> {
-    #[cfg(unix)]
-    let borrowed = source.as_fd();
-    #[cfg(windows)]
-    let borrowed = source.as_socket();
-
-    borrowed.try_clone_to_owned()
+fn dup(source: &IoSource) -> io::Result<OwnedFd> {
+    source.as_fd().try_clone_to_owned()
 }
 
 /// Bytes that the wire format takes in one go, rather than one byte at a time, as an array of
 /// bytes.
-#[cfg(unix)]
 struct Bytes<'b>(&'b [u8]);
 
-#[cfg(unix)]
 impl Serialize for Bytes<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
         serializer.serialize_bytes(self.0)
     }
 }
 
-#[cfg(unix)]
 impl Type for Bytes<'_> {
     const SIGNATURE: &'static Signature = <[u8]>::SIGNATURE;
 }
 
 /// The error of bytes or file descriptors that [`Handover::decode`] can make no hand-over of.
-#[cfg(unix)]
 fn malformed() -> Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
@@ -974,20 +901,11 @@ fn malformed() -> Error {
 
 /// The version of the format that [`Handover::encode`] gives, which only ever goes up, for a format
 /// that a version of zbus that knows it decodes.
-#[cfg(unix)]
 const ENCODING_VERSION: u8 = 1;
 /// How [`Handover::encode`] gives a [`HandoverSocket::UnixStream`].
-#[cfg(unix)]
 const ENCODED_UNIX_STREAM: u8 = 0;
 /// How [`Handover::encode`] gives a [`HandoverSocket::TcpStream`].
-#[cfg(unix)]
 const ENCODED_TCP_STREAM: u8 = 1;
-
-/// What this platform owns a socket as.
-#[cfg(unix)]
-type Owned = OwnedFd;
-#[cfg(windows)]
-type Owned = OwnedSocket;
 
 /// The error of a hand-over of a connection whose socket may hold part of a message.
 fn torn() -> Error {
@@ -1006,14 +924,14 @@ fn not_connected(reason: &'static str) -> io::Error {
 
 #[cfg(all(test, feature = "p2p"))]
 mod tests {
-    use std::{fmt::Debug, io, num::NonZeroU32};
-    #[cfg(unix)]
     use std::{
+        fmt::Debug,
         future::Future,
+        io,
         io::{ErrorKind, IoSlice, Read, Write},
         mem::MaybeUninit,
         net::{Ipv4Addr, Shutdown, TcpListener, TcpStream},
-        num::NonZeroUsize,
+        num::{NonZeroU32, NonZeroUsize},
         os::{
             fd::{AsFd, BorrowedFd, OwnedFd},
             unix::net::{UnixListener, UnixStream},
@@ -1028,28 +946,21 @@ mod tests {
     use ntest::timeout;
     use test_log::test;
 
-    #[cfg(unix)]
-    use super::ReaderEnd;
-    use super::{Handover, HandoverSocket};
-    #[cfg(unix)]
+    use super::{Handover, HandoverSocket, ReaderEnd};
     use crate::{
-        Address,
+        Address, Connection, Error, Guid, MatchRule, Message, MessageStream, Result,
         address::transport::{Transport, Unix, UnixSocket},
         connection::{
-            AuthMechanism,
-            socket::{BoxedSplit, ReadHalf, RecvmsgResult, Split, WriteHalf},
+            AuthMechanism, Builder,
+            socket::{BoxedSplit, Channel, ReadHalf, RecvmsgResult, Split, WriteHalf},
         },
-        runtime::io::{Reader, RegisteredIo, UnixOps, registered},
-        wire::{self, LE, serialized::Context},
-    };
-    use crate::{
-        Connection, Error, Guid, MatchRule, Message, MessageStream, Result,
-        connection::{Builder, socket::Channel},
         message::{Type, header::next_serial},
         runtime::{
             Runtime,
+            io::{Reader, RegisteredIo, UnixOps, registered},
             test_runtime::{AbortingRuntime, TestRuntime, under_every_runtime},
         },
+        wire::{self, LE, serialized::Context},
     };
 
     /// A method call that waits for its reply fails once a hand-over stops the connection reading,
@@ -1130,7 +1041,6 @@ mod tests {
     /// the connection came to the end before the hand-over or as the hand-over stopped it, and
     /// whatever the peer sent before. A connection that takes over yields the message that the
     /// peer sent whole, then comes to the same end.
-    #[cfg(unix)]
     #[test]
     #[timeout(15000)]
     fn a_connection_whose_peer_closed_its_end_is_handed_over() {
@@ -1178,7 +1088,6 @@ mod tests {
     /// message and the socket, though a send to the peer failed since: the peer receives nothing
     /// more, so nothing follows what the send may have left in the socket. A connection that takes
     /// over yields the message, then comes to the same end.
-    #[cfg(unix)]
     #[test]
     #[timeout(15000)]
     fn a_connection_whose_peer_went_is_handed_over_once_a_send_to_it_failed() {
@@ -1239,7 +1148,6 @@ mod tests {
 
     /// A connection over a read half that can't take out what it read isn't handed over, and
     /// reads on as if no hand-over had been asked for.
-    #[cfg(unix)]
     #[test]
     #[timeout(15000)]
     fn a_connection_that_cant_stop_reading_reads_on() {
@@ -1304,7 +1212,6 @@ mod tests {
     /// taken off it by the hand-over itself, which lets the reader stop. They are handed over,
     /// those that the reader read after them too, and nothing is written to the socket. A
     /// connection that takes over yields them first.
-    #[cfg(unix)]
     #[test]
     #[timeout(15000)]
     fn a_full_stream_is_handed_over_with_what_it_queued() {
@@ -1374,7 +1281,6 @@ mod tests {
     /// descriptors, in their order, ahead of the part of a message that the reader read, and of
     /// the descriptors that came with that. A connection that takes over yields each message with
     /// its own descriptors.
-    #[cfg(unix)]
     #[test]
     #[timeout(15000)]
     fn messages_queued_on_the_stream_are_handed_over_with_their_descriptors() {
@@ -1435,7 +1341,6 @@ mod tests {
 
     /// A connection that stopped in the middle of a message hands over its socket with the part
     /// of the message that it read, and a connection that takes over goes on with that message.
-    #[cfg(unix)]
     #[test]
     #[timeout(15000)]
     fn a_message_cut_short_is_handed_over() {
@@ -1446,7 +1351,6 @@ mod tests {
 
     /// As for a message that fits in the buffer of the reader, but for one that doesn't, of which
     /// as much as came in is handed over, with no room for the rest.
-    #[cfg(unix)]
     #[test]
     #[timeout(15000)]
     fn a_long_message_cut_short_is_handed_over() {
@@ -1467,7 +1371,6 @@ mod tests {
     /// The file descriptors that came in with the part of a message that was read are handed over
     /// with it, in the order that they came in, and the message carries them once a connection
     /// that takes over has the rest of it.
-    #[cfg(unix)]
     #[test]
     #[timeout(15000)]
     fn descriptors_that_came_in_are_handed_over() {
@@ -1502,7 +1405,6 @@ mod tests {
     /// Once a connection is handed over, nothing is written to its socket through it or through
     /// any clone of it, and closing it leaves the socket alone: the peer sees the connection go
     /// only once the socket that was handed over is dropped.
-    #[cfg(unix)]
     #[test]
     #[timeout(15000)]
     fn nothing_is_written_once_the_connection_is_handed_over() {
@@ -1537,7 +1439,6 @@ mod tests {
 
     /// A connection over a TCP socket that zbus drives itself, built with `Builder::tcp_stream`,
     /// hands over a new descriptor of the socket as a `TcpStream`.
-    #[cfg(unix)]
     #[test]
     #[timeout(15000)]
     fn a_tcp_stream_is_handed_over_as_one() {
@@ -1570,7 +1471,6 @@ mod tests {
 
     /// A connection to a `unix:` address hands over a new descriptor of its socket as a
     /// `UnixStream`.
-    #[cfg(unix)]
     #[test]
     #[timeout(15000)]
     fn a_connection_to_a_unix_address_is_handed_over_as_a_unix_stream() {
@@ -1617,7 +1517,6 @@ mod tests {
     /// connection from being handed over, as the socket may hold a part of a message, of which the
     /// peer could make no sense. The hand-over finds that out before it stops the connection
     /// reading, so the connection reads on. It still sends, and closing it shuts the socket down.
-    #[cfg(unix)]
     #[test]
     #[timeout(15000)]
     fn a_send_cut_off_midway_keeps_the_connection_from_being_handed_over() {
@@ -1664,7 +1563,6 @@ mod tests {
     /// took off its stream stay with the stream, so a hand-over through another stream, which
     /// would miss them, fails, while one through the same stream hands the connection over with
     /// them.
-    #[cfg(unix)]
     #[test]
     #[timeout(15000)]
     fn a_hand_over_given_up_on_goes_on_through_its_stream() {
@@ -1724,7 +1622,6 @@ mod tests {
     /// A hand-over that fails once it stopped the connection reading, as a send under way through
     /// a write half of your own that can't resume writes is cut off midway, leaves the messages
     /// that it took off its stream with the stream, which yields them, then ends.
-    #[cfg(unix)]
     #[test]
     #[timeout(15000)]
     fn a_failed_hand_over_leaves_the_messages_on_its_stream() {
@@ -1756,7 +1653,6 @@ mod tests {
     /// A send under way as the hand-over starts, which fails midway as the peer goes, fails no
     /// hand-over, any more than one that goes through: the peer receives nothing more, so nothing
     /// follows the part of the message in the socket.
-    #[cfg(unix)]
     #[test]
     #[timeout(15000)]
     fn a_send_cut_off_midway_as_the_peer_goes_fails_no_hand_over() {
@@ -1790,7 +1686,6 @@ mod tests {
     /// A send over a socket that zbus drives, cut off midway, fails no hand-over: the hand-over
     /// writes the rest of its message first, once the peer reads, and the connection that takes
     /// over goes on from there.
-    #[cfg(unix)]
     #[test]
     #[timeout(15000)]
     fn the_rest_of_a_send_cut_off_midway_goes_out_before_the_hand_over() {
@@ -1839,7 +1734,6 @@ mod tests {
 
     /// A connection over a socket that was closed isn't handed over, though its reader came to the
     /// end of the input as the socket was shut down, as it would have had the peer closed its end.
-    #[cfg(unix)]
     #[test]
     #[timeout(15000)]
     fn a_connection_closed_over_a_socket_is_not_handed_over() {
@@ -1939,7 +1833,6 @@ mod tests {
                         received.push(stream.next().await.unwrap().unwrap());
                     }
                     let handover = stream.hand_over().await.unwrap();
-                    #[cfg(unix)]
                     assert!(handover.unread_fds.is_empty());
                     assert!(
                         matches!(handover.socket, HandoverSocket::Socket(_)),
@@ -2022,7 +1915,6 @@ mod tests {
     /// A connection over halves of your own, whose read half only receives bytes and says that it
     /// can take out what it read, is handed over in the middle of a message as its halves, and a
     /// connection that takes over goes on with that message.
-    #[cfg(unix)]
     #[test]
     #[timeout(15000)]
     fn a_connection_over_halves_of_your_own_is_taken_over() {
@@ -2070,7 +1962,6 @@ mod tests {
 
     /// A hand-over that left bytes or file descriptors unread isn't taken over through a read half
     /// that can't take them, while one that left nothing unread is.
-    #[cfg(unix)]
     #[test]
     #[timeout(15000)]
     fn what_was_left_unread_isnt_taken_over_through_a_half_that_cant_take_it() {
@@ -2174,7 +2065,6 @@ mod tests {
 
     /// A connection to a bus that takes over has the unique name of the hand-over, and says no
     /// `Hello`: the first message that the bus gets from it is the first one that it sends.
-    #[cfg(unix)]
     #[test]
     #[timeout(15000)]
     fn a_bus_connection_takes_over_with_its_unique_name() {
@@ -2290,7 +2180,6 @@ mod tests {
     /// A hand-over turned into bytes and file descriptors, and back, has every field that it had,
     /// and a connection that takes over from it goes on where the one that was handed over
     /// stopped, with the messages and the descriptors that it left unread.
-    #[cfg(unix)]
     #[test]
     #[timeout(15000)]
     fn a_hand_over_goes_through_bytes_and_descriptors() {
@@ -2351,7 +2240,6 @@ mod tests {
 
     /// The hand-over of a connection to a bus over a TCP socket, with nothing left unread and no
     /// passing of file descriptors, goes through bytes and file descriptors too.
-    #[cfg(unix)]
     #[test]
     fn a_tcp_hand_over_goes_through_bytes_and_descriptors() {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
@@ -2379,7 +2267,6 @@ mod tests {
     }
 
     /// Bytes of a format version that this version of zbus doesn't know are refused.
-    #[cfg(unix)]
     #[test]
     fn an_unknown_format_version_is_refused() {
         let (mut bytes, fds) = encoded();
@@ -2393,7 +2280,6 @@ mod tests {
     /// Bytes with more or fewer file descriptors than they count, bytes that are not those of a
     /// hand-over, and bytes with a field that no hand-over has, such as an unknown kind of socket,
     /// an invalid GUID or unique name, or a serial number of 0, are refused.
-    #[cfg(unix)]
     #[test]
     fn what_is_not_an_encoded_hand_over_is_refused() {
         let (bytes, mut fds) = encoded();
@@ -2435,7 +2321,6 @@ mod tests {
 
     /// The hand-over of a connection over a socket of your own has no descriptor to pass on, so it
     /// isn't turned into bytes and file descriptors.
-    #[cfg(unix)]
     #[test]
     fn a_socket_of_your_own_is_not_encoded() {
         let (ours, _theirs) = Channel::pair();
@@ -2448,7 +2333,6 @@ mod tests {
 
     /// Hands over a connection that yielded a whole message, and read `cut` up to `at`, checks what
     /// it handed over, and takes it over. Gives how much room the bytes that it handed over had.
-    #[cfg(unix)]
     async fn hand_over_in_the_middle_of(runtime: &Runtime, cut: &Message, at: usize) -> usize {
         let (mut stream, peer, probe) = served(runtime).await;
         let conn = Connection::from(&stream);
@@ -2521,7 +2405,6 @@ mod tests {
 
     /// The halves of `socket`, registered on `runtime`, of which the read half only receives
     /// bytes, and says that it can take out what it read as `can_take_unread` says.
-    #[cfg(unix)]
     fn recvmsg_only(runtime: &Runtime, socket: UnixStream, can_take_unread: bool) -> BoxedSplit {
         let socket = Arc::new(registered(runtime, socket, UnixOps).unwrap());
         let read = RecvmsgOnly {
@@ -2534,14 +2417,12 @@ mod tests {
 
     /// A read half that only receives bytes, and leaves everything else to the defaults of
     /// `ReadHalf`, but for whether it can take out what it read.
-    #[cfg(unix)]
     #[derive(Debug)]
     struct RecvmsgOnly {
         socket: Arc<RegisteredIo<UnixOps>>,
         can_take_unread: bool,
     }
 
-    #[cfg(unix)]
     #[async_trait::async_trait]
     impl ReadHalf for RecvmsgOnly {
         async fn recvmsg(&mut self, buffer: &mut [u8]) -> RecvmsgResult {
@@ -2559,7 +2440,6 @@ mod tests {
     /// `runtime`, and the other end of the pair, through which the test plays the client. Also a
     /// descriptor of the server's end of the pair, which tells how much of what the client sent
     /// the connection is yet to read.
-    #[cfg(unix)]
     async fn served(runtime: &Runtime) -> (MessageStream, UnixStream, UnixStream) {
         let (client, server) = UnixStream::pair().unwrap();
         let probe = server.try_clone().unwrap();
@@ -2584,7 +2464,6 @@ mod tests {
 
     /// The stream of a connection over one end of a unix socket pair, on `runtime`, with no
     /// handshake, and the other end of the pair, through which the test plays its peer.
-    #[cfg(unix)]
     async fn over_a_socket_pair(runtime: &Runtime) -> (MessageStream, UnixStream) {
         let (peer, theirs) = UnixStream::pair().unwrap();
         let socket = registered(runtime, theirs, UnixOps).unwrap();
@@ -2603,7 +2482,6 @@ mod tests {
     /// As `over_a_socket_pair`, but through a write half of your own that only sends bytes, and
     /// can't resume writes, so that a send that is cut off midway can leave part of a message in
     /// the socket.
-    #[cfg(unix)]
     async fn over_a_socket_pair_of_your_own(runtime: &Runtime) -> (MessageStream, UnixStream) {
         let (peer, theirs) = UnixStream::pair().unwrap();
         let socket = Arc::new(registered(runtime, theirs, UnixOps).unwrap());
@@ -2625,11 +2503,9 @@ mod tests {
 
     /// A write half that only sends bytes, and leaves everything else to the defaults of
     /// `WriteHalf`, which can't resume writes.
-    #[cfg(unix)]
     #[derive(Debug)]
     struct SendmsgOnly(Arc<RegisteredIo<UnixOps>>);
 
-    #[cfg(unix)]
     #[async_trait::async_trait]
     impl WriteHalf for SendmsgOnly {
         async fn sendmsg(&mut self, buffer: &[u8], fds: &[BorrowedFd<'_>]) -> io::Result<usize> {
@@ -2647,7 +2523,6 @@ mod tests {
 
     /// Has `peer` send two signals to the connection of `conn`, and waits for them to be queued
     /// on its streams. Gives their bytes.
-    #[cfg(unix)]
     fn queue_two(conn: &Connection, peer: &UnixStream) -> Vec<u8> {
         let queued: Vec<u8> = [signal(1), signal(2)]
             .iter()
@@ -2661,7 +2536,6 @@ mod tests {
 
     /// The bytes and the file descriptors of a hand-over over one end of a new unix socket pair,
     /// with a file descriptor left unread.
-    #[cfg(unix)]
     fn encoded() -> (Vec<u8>, Vec<OwnedFd>) {
         let (ours, _theirs) = UnixStream::pair().unwrap();
         let mut handover = p2p_handover(HandoverSocket::UnixStream(ours));
@@ -2680,7 +2554,6 @@ mod tests {
     }
 
     /// A hand-over of a connection to a bus over `socket`, whose unique name is `UNIQUE_NAME`.
-    #[cfg(unix)]
     fn bus_handover(socket: UnixStream) -> Handover {
         let mut handover =
             Handover::new(HandoverSocket::UnixStream(socket), Guid::generate().into());
@@ -2691,7 +2564,6 @@ mod tests {
 
     /// Polls `sending` until it wrote part of its message to the socket of `peer`, which doesn't
     /// read, and waits for room for the rest.
-    #[cfg(unix)]
     async fn stuck<F>(runtime: &Runtime, mut sending: Pin<&mut F>, peer: &UnixStream)
     where
         F: Future<Output = Result<()>>,
@@ -2708,7 +2580,6 @@ mod tests {
     }
 
     /// Writes `bytes` to `socket`, with `fds` along with them.
-    #[cfg(unix)]
     fn send_with_fds(socket: &UnixStream, bytes: &[u8], fds: &[BorrowedFd<'_>]) {
         use rustix::net::{SendAncillaryBuffer, SendAncillaryMessage, SendFlags, sendmsg};
 
@@ -2726,13 +2597,11 @@ mod tests {
     }
 
     /// The read end of a pipe of its own.
-    #[cfg(unix)]
     fn pipe() -> OwnedFd {
         io::pipe().unwrap().0.into()
     }
 
     /// The inode of the file that `fd` is open on.
-    #[cfg(unix)]
     fn inode(fd: &impl AsFd) -> u64 {
         use std::os::unix::fs::MetadataExt;
 
@@ -2744,7 +2613,6 @@ mod tests {
 
     /// Checks that `socket`, which a connection to `peer` handed over, is in non-blocking mode, as
     /// the connection left it, and gets what `peer` sends.
-    #[cfg(unix)]
     async fn carries_what_is_sent<S>(socket: S, peer: &Connection)
     where
         S: AsFd,
@@ -2821,7 +2689,6 @@ mod tests {
 
     /// The bytes that [`Handover::encode`] gives for a peer-to-peer hand-over over a unix socket,
     /// with nothing left unread, with these fields, which can be ones that it never gives.
-    #[cfg(unix)]
     fn encoded_fields(server_guid: &str, unique_name: &str, next_serial: u32) -> Vec<u8> {
         let fields = (
             super::ENCODED_UNIX_STREAM,
@@ -2840,14 +2707,12 @@ mod tests {
     }
 
     /// The file descriptors of a hand-over with no file descriptors left unread: a socket's.
-    #[cfg(unix)]
     fn socket() -> Vec<OwnedFd> {
         vec![UnixStream::pair().unwrap().0.into()]
     }
 
     /// Asserts that `result` is the error of bytes and file descriptors that are not those of a
     /// hand-over.
-    #[cfg(unix)]
     fn assert_invalid_data<T: Debug>(result: Result<T>) {
         let Err(Error::InputOutput(e)) = &result else {
             panic!("expected the error of what is not a hand-over: {result:?}");
@@ -2873,7 +2738,6 @@ mod tests {
     }
 
     /// A signal longer than the buffer of a socket holds.
-    #[cfg(unix)]
     fn big_signal() -> Message {
         Message::signal(PATH, INTERFACE, "Big")
             .build(&vec![0u8; 1024 * 1024])
@@ -2881,7 +2745,6 @@ mod tests {
     }
 
     /// Waits for `condition` to hold, which a task on another thread is to bring about.
-    #[cfg(unix)]
     fn wait_until(mut condition: impl FnMut() -> bool) {
         while !condition() {
             thread::sleep(Duration::from_millis(1));
@@ -2903,13 +2766,12 @@ mod tests {
     const PATH: &str = "/org/zbus/Test";
     const INTERFACE: &str = "org.zbus.Test";
     /// The unique name that a bus gave a connection that it handed over.
-    #[cfg(unix)]
     const UNIQUE_NAME: &str = ":1.42";
 }
 
 /// The tests of a build without the `p2p` feature, whose hand-overs are those of connections to a
 /// bus.
-#[cfg(all(test, unix, not(feature = "p2p")))]
+#[cfg(all(test, not(feature = "p2p")))]
 mod tests_without_p2p {
     use std::{num::NonZeroU32, os::unix::net::UnixStream};
 

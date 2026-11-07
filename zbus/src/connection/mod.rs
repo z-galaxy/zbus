@@ -20,7 +20,7 @@ use zruntime::{
 use crate::ObjectServer;
 #[cfg(feature = "service")]
 use crate::log::debug;
-#[cfg(all(feature = "handover", any(unix, windows)))]
+#[cfg(all(unix, feature = "handover"))]
 use crate::runtime::IoSource;
 use crate::{
     DBusError, Error, MatchRule, ObjectPath, OwnedGuid, OwnedMatchRule, Result,
@@ -41,13 +41,13 @@ pub use builder::Builder;
 pub mod socket;
 pub use socket::Socket;
 
-#[cfg(feature = "handover")]
+#[cfg(all(unix, feature = "handover"))]
 pub mod handover;
-#[cfg(all(feature = "handover", any(unix, windows)))]
+#[cfg(all(unix, feature = "handover"))]
 use handover::SocketKind;
-#[cfg(feature = "handover")]
+#[cfg(all(unix, feature = "handover"))]
 use handover::StopStatus;
-#[cfg(feature = "handover")]
+#[cfg(all(unix, feature = "handover"))]
 pub use handover::{Handover, HandoverSocket};
 
 mod socket_reader;
@@ -589,7 +589,7 @@ impl Connection {
             let pending_call = self.inner.pending_method_calls.register_call(serial)?;
             // The reader fails the calls that wait for their replies once it stops, which can be
             // a while after it was asked to, but a call made since is not to go out at all.
-            #[cfg(feature = "handover")]
+            #[cfg(all(unix, feature = "handover"))]
             self.inner.socket_status.stop.ensure_reading()?;
             self.send(&msg).await?;
 
@@ -1284,7 +1284,7 @@ impl Connection {
 
         // A connection asked to stop reading makes no more streams, though its reader may be yet
         // to stop and close the channels of the others.
-        #[cfg(feature = "handover")]
+        #[cfg(all(unix, feature = "handover"))]
         self.inner.socket_status.stop.ensure_reading()?;
         if self.inner.msg_senders.lock().await.is_empty() {
             return Err(self.reader_ended_error());
@@ -1336,7 +1336,7 @@ impl Connection {
 
     /// The error of a stream that can't be made, as the reader closed the channels of the others.
     fn reader_ended_error(&self) -> Error {
-        #[cfg(feature = "handover")]
+        #[cfg(all(unix, feature = "handover"))]
         if let Err(e) = self.inner.socket_status.stop.ensure_reading() {
             return e;
         }
@@ -1401,10 +1401,7 @@ impl Connection {
     pub(crate) async fn new(
         auth: Authenticated,
         writes: Option<socket::Writes>,
-        #[cfg(all(feature = "handover", any(unix, windows)))] source: Option<(
-            IoSource,
-            SocketKind,
-        )>,
+        #[cfg(all(unix, feature = "handover"))] source: Option<(IoSource, SocketKind)>,
         #[allow(unused)] bus_connection: bool,
         runtime: Runtime,
         method_timeout: Option<Duration>,
@@ -1434,7 +1431,7 @@ impl Connection {
             closed: AtomicBool::new(false),
             closed_event: Event::new(),
             unwritten: AtomicUsize::new(0),
-            #[cfg(feature = "handover")]
+            #[cfg(all(unix, feature = "handover"))]
             stop: StopStatus::new(),
             #[cfg(all(unix, feature = "handover"))]
             prepared: Default::default(),
@@ -1443,7 +1440,7 @@ impl Connection {
             auth.socket_write,
             writes,
             socket_status.clone(),
-            #[cfg(all(feature = "handover", any(unix, windows)))]
+            #[cfg(all(unix, feature = "handover"))]
             source,
         );
         #[cfg(all(unix, feature = "handover"))]
@@ -1512,7 +1509,7 @@ impl Connection {
     /// A connection is considered closed either when the remote peer disconnects, an I/O error
     /// occurs on the socket, or [`Connection::close`] is called.
     ///
-    /// With the `handover` feature, it is also closed once it was handed over
+    /// With the `handover` feature, on unix, it is also closed once it was handed over
     /// (`MessageStream::hand_over`).
     pub fn is_closed(&self) -> bool {
         self.inner.is_closed()
@@ -1523,7 +1520,7 @@ impl Connection {
     /// A connection is considered closed either when the remote peer disconnects, an I/O error
     /// occurs on the socket, or [`Connection::close`] is called.
     ///
-    /// With the `handover` feature, it is also closed once it was handed over
+    /// With the `handover` feature, on unix, it is also closed once it was handed over
     /// (`MessageStream::hand_over`).
     ///
     /// Returns immediately if the connection is already closed.
@@ -1579,8 +1576,8 @@ impl Connection {
     /// written yet ([`Connection::unwritten_len`]) is let go of. Call [`Connection::flush`] first
     /// to have it written.
     ///
-    /// With the `handover` feature, this does nothing to the socket of a connection that was handed
-    /// over (`MessageStream::hand_over`), as the socket is no longer the connection's.
+    /// With the `handover` feature, on unix, this does nothing to the socket of a connection that
+    /// was handed over (`MessageStream::hand_over`), as the socket is no longer the connection's.
     pub async fn close(self) -> Result<()> {
         self.inner.socket_status.activity_event.notify(usize::MAX);
         let result = self
@@ -1665,7 +1662,7 @@ impl Connection {
         #[cfg(feature = "bus-impl")] validate_bodies: bool,
     ) {
         let inner = &self.inner;
-        #[cfg(feature = "handover")]
+        #[cfg(all(unix, feature = "handover"))]
         inner
             .socket_status
             .stop
