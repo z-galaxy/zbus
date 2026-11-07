@@ -478,12 +478,15 @@ pub trait WriteHalf: std::fmt::Debug + Send + Sync + 'static {
     ///
     /// The default `send_message` calls this once it has handed a whole message to `sendmsg`. The
     /// authentication handshake calls it each time before it waits for the peer to answer, so the
-    /// commands it pipelines go out together. A socket that holds on to what it is given, such as
-    /// one over a buffered or encrypted stream, has to send it on here: zbus has no other way to
-    /// flush it, and the peer would never see it otherwise.
+    /// commands it pipelines go out together, and [`Connection::flush`] calls it last. A socket
+    /// that holds on to what it is given, such as one over a buffered or encrypted stream, has to
+    /// send it on here: zbus has no other way to flush it, and the peer would never see it
+    /// otherwise.
     ///
     /// The default implementation does nothing, which suits a socket that sends what it is given
     /// right away.
+    ///
+    /// [`Connection::flush`]: crate::Connection::flush
     async fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }

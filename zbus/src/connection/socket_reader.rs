@@ -3,7 +3,7 @@ use std::{
     io,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 #[cfg(feature = "handover")]
@@ -308,12 +308,17 @@ impl Drop for SocketReader {
     }
 }
 
-/// Socket-related state shared between [`super::ConnectionInner`] and the socket reader task.
+/// Socket-related state shared between [`super::ConnectionInner`], the socket reader task and the
+/// writes of the connection.
 #[derive(Debug)]
 pub(super) struct SocketStatus {
     pub activity_event: Event,
     pub closed: AtomicBool,
     pub closed_event: Event,
+    /// How many bytes the connection took to send and hasn't written yet, which the writes keep
+    /// up to date under the lock that they take, for [`super::Connection::unwritten_len`] to read
+    /// without it. Nothing else is read along with it, so it is stored and loaded `Relaxed`.
+    pub unwritten: AtomicUsize,
     /// Whether the reader is to stop, or did, for the connection to be handed over.
     #[cfg(feature = "handover")]
     pub stop: StopStatus,

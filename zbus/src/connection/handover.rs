@@ -456,9 +456,9 @@ impl Connection {
         self.take_apart(&mut backlog.items).await
     }
 
-    /// Fail if a send was cut off midway, as `take_apart` then does, but before the connection
-    /// stops reading, so that it reads on. A send under way holds the socket, and only `take_apart`
-    /// finds out how it went, once it is through.
+    /// Fail if a send that was cut off midway left part of a message in the socket, as `take_apart`
+    /// then does, but before the connection stops reading, so that it reads on. A send under way
+    /// holds the socket, and only `take_apart` finds out how it went, once it is through.
     async fn ensure_whole(&self) -> Result<()> {
         let mut lock = pin!(self.inner.socket_write.lock());
         let write = poll_fn(|cx| Poll::Ready(lock.as_mut().poll(cx))).await;
@@ -549,25 +549,37 @@ impl Connection {
         // until it is through.
         let mut guard = inner.socket_write.lock().await;
         let write = &mut *guard;
+        {
+            let end = stop
+                .reader_end
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if matches!(*end, ReaderEnd::HandedOver) {
+                return Err(not_connected("the connection was handed over already").into());
+            }
+            // Set before the socket is shut down, under the lock that is held here, so a closed
+            // connection whose reader then came to the end of the input is not taken for one
+            // whose peer closed its end.
+            if write.is_shut_down() {
+                return Err(not_connected("the connection was closed").into());
+            }
+            if !matches!(*end, ReaderEnd::Stopped(_) | ReaderEnd::Ended(_)) {
+                return Err(not_connected("the connection ended before it stopped reading").into());
+            }
+            if write.is_torn() {
+                return Err(torn());
+            }
+        }
+        // What is left of a message that a send was dropped, or failed, in the middle of goes out
+        // first, as the peer could make no sense of what the connection that goes on sends after
+        // part of a message. The lock on how the reader ended is let go of meanwhile, as no wait
+        // is to hold it. Once the reader stopped or ended, only a hand-over changes that, under the
+        // lock that is held here, so it holds all the same once this is through.
+        write.write_rest_for_hand_over().await?;
         let mut end = stop
             .reader_end
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if matches!(*end, ReaderEnd::HandedOver) {
-            return Err(not_connected("the connection was handed over already").into());
-        }
-        // Set before the socket is shut down, under the lock that is held here, so a closed
-        // connection whose reader then came to the end of the input is not taken for one whose
-        // peer closed its end.
-        if write.is_shut_down() {
-            return Err(not_connected("the connection was closed").into());
-        }
-        if !matches!(*end, ReaderEnd::Stopped(_) | ReaderEnd::Ended(_)) {
-            return Err(not_connected("the connection ended before it stopped reading").into());
-        }
-        if write.is_torn() {
-            return Err(torn());
-        }
         // The last steps that can fail, so that a failure commits nothing. The messages may be
         // queued for other streams too, so their descriptors are duplicated rather than taken.
         #[cfg(unix)]
@@ -588,7 +600,7 @@ impl Connection {
         let (ReaderEnd::Stopped(parts) | ReaderEnd::Ended(parts)) =
             mem::replace(&mut *end, ReaderEnd::HandedOver)
         else {
-            unreachable!("the reader stopped or ended, as the lock that is still held says");
+            unreachable!("the reader stopped or ended, as the hand-over found under its lock");
         };
         drop(end);
         stop.reader_end_event.notify(usize::MAX);
@@ -1025,7 +1037,7 @@ mod tests {
             AuthMechanism,
             socket::{BoxedSplit, ReadHalf, RecvmsgResult, Split, WriteHalf},
         },
-        runtime::io::{RegisteredIo, UnixOps, registered},
+        runtime::io::{Reader, RegisteredIo, UnixOps, registered},
         wire::{self, LE, serialized::Context},
     };
     use crate::{
@@ -1505,6 +1517,7 @@ mod tests {
             assert_not_connected(conn.send(&msg).await);
             assert_not_connected(clone.send(&msg).await);
             assert_not_connected(clone.send_all(&[msg]).await);
+            assert_not_connected(conn.flush().await);
             // The server of a connection has the credentials of its peer from the handshake.
             conn.peer_creds().await.unwrap();
             clone.close().await.unwrap();
@@ -1598,16 +1611,16 @@ mod tests {
         });
     }
 
-    /// A send cut off midway keeps a connection from being handed over, as the socket may hold a
-    /// part of a message, of which the peer could make no sense. The hand-over finds that out
-    /// before it stops the connection reading, so the connection reads on. It still sends, and
-    /// closing it shuts the socket down.
+    /// A send through a write half of your own, cut off midway, keeps a connection from being
+    /// handed over, as the socket may hold a part of a message, of which the peer could make no
+    /// sense. The hand-over finds that out before it stops the connection reading, so the
+    /// connection reads on. It still sends, and closing it shuts the socket down.
     #[cfg(unix)]
     #[test]
     #[timeout(15000)]
     fn a_send_cut_off_midway_keeps_the_connection_from_being_handed_over() {
         under_every_runtime(|runtime| async move {
-            let (mut stream, peer) = over_a_socket_pair(&runtime).await;
+            let (mut stream, peer) = over_a_socket_pair_of_your_own(&runtime).await;
             let conn = Connection::from(&stream);
             let big = big_signal();
             {
@@ -1706,15 +1719,15 @@ mod tests {
         });
     }
 
-    /// A hand-over that fails once it stopped the connection reading, as a send under way is cut
-    /// off midway, leaves the messages that it took off its stream with the stream, which yields
-    /// them, then ends.
+    /// A hand-over that fails once it stopped the connection reading, as a send under way through
+    /// a write half of your own is cut off midway, leaves the messages that it took off its stream
+    /// with the stream, which yields them, then ends.
     #[cfg(unix)]
     #[test]
     #[timeout(15000)]
     fn a_failed_hand_over_leaves_the_messages_on_its_stream() {
         under_every_runtime(|runtime| async move {
-            let (mut stream, peer) = over_a_socket_pair(&runtime).await;
+            let (mut stream, peer) = over_a_socket_pair_of_your_own(&runtime).await;
             let conn = Connection::from(&stream);
             let queued = queue_two(&conn, &peer);
             let big = big_signal();
@@ -1769,6 +1782,43 @@ mod tests {
                 "{e}"
             );
             assert_eq!(handed_over.unwrap().unread_bytes, queued);
+        });
+    }
+
+    /// A send over a socket that zbus drives, cut off midway, fails no hand-over: the hand-over
+    /// writes the rest of its message first, once the peer reads, and the connection that takes
+    /// over goes on from there.
+    #[cfg(unix)]
+    #[test]
+    #[timeout(15000)]
+    fn the_rest_of_a_send_cut_off_midway_goes_out_before_the_hand_over() {
+        under_every_runtime(|runtime| async move {
+            let (mut stream, peer, _probe) = served(&runtime).await;
+            let conn = Connection::from(&stream);
+            let (big, next) = (big_signal(), signal(1));
+            stuck(&runtime, pin!(conn.send(&big)), &peer).await;
+            assert!(conn.unwritten_len() > 0, "the send left nothing to write");
+
+            let len = big.data().len();
+            let reading = thread::spawn(move || {
+                let mut received = vec![0; len];
+                (&peer).read_exact(&mut received).unwrap();
+
+                (received, peer)
+            });
+            let handover = stream.hand_over().await.unwrap();
+
+            let (received, peer) = reading.join().unwrap();
+            assert_eq!(received, &big.data()[..]);
+            assert_eq!(conn.unwritten_len(), 0);
+            let conn = on(Builder::take_over(handover), &runtime)
+                .build()
+                .await
+                .unwrap();
+            conn.send(&next).await.unwrap();
+            let mut received = vec![0; next.data().len()];
+            (&peer).read_exact(&mut received).unwrap();
+            assert_eq!(received, &next.data()[..]);
         });
     }
 
@@ -2546,6 +2596,50 @@ mod tests {
         .unwrap();
 
         (stream, peer)
+    }
+
+    /// As `over_a_socket_pair`, but through a write half of your own that only sends bytes, so
+    /// that a send that is cut off midway can leave part of a message in the socket.
+    #[cfg(unix)]
+    async fn over_a_socket_pair_of_your_own(runtime: &Runtime) -> (MessageStream, UnixStream) {
+        let (peer, theirs) = UnixStream::pair().unwrap();
+        let socket = Arc::new(registered(runtime, theirs, UnixOps).unwrap());
+        let split = Split::new(
+            Box::new(Reader::new(socket.clone())) as Box<dyn ReadHalf>,
+            Box::new(SendmsgOnly(socket)) as Box<dyn WriteHalf>,
+        );
+        let stream = on(
+            Builder::authenticated_socket(split, Guid::generate()),
+            runtime,
+        )
+        .p2p()
+        .build_message_stream()
+        .await
+        .unwrap();
+
+        (stream, peer)
+    }
+
+    /// A write half that only sends bytes, and leaves everything else to the defaults of
+    /// `WriteHalf`.
+    #[cfg(unix)]
+    #[derive(Debug)]
+    struct SendmsgOnly(Arc<RegisteredIo<UnixOps>>);
+
+    #[cfg(unix)]
+    #[async_trait::async_trait]
+    impl WriteHalf for SendmsgOnly {
+        async fn sendmsg(&mut self, buffer: &[u8], fds: &[BorrowedFd<'_>]) -> io::Result<usize> {
+            WriteHalf::sendmsg(&mut self.0, buffer, fds).await
+        }
+
+        async fn close(&mut self) -> io::Result<()> {
+            WriteHalf::close(&mut self.0).await
+        }
+
+        fn can_pass_unix_fd(&self) -> bool {
+            true
+        }
     }
 
     /// Has `peer` send two signals to the connection of `conn`, and waits for them to be queued

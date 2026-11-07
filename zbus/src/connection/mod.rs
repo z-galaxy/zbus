@@ -7,7 +7,7 @@ use std::{
     num::NonZeroUsize,
     sync::{
         Arc, OnceLock, Weak,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -273,6 +273,27 @@ pub struct Connection {
 
 impl Connection {
     /// Send `msg` to the peer.
+    ///
+    /// If `msg` carries file descriptors and the connection can't pass them, this fails with
+    /// [`Error::Unsupported`] before it sends anything.
+    ///
+    /// # Cancellation
+    ///
+    /// The future can be dropped before it resolves, such as to bound the send by a timeout, as a
+    /// peer that doesn't read holds a send up for as long as it likes. If the connection wrote
+    /// none of `msg` by then, `msg` isn't sent. Otherwise the connection writes the rest of it
+    /// ahead of anything else that it sends: the next send does, and so does
+    /// [`Connection::flush`], which waits for the socket to take it. The same goes for a send that
+    /// fails midway, on an I/O error. So the peer gets each message whole, or not at all, and in
+    /// the order that they were sent, unless [`Connection::close`] closes the connection with part
+    /// of one left to write. [`Connection::unwritten_len`] tells how much is left.
+    ///
+    /// That is so over the sockets that zbus creates. A send over a [`Socket`] of your own hands
+    /// `msg` to [`WriteHalf::send_message`] instead. If it is dropped, or fails, midway, it can
+    /// leave part of `msg` on the socket, which leaves the peer unable to make sense of anything
+    /// sent on the connection after it.
+    ///
+    /// [`WriteHalf::send_message`]: socket::WriteHalf::send_message
     pub async fn send(&self, msg: &Message) -> Result<()> {
         #[cfg(unix)]
         if !msg.data().fds().is_empty() && !self.inner.cap_unix_fd {
@@ -288,15 +309,28 @@ impl Connection {
     /// Send `msgs` to the peer, in order, with as few writes as the socket allows.
     ///
     /// [`Connection::send`] makes at least one write for each message. This hands all of `msgs` to
-    /// the socket at once instead, through [`WriteHalf::send_messages`], and the sockets that zbus
-    /// creates write several messages at a time. No other message is sent on the connection in
-    /// between.
+    /// the socket at once instead: the sockets that zbus creates write several messages at a time.
+    /// No other message is sent on the connection in between. Given no messages, this returns at
+    /// once and writes nothing, not even what the connection hasn't written yet, which
+    /// [`Connection::flush`] writes.
     ///
     /// If any of `msgs` carries file descriptors and the connection can't pass them, this fails
-    /// with [`Error::Unsupported`] before it sends anything. If it fails after that, the messages
-    /// before the one that it failed on have been sent in full, and that one may have been sent in
-    /// part, which leaves the peer unable to make sense of anything sent on the connection after
-    /// it, as with `send`.
+    /// with [`Error::Unsupported`] before it sends anything.
+    ///
+    /// # Cancellation
+    ///
+    /// As with [`Connection::send`], message by message. If the future is dropped, or the send
+    /// fails, before all of `msgs` are written:
+    ///
+    /// * the messages before the one that the connection was writing were written whole;
+    /// * if the connection wrote part of that one, it writes the rest ahead of anything else that
+    ///   it sends, and otherwise that one isn't sent;
+    /// * the messages after it aren't sent.
+    ///
+    /// A send over a [`Socket`] of your own hands all of `msgs` to [`WriteHalf::send_messages`]
+    /// instead. If it is dropped, or fails, the messages before the one that it was sending then
+    /// have been sent in full, and that one may have been sent in part, which leaves the peer
+    /// unable to make sense of anything sent on the connection after it.
     ///
     /// [`WriteHalf::send_messages`]: socket::WriteHalf::send_messages
     pub async fn send_all(&self, msgs: &[Message]) -> Result<()> {
@@ -312,6 +346,50 @@ impl Connection {
         let mut write = self.inner.socket_write.lock().await;
 
         write.send_messages(msgs).await
+    }
+
+    /// Write all that the connection hasn't written yet, waiting on the socket for as long as it
+    /// takes, then flush the write half of the socket ([`WriteHalf::flush`]).
+    ///
+    /// What the connection hasn't written yet is the rest of a message that a send was dropped, or
+    /// failed, in the middle of ([`Connection::send`] tells more), which
+    /// [`Connection::unwritten_len`] counts. The next send writes it too, ahead of its own
+    /// messages, so this is for a connection that is to send nothing more for a while, or for one
+    /// that is about to be closed, whose peer would otherwise wait for the rest of that message.
+    ///
+    /// On a connection closed with [`Connection::close`], which lets go of what is left, this fails
+    /// with an I/O error of kind [`NotConnected`](io::ErrorKind::NotConnected). A connection whose
+    /// peer went away keeps it, and this tries to write it, as a send would.
+    ///
+    /// This takes the turn to write that a send takes, so it waits for the sends before it, and
+    /// those after it wait for it.
+    ///
+    /// # Cancellation
+    ///
+    /// The future can be dropped before it resolves, such as to bound the flush by a timeout. It
+    /// leaves what it didn't write for the next send, or flush, to write, ahead of anything else.
+    /// The same goes for a flush that fails, on an I/O error.
+    ///
+    /// [`WriteHalf::flush`]: socket::WriteHalf::flush
+    pub async fn flush(&self) -> Result<()> {
+        self.inner.socket_status.activity_event.notify(usize::MAX);
+        let mut write = self.inner.socket_write.lock().await;
+
+        write.flush().await
+    }
+
+    /// How many bytes the connection has yet to write of a message that it wrote part of.
+    ///
+    /// That is the rest of a message that a send was dropped, or failed, in the middle of
+    /// ([`Connection::send`] tells more), which the next send writes ahead of its own messages, and
+    /// so does [`Connection::flush`]. While a send is under way, it is what is left of the message
+    /// that the send is in the middle of, if any: messages of which nothing was written yet don't
+    /// count.
+    ///
+    /// [`Connection::close`] lets go of these bytes. The peer going away doesn't, so they stay
+    /// counted for as long as no write takes them.
+    pub fn unwritten_len(&self) -> usize {
+        self.inner.socket_status.unwritten.load(Ordering::Relaxed)
     }
 
     /// Send a method call.
@@ -1287,22 +1365,25 @@ impl Connection {
         let msg_senders = Arc::new(Mutex::new(msg_senders));
         let pending_method_calls = PendingMethodCalls::default();
         let subscriptions = Mutex::new(HashMap::new());
+        let socket_status = Arc::new(SocketStatus {
+            activity_event: Event::new(),
+            closed: AtomicBool::new(false),
+            closed_event: Event::new(),
+            unwritten: AtomicUsize::new(0),
+            #[cfg(feature = "handover")]
+            stop: StopStatus::new(),
+        });
         let socket_write = SocketWrite::new(
             auth.socket_write,
             writes,
+            socket_status.clone(),
             #[cfg(all(feature = "handover", any(unix, windows)))]
             source,
         );
 
         let connection = Self {
             inner: Arc::new(ConnectionInner {
-                socket_status: Arc::new(SocketStatus {
-                    activity_event: Event::new(),
-                    closed: AtomicBool::new(false),
-                    closed_event: Event::new(),
-                    #[cfg(feature = "handover")]
-                    stop: StopStatus::new(),
-                }),
+                socket_status,
                 socket_write: Mutex::new(socket_write),
                 server_guid: auth.server_guid,
                 #[cfg(unix)]
@@ -1424,7 +1505,9 @@ impl Connection {
 
     /// Close the connection.
     ///
-    /// After this call, all reading and writing operations will fail.
+    /// After this call, all reading and writing operations will fail. What the connection hasn't
+    /// written yet ([`Connection::unwritten_len`]) is let go of. Call [`Connection::flush`] first
+    /// to have it written.
     ///
     /// With the `handover` feature, this does nothing to the socket of a connection that was handed
     /// over (`MessageStream::hand_over`), as the socket is no longer the connection's.

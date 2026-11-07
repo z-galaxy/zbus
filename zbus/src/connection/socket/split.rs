@@ -11,8 +11,7 @@ use crate::runtime::io::PollSend;
 pub struct Split<R: ReadHalf, W: WriteHalf> {
     pub(super) read: R,
     pub(super) write: W,
-    /// How a connection over the halves writes the socket, if zbus made it, rather than through
-    /// `write` alone.
+    /// How a connection over the halves writes the socket, if zbus made it, as [`Writes`] tells.
     pub(super) writes: Option<Writes>,
 }
 
@@ -83,8 +82,8 @@ impl<S: Socket> From<S> for BoxedSplit {
     }
 }
 
-/// How a connection writes a socket that zbus made, other than through its write half alone,
-/// which is all that it knows of a socket of yours.
+/// How a connection writes a socket that zbus made, which it knows more of than of a socket of
+/// yours, whose write half is all that it knows.
 ///
 /// It goes with the halves wherever zbus moves them, boxed or handed over, so that a connection
 /// over them knows the socket as the one that they came from did.
@@ -93,6 +92,11 @@ pub(crate) enum Writes {
     /// zbus drives the socket itself, so the connection writes it directly, several messages at a
     /// time, rather than through the write half.
     Driven(Arc<dyn PollSend>),
+    /// The socket is a [`Channel`](super::Channel), which the connection writes through its write
+    /// half. That queues each message whole or not at all, even where the send is dropped, so no
+    /// send leaves a message cut off.
+    #[cfg(feature = "p2p")]
+    Whole,
 }
 
 // A `Split` is as unwind safe as its halves: the socket that `Writes::Driven` holds is the one

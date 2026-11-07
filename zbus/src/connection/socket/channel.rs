@@ -54,8 +54,10 @@ impl super::Socket for Channel {
     type ReadHalf = Reader;
     type WriteHalf = Writer;
 
+    // A connection over the channel knows that its sends are whole or nothing, as
+    // `Writer::send_message` tells.
     fn split(self) -> super::Split<Self::ReadHalf, Self::WriteHalf> {
-        super::Split::new(self.reader, self.writer)
+        super::Split::with_writes(self.reader, self.writer, Some(super::Writes::Whole))
     }
 }
 
@@ -147,6 +149,8 @@ pub struct Writer(Sender<Message>);
 
 #[async_trait::async_trait]
 impl super::WriteHalf for Writer {
+    // zruntime's `Sender::broadcast` queues the message whole, or not at all if its future is
+    // dropped before it resolves, so no send leaves part of a message on the channel.
     async fn send_message(&mut self, msg: &Message) -> crate::Result<()> {
         self.0
             .broadcast(msg.clone())
