@@ -48,7 +48,7 @@ use super::handover::SocketKind;
 use super::{
     DEFAULT_MAX_QUEUED,
     handshake::{AuthMechanism, Authenticated},
-    socket::{BoxedSplit, ReadHalf, Split, WriteHalf},
+    socket::{BoxedSplit, ReadHalf, Split, WriteHalf, Writes},
 };
 #[cfg(feature = "handover")]
 use super::{Handover, HandoverSocket};
@@ -114,6 +114,8 @@ pub struct Builder<'a> {
     // `None` unless the caller picked a runtime, in which case the connection runs on that one
     // instead of the default for the build.
     runtime: Option<Runtime>,
+    // How the connection writes the socket that it runs over, once connected, if zbus made it.
+    writes: Option<Writes>,
     // The socket that the connection runs over, once connected, if zbus drives it and so can give
     // a descriptor of it for a hand-over.
     #[cfg(all(feature = "handover", any(unix, windows)))]
@@ -773,6 +775,7 @@ impl<'a> Builder<'a> {
 
         let mut conn = Connection::new(
             auth,
+            self.writes.take(),
             #[cfg(all(feature = "handover", any(unix, windows)))]
             self.io_source.take(),
             is_bus_conn,
@@ -854,6 +857,7 @@ impl<'a> Builder<'a> {
             method_timeout: None,
             user_id: None,
             runtime: None,
+            writes: None,
             #[cfg(all(feature = "handover", any(unix, windows)))]
             io_source: None,
             #[cfg(feature = "handover")]
@@ -893,8 +897,9 @@ impl<'a> Builder<'a> {
         #[cfg(feature = "bus-impl")]
         let unique_name = self.unique_name.take().map(Into::into);
 
-        #[allow(unused_mut)]
         let (mut stream, server_guid, authenticated) = self.target_connect(runtime).await?;
+        // Before the halves go their own ways, whichever way the connection is made.
+        self.writes = stream.take_writes();
         // Ahead of the authenticated socket that it builds on, as the GUID that comes with it is
         // that of the hand-over, not the one that `target_connect` gives.
         #[cfg(feature = "handover")]

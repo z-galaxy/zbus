@@ -1644,8 +1644,9 @@ where
 /// A message is a buffer of a write of its own, so the buffers are the messages.
 #[cfg(unix)]
 #[derive(Debug, Default)]
-struct Recording {
-    writes: Arc<Mutex<Vec<(usize, usize)>>>,
+pub(crate) struct Recording {
+    /// How many buffers, and so messages, and how many descriptors each write took, in order.
+    pub(crate) writes: Arc<Mutex<Vec<(usize, usize)>>>,
 }
 
 #[cfg(unix)]
