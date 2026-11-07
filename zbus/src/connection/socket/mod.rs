@@ -205,25 +205,19 @@ pub trait ReadHalf: std::fmt::Debug + Send + Sync + 'static {
     /// - `already_received_bytes`: Sometimes, zbus already received some bytes from the socket
     ///   belonging to the first message(s) (as part of the connection handshake process). This is
     ///   the buffer containing those bytes (if any). If you're implementing this method, most
-    ///   likely you can safely ignore this parameter.
-    #[cfg_attr(
-        feature = "handover",
-        doc = "   A half that can take what it left unread ([`ReadHalf::can_take_unread`]) is the \
-               exception: it has to take these ahead of anything that it reads, or fail on them if \
-               it can't make messages of them, as they are also how a connection that takes over \
-               ([`Builder::take_over`](crate::connection::Builder::take_over)) gets what the \
-               other one left unread."
-    )]
+    ///   likely you can safely ignore this parameter. With the `handover` feature, a half that can
+    ///   take what it left unread (`ReadHalf::can_take_unread`) is the exception: it has to take
+    ///   these ahead of anything that it reads, or fail on them if it can't make messages of them,
+    ///   as they are also how a connection that takes over (`Builder::take_over`) gets what the
+    ///   other one left unread.
     /// - `already_received_fds`: Same goes for file descriptors belonging to first messages.
     ///
     /// # Cancellation
-    #[cfg_attr(
-        feature = "handover",
-        doc = "A hand-over ([`MessageStream::hand_over`](crate::MessageStream::hand_over)) stops \
-               the connection reading by dropping the future of this method wherever it waits, if \
-               [`ReadHalf::can_take_unread`] says that it can.",
-        doc = ""
-    )]
+    ///
+    /// With the `handover` feature, a hand-over (`MessageStream::hand_over`) stops the connection
+    /// reading by dropping the future of this method wherever it waits, if
+    /// `ReadHalf::can_take_unread` says that it can.
+    ///
     /// The default implementation keeps what it read of a message in `already_received_bytes`
     /// and `already_received_fds`, and never reads past the end of the message. So a call that is
     /// dropped while it waits loses nothing, as long as a call to `recvmsg` that is dropped while
@@ -352,13 +346,10 @@ pub trait ReadHalf: std::fmt::Debug + Send + Sync + 'static {
     /// implementation, keeps the first three promises, and holds nothing for `take_unread` to take
     /// out.
     ///
-    /// The read half of a
-    #[cfg_attr(feature = "p2p", doc = "[`Channel`]")]
-    #[cfg_attr(not(feature = "p2p"), doc = "`Channel`")]
-    /// returns `true`. A channel carries whole messages, so it takes back the whole messages that
-    /// a connection over a channel leaves unread, and fails on part of one, which can only come
-    /// from a connection over some other socket. The end of its input is the other end of the
-    /// channel being closed.
+    /// The read half of a `Channel` returns `true`. A channel carries whole messages, so it takes
+    /// back the whole messages that a connection over a channel leaves unread, and fails on part of
+    /// one, which can only come from a connection over some other socket. The end of its input is
+    /// the other end of the channel being closed.
     ///
     /// The default implementation returns `false`. Then [`MessageStream::hand_over`] fails with
     /// [`Error::Unsupported`] for a connection over this half, and so does [`Builder::build`] for a

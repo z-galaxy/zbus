@@ -34,14 +34,11 @@ use crate::{
 /// yielded. That holds however the connection closed: a [`Connection::close`] of your own, the
 /// remote peer going away, an I/O error on the socket, or the runtime taking away the task that
 /// reads it.
-#[cfg_attr(
-    feature = "handover",
-    doc = "",
-    doc = "The stream also ends once a hand-over of its connection through another stream \
-           ([`MessageStream::hand_over`]) stops the connection reading, after everything that the \
-           connection read before it stopped and queued for the stream. Its `None` then comes \
-           with no error before it."
-)]
+///
+/// With the `handover` feature, the stream also ends once a hand-over of its connection through
+/// another stream (`MessageStream::hand_over`) stops the connection reading, after everything that
+/// the connection read before it stopped and queued for the stream. Its `None` then comes with no
+/// error before it.
 #[derive(Debug)]
 #[must_use = "streams do nothing unless polled"]
 pub struct MessageStream {
@@ -243,13 +240,10 @@ impl MessageStream {
     ///
     /// The `unread_bytes` of the [`Handover`] that it gives are those of the messages that were
     /// queued on this stream and that it did not yield, oldest first, followed by what the
-    /// connection read off the socket after them and made no message of yet.
-    #[cfg_attr(
-        unix,
-        doc = "Its `unread_fds` are the file descriptors of those messages, in their order, followed \
-               by those that came in with the rest."
-    )]
-    /// The stream then ends: it yields `None`, as it has nothing left to yield.
+    /// connection read off the socket after them and made no message of yet. On unix, its
+    /// `unread_fds` are the file descriptors of those messages, in their order, followed by those
+    /// that came in with the rest. The stream then ends: it yields `None`, as it has nothing left
+    /// to yield.
     ///
     /// # The messages of the stream
     ///

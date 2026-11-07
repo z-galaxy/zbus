@@ -164,17 +164,11 @@ use crate::{
 /// This type is only available when the `handover` feature is enabled.
 ///
 /// # Passing it to another process
-#[cfg_attr(
-    unix,
-    doc = "[`Handover::encode`] turns it into bytes and file descriptors, which can be passed on \
-           over a unix socket or kept in the file descriptor store of systemd, and \
-           [`Handover::decode`] turns those back into a hand-over."
-)]
-#[cfg_attr(
-    not(unix),
-    doc = "Pass on the descriptor of the socket. Pass the other fields on as data. Then build it \
-           again there with [`Handover::new`] and set the fields."
-)]
+///
+/// On unix, `Handover::encode` turns it into bytes and file descriptors, which can be passed on
+/// over a unix socket or kept in the file descriptor store of systemd, and `Handover::decode` turns
+/// those back into a hand-over. Elsewhere, pass on the descriptor of the socket, and the other
+/// fields as data, then build it again there with [`Handover::new`] and set the fields.
 ///
 /// `unread_bytes` holds the messages that were queued on the stream, and the start of one that the
 /// peer was in the middle of sending, which can be as long as the longest message that D-Bus
@@ -429,16 +423,9 @@ pub enum HandoverSocket {
     ///
     /// [`Builder::tcp_stream`]: super::Builder::tcp_stream
     TcpStream(TcpStream),
-    /// The halves of a socket, for any other connection: one over a [`Socket`] of your own,
-    #[cfg_attr(
-        feature = "p2p",
-        doc = "such as a [`Channel`](super::socket::Channel), one over the pipes of a `unixexec:`"
-    )]
-    #[cfg_attr(
-        not(feature = "p2p"),
-        doc = "such as a `Channel`, one over the pipes of a `unixexec:`"
-    )]
-    /// address, or, on WASI, which can't duplicate a descriptor, any connection.
+    /// The halves of a socket, for any other connection: one over a [`Socket`] of your own, such as
+    /// a `Channel`, one over the pipes of a `unixexec:` address, or, on WASI, which can't duplicate
+    /// a descriptor, any connection.
     ///
     /// The halves can only go on in this process. Those that zbus made run on the runtime of the
     /// connection that they came from, so they need it to keep running. Dropping them is what

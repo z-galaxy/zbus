@@ -271,12 +271,9 @@ impl<'a> Builder<'a> {
     ///
     /// This is similar to [`Builder::socket`], except that the socket is either already
     /// authenticated or does not require authentication.
-    #[cfg_attr(
-        feature = "handover",
-        doc = "",
-        doc = "To go on with a connection that was handed over, use [`Builder::take_over`] \
-               instead, which also takes what that connection left unread."
-    )]
+    ///
+    /// With the `handover` feature, to go on with a connection that was handed over, use
+    /// `Builder::take_over` instead, which also takes what that connection left unread.
     ///
     /// An invalid GUID is reported by [`Builder::build`].
     pub fn authenticated_socket<S, G>(socket: S, guid: G) -> Self
@@ -306,14 +303,9 @@ impl<'a> Builder<'a> {
     /// It takes the bytes and the file descriptors of `handover` ahead of anything that it reads
     /// off the socket, so the first messages that it yields are those that they hold or start. It
     /// yields them as soon as it is built, so a [`MessageStream`] made from it once it is built can
-    /// miss them. Build it with [`Builder::build_message_stream`] to get them all, on a stream
-    /// that it can be handed over through in turn. The interfaces that
-    #[cfg_attr(feature = "service", doc = "[`Builder::serve_at`] adds")]
-    #[cfg_attr(
-        not(feature = "service"),
-        doc = "`Builder::serve_at` (which requires the `service` feature) adds"
-    )]
-    /// get the method calls among them.
+    /// miss them. Build it with [`Builder::build_message_stream`] to get them all, on a stream that
+    /// it can be handed over through in turn. The interfaces that `Builder::serve_at` (which
+    /// requires the `service` feature) adds get the method calls among them.
     ///
     /// Once the connection is built, the messages that this process builds get serial numbers
     /// from `handover.next_serial` on, unless they already would. So the replies to method calls
@@ -327,10 +319,8 @@ impl<'a> Builder<'a> {
     /// is dropped.
     ///
     /// [`Builder::build`] fails with [`Error::Unsupported`]:
-    #[cfg_attr(
-        feature = "p2p",
-        doc = "* for a hand-over of a connection to a bus that [`Builder::p2p`] was called for;"
-    )]
+    /// * with the `p2p` feature, for a hand-over of a connection to a bus that `Builder::p2p` was
+    ///   called for;
     /// * for a hand-over that holds unread bytes or file descriptors, over a [`Socket`] of your own
     ///   whose read half can't take them ([`ReadHalf::can_take_unread`]).
     ///
@@ -664,16 +654,12 @@ impl<'a> Builder<'a> {
     ///
     /// To get the [`Connection`] out of the returned stream, use `Connection::from(&stream)` —
     /// this is cheap (an `Arc` clone).
-    #[cfg_attr(
-        feature = "handover",
-        doc = "",
-        doc = "The stream has had every message of the connection, from the first, so the \
-               connection can be handed over through it \
-               ([`MessageStream::hand_over`](crate::MessageStream::hand_over)). A connection \
-               that takes over ([`Builder::take_over`]) yields the messages that it was handed as \
-               soon as it is built. A stream made from it once it is built can miss them, while \
-               one built with this gets every one of them."
-    )]
+    ///
+    /// With the `handover` feature, the stream has had every message of the connection, from the
+    /// first, so the connection can be handed over through it (`MessageStream::hand_over`). A
+    /// connection that takes over (`Builder::take_over`) yields the messages that it was handed as
+    /// soon as it is built. A stream made from it once it is built can miss them, while one built
+    /// with this gets every one of them.
     ///
     /// This method is only available when the `bus-impl` or the `handover` feature is enabled.
     ///

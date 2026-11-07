@@ -1362,11 +1362,9 @@ impl Connection {
     ///
     /// A connection is considered closed either when the remote peer disconnects, an I/O error
     /// occurs on the socket, or [`Connection::close`] is called.
-    #[cfg_attr(
-        feature = "handover",
-        doc = "It is also closed once it was handed over \
-               ([`MessageStream::hand_over`](crate::MessageStream::hand_over))."
-    )]
+    ///
+    /// With the `handover` feature, it is also closed once it was handed over
+    /// (`MessageStream::hand_over`).
     pub fn is_closed(&self) -> bool {
         self.inner.is_closed()
     }
@@ -1375,11 +1373,9 @@ impl Connection {
     ///
     /// A connection is considered closed either when the remote peer disconnects, an I/O error
     /// occurs on the socket, or [`Connection::close`] is called.
-    #[cfg_attr(
-        feature = "handover",
-        doc = "It is also closed once it was handed over \
-               ([`MessageStream::hand_over`](crate::MessageStream::hand_over))."
-    )]
+    ///
+    /// With the `handover` feature, it is also closed once it was handed over
+    /// (`MessageStream::hand_over`).
     ///
     /// Returns immediately if the connection is already closed.
     pub async fn closed(&self) {
@@ -1431,13 +1427,9 @@ impl Connection {
     /// Close the connection.
     ///
     /// After this call, all reading and writing operations will fail.
-    #[cfg_attr(
-        feature = "handover",
-        doc = "",
-        doc = "On a connection that was handed over \
-               ([`MessageStream::hand_over`](crate::MessageStream::hand_over)), this does nothing \
-               to the socket, which is no longer the connection's."
-    )]
+    ///
+    /// With the `handover` feature, this does nothing to the socket of a connection that was handed
+    /// over (`MessageStream::hand_over`), as the socket is no longer the connection's.
     pub async fn close(self) -> Result<()> {
         self.inner.socket_status.activity_event.notify(usize::MAX);
         let result = self
