@@ -553,6 +553,11 @@ pub trait WriteHalf: std::fmt::Debug + Send + Sync + 'static {
     /// leaves the rest of its message for the connection to write ahead of anything else, as
     /// [`Connection::send`] tells.
     ///
+    /// With the `handover` feature, on unix, once a hand-over of the connection is prepared
+    /// (`Connection::prepare_hand_over`), a send drops the future of a call to `sendmsg` or `flush`
+    /// that waits, rather than wait for it, and the connection keeps what is left, for a later send
+    /// or [`Connection::flush`].
+    ///
     /// The default implementation returns `false`, which suits a half that sends whole messages
     /// through `send_message` and `send_messages`. Over such a half, a send that is dropped, or
     /// that fails, in the middle of a message can leave part of it on the socket, after which the
@@ -560,6 +565,9 @@ pub trait WriteHalf: std::fmt::Debug + Send + Sync + 'static {
     ///
     /// With the `handover` feature, a hand-over (`MessageStream::hand_over`) of a connection over
     /// such a half waits for a send under way, and fails once one was cut off midway.
+    ///
+    /// With the `handover` feature, on unix, `Connection::prepare_hand_over` returns `false` for
+    /// such a connection, as its sends have to wait for the half.
     ///
     /// zbus asks this once, as the connection is built.
     ///

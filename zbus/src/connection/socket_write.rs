@@ -1,15 +1,24 @@
 //! What a connection writes its socket through.
 
+#[cfg(all(unix, feature = "handover"))]
+use std::collections::VecDeque;
 #[cfg(feature = "handover")]
 use std::mem;
 #[cfg(unix)]
 use std::os::fd::{AsFd, BorrowedFd};
 use std::{
+    fmt,
     future::poll_fn,
     io::{self, IoSlice},
     slice,
     sync::{Arc, atomic::Ordering},
+    task::{Context, Poll},
 };
+#[cfg(all(unix, feature = "handover"))]
+use std::{future::Future, pin::Pin, sync::atomic::AtomicBool};
+
+#[cfg(all(unix, feature = "handover"))]
+use zruntime::{Event, EventListener};
 
 #[cfg(all(feature = "handover", any(unix, windows)))]
 use super::handover::SocketKind;
@@ -18,12 +27,14 @@ use super::socket_reader::SocketStatus;
 use crate::Error;
 #[cfg(all(feature = "handover", any(unix, windows)))]
 use crate::runtime::IoSource;
+#[cfg(all(unix, feature = "handover"))]
+use crate::runtime::io::MESSAGES_PER_WRITE;
 use crate::{
     Message, Result,
     connection::socket::{WriteHalf, Writes},
     fdo::ConnectionCredentials,
     log::trace,
-    runtime::io::{PollSend, write_messages},
+    runtime::io::{PollSend, Progress, poll_write, write_message, write_messages},
 };
 
 /// What a connection writes its socket through, which those that write it, shut it down or hand it
@@ -39,7 +50,8 @@ pub(super) struct SocketWrite {
     /// connection was built. Where `writes` doesn't say otherwise, the connection then writes
     /// through the `sendmsg` of `half` itself, rather than hand it whole messages.
     half_resumes: bool,
-    /// What is left to write of the message that a write ended in the middle of, if any.
+    /// What is left to write: the rest of the message that a write ended in the middle of, if any,
+    /// and the messages that sends kept after it.
     rest: Rest,
     /// The socket itself, if zbus drives it and so can give a descriptor of it for a hand-over.
     #[cfg(all(feature = "handover", any(unix, windows)))]
@@ -75,7 +87,7 @@ impl SocketWrite {
             half_resumes: half.can_resume_writes(),
             half: Some(half),
             writes,
-            rest: Rest { cut: None, status },
+            rest: Rest::new(status),
             #[cfg(all(feature = "handover", any(unix, windows)))]
             source,
             #[cfg(feature = "handover")]
@@ -84,27 +96,37 @@ impl SocketWrite {
         }
     }
 
+    /// Whether the connection can be prepared for a hand-over, as
+    /// `Connection::prepare_hand_over` does: whether its sends can keep what the socket doesn't
+    /// take at once, as they keep track of how far each write takes the messages, over a socket
+    /// that zbus drives or through a write half that can resume writes.
+    #[cfg(all(unix, feature = "handover"))]
+    pub(super) fn can_prepare_hand_over(&self) -> bool {
+        matches!(self.writes, Some(Writes::Driven(_))) || self.half_resumes
+    }
+
     /// Send `msg`, unless the connection was handed over, as [`SocketWrite::send_messages`] does,
     /// but through [`WriteHalf::send_message`] where it hands the message whole to the half.
     // Written out apart from `send_messages`, rather than as a call to it with the one message,
     // so that the compiler knows that there is only the one: every `Connection::send` runs this.
     pub(super) async fn send_message(&mut self, msg: &Message) -> Result<()> {
+        let msgs = slice::from_ref(msg);
         match &self.writes {
             Some(Writes::Driven(socket)) => {
-                if !self.rest.is_empty() {
-                    write_rest_to(&**socket, &mut self.rest).await?;
+                let mut writing = Writing::sending(&mut self.rest);
+                if !writing.rest.is_empty() && !write_unwritten_to(&**socket, &mut writing).await? {
+                    writing.rest.keep(msgs);
+
+                    return Ok(());
                 }
-                write_messages(&**socket, slice::from_ref(msg), |cut| self.rest.set(cut)).await?;
+                let left = write_message(&**socket, msg, &mut writing).await?;
+                writing.rest.keep(left);
 
                 return Ok(());
             }
             None if self.half_resumes => {
                 let half = self.half.as_deref_mut().ok_or_else(handed_over)?;
-                if !self.rest.is_empty() {
-                    write_rest_through(half, &mut self.rest).await?;
-                }
-                write_through(half, msg, &mut self.rest).await?;
-                half.flush().await?;
+                send_through(half, msgs, &mut self.rest).await?;
 
                 return Ok(());
             }
@@ -128,30 +150,29 @@ impl SocketWrite {
 
     /// Send `msgs`, unless the connection was handed over.
     ///
-    /// The connection writes them itself, after what is left of a message that a write ended in
-    /// the middle of, if anything, keeping track in `rest` of how far each write takes them: to a
-    /// socket that zbus drives, as [`write_messages`] does, or through the `sendmsg` of a half that
-    /// can resume writes, a message at a time, flushing the half once they are all written.
-    /// Otherwise it hands them whole to [`WriteHalf::send_messages`].
+    /// The connection writes them itself, after what it has left to write, if anything, keeping
+    /// track in `rest` of how far each write takes them: to a socket that zbus drives, as
+    /// [`write_messages`] does, or through the `sendmsg` of a half that can resume writes, a
+    /// message at a time, flushing the half once they are all written. Once a hand-over of the
+    /// connection is prepared, it writes what the socket takes at once, and keeps the rest in
+    /// `rest`. Otherwise it hands them whole to [`WriteHalf::send_messages`].
     pub(super) async fn send_messages(&mut self, msgs: &[Message]) -> Result<()> {
         match &self.writes {
             Some(Writes::Driven(socket)) => {
-                if !self.rest.is_empty() {
-                    write_rest_to(&**socket, &mut self.rest).await?;
+                let mut writing = Writing::sending(&mut self.rest);
+                if !writing.rest.is_empty() && !write_unwritten_to(&**socket, &mut writing).await? {
+                    writing.rest.keep(msgs);
+
+                    return Ok(());
                 }
-                write_messages(&**socket, msgs, |cut| self.rest.set(cut)).await?;
+                let left = write_messages(&**socket, msgs, &mut writing).await?;
+                writing.rest.keep(left);
 
                 return Ok(());
             }
             None if self.half_resumes => {
                 let half = self.half.as_deref_mut().ok_or_else(handed_over)?;
-                if !self.rest.is_empty() {
-                    write_rest_through(half, &mut self.rest).await?;
-                }
-                for msg in msgs {
-                    write_through(half, msg, &mut self.rest).await?;
-                }
-                half.flush().await?;
+                send_through(half, msgs, &mut self.rest).await?;
 
                 return Ok(());
             }
@@ -173,14 +194,14 @@ impl SocketWrite {
         sent
     }
 
-    /// Write what is left of a message that a write ended in the middle of, if anything, waiting
-    /// on the socket for as long as it takes, then flush the write half, as [`WriteHalf::flush`]
-    /// does, unless the connection was closed or handed over.
+    /// Write what the connection has left to write, if anything, waiting on the socket for as
+    /// long as it takes, then flush the write half, as [`WriteHalf::flush`] does, unless the
+    /// connection was closed or handed over.
     pub(super) async fn flush(&mut self) -> Result<()> {
         if self.shut_down {
             return Err(closed().into());
         }
-        self.write_rest().await?;
+        self.write_unwritten().await?;
         let half = self.half.as_deref_mut().ok_or_else(handed_over)?;
         half.flush().await?;
 
@@ -198,10 +219,10 @@ impl SocketWrite {
     /// Shut the socket down, as [`WriteHalf::close`] does, unless the connection was handed over,
     /// which leaves the socket alone: it is no longer the connection's.
     ///
-    /// Nothing more is written then: what is left to write of a message is let go of, and a flush
-    /// fails from then on. `writes` is let go of too, as a pipe to a helper process, which the
-    /// connection writes directly, closes as the last of its descriptors goes, and sends go
-    /// through `half` from then on, which fails them.
+    /// Nothing more is written then: what is left to write is let go of, and a flush fails from
+    /// then on. `writes` is let go of too, as a pipe to a helper process, which the connection
+    /// writes directly, closes as the last of its descriptors goes, and sends go through `half`
+    /// from then on, which fails them.
     pub(super) async fn close(&mut self) -> io::Result<()> {
         let Some(half) = self.half.as_deref_mut() else {
             return Ok(());
@@ -209,25 +230,24 @@ impl SocketWrite {
         // Set before the socket is shut down, as the shutdown can be given up on midway, and as
         // the reader can come to the end of the input as soon as it is.
         self.shut_down = true;
-        self.rest.set(None);
+        self.rest.clear();
         self.writes = None;
 
         half.close().await
     }
 
-    /// Write what is left of a message that a write ended in the middle of, for the connection to
-    /// be handed over, waiting on the socket for as long as it takes. If the peer receives nothing
-    /// more, nothing that follows the part of the message that it got can be misread, so what is
-    /// left is let go of instead.
+    /// Write what the connection has left to write, for the connection to be handed over, waiting
+    /// on the socket for as long as it takes. If the peer receives nothing more, nothing that
+    /// follows what it got can be misread, so what is left is let go of instead.
     #[cfg(feature = "handover")]
-    pub(super) async fn write_rest_for_hand_over(&mut self) -> Result<()> {
-        match self.write_rest().await {
-            Err(e) if receives_nothing_more(&e) => {
-                self.rest.set(None);
+    pub(super) async fn write_unwritten_for_hand_over(&mut self) -> Result<()> {
+        match self.write_unwritten().await {
+            Err(Error::InputOutput(e)) if receives_nothing_more(&e) => {
+                self.rest.clear();
 
                 Ok(())
             }
-            written => Ok(written?),
+            written => written,
         }
     }
 
@@ -265,20 +285,23 @@ impl SocketWrite {
         Some((half, self.writes.take()))
     }
 
-    /// Write what is left of a message that a write ended in the middle of, if anything, waiting
-    /// on the socket for as long as it takes.
-    async fn write_rest(&mut self) -> io::Result<()> {
+    /// Write what the connection has left to write, if anything, waiting on the socket for as
+    /// long as it takes.
+    async fn write_unwritten(&mut self) -> Result<()> {
+        let mut writing = Writing::waiting(&mut self.rest);
         match &self.writes {
-            Some(Writes::Driven(socket)) => write_rest_to(&**socket, &mut self.rest).await,
+            Some(Writes::Driven(socket)) => {
+                write_unwritten_to(&**socket, &mut writing).await?;
+            }
             None if self.half_resumes => {
                 let half = self.half.as_deref_mut().ok_or_else(handed_over)?;
-
-                write_rest_through(half, &mut self.rest).await
+                write_unwritten_through(half, &mut writing).await?;
             }
-            // Only a send that keeps track of how far each write takes it leaves the rest of a
-            // message.
-            _ => Ok(()),
+            // Only a send that keeps track of how far each write takes it leaves anything.
+            _ => (),
         }
+
+        Ok(())
     }
 
     /// Put back `torn`, whether the socket was torn before a send, now that the send is through
@@ -295,115 +318,385 @@ impl SocketWrite {
     }
 }
 
-/// Write what is left of a message that a write ended in the middle of, if anything, to `socket`,
-/// waiting on it for as long as it takes. Its file descriptors went with its first byte.
-async fn write_rest_to(socket: &dyn PollSend, rest: &mut Rest) -> io::Result<()> {
-    while let Some(left) = rest.left() {
-        let written = poll_fn(|cx| {
-            socket.poll_send(
-                cx,
-                &[IoSlice::new(left)],
-                #[cfg(unix)]
-                &[],
-            )
-        })
-        .await?;
-        rest.advance(written);
+/// Whether a hand-over of a connection is prepared ([`Connection::prepare_hand_over`]), which has
+/// its sends stop, rather than wait for the socket, from then on for good.
+///
+/// [`Connection::prepare_hand_over`]: super::Connection::prepare_hand_over
+#[cfg(all(unix, feature = "handover"))]
+#[derive(Debug, Default)]
+pub(super) struct Prepared {
+    is_set: AtomicBool,
+    /// Notified as the hand-over is prepared, for a send that waits for the socket to stop.
+    event: Event,
+}
+
+#[cfg(all(unix, feature = "handover"))]
+impl Prepared {
+    /// Note that the hand-over is prepared, for good, and wake the send that waits for the socket,
+    /// if any.
+    pub(super) fn set(&self) {
+        if !self.is_set.swap(true, Ordering::AcqRel) {
+            self.event.notify(usize::MAX);
+        }
     }
 
-    Ok(())
+    /// Whether the hand-over is prepared.
+    fn is_set(&self) -> bool {
+        self.is_set.load(Ordering::Acquire)
+    }
+
+    /// A listener notified once the hand-over is prepared, unless it is already.
+    fn listen(&self) -> EventListener {
+        self.event.listen()
+    }
+}
+
+/// Write what the connection has left to write, if anything, to `socket`: the rest of a message
+/// that a write ended in the middle of, then the messages that sends kept, as far as `writing` has
+/// the writes go. Whether it wrote it all.
+async fn write_unwritten_to(socket: &dyn PollSend, writing: &mut Writing<'_>) -> io::Result<bool> {
+    if !write_rest_to(socket, writing).await? {
+        return Ok(false);
+    }
+    #[cfg(all(unix, feature = "handover"))]
+    while !writing.rest.kept.is_empty() {
+        let copies = writing.rest.kept_copies();
+        let mut taking = TakingKept::new(writing);
+        let left = write_messages(socket, &copies, &mut taking).await?;
+        // The writes stopped before a message, or in the middle of one, the last one included,
+        // which leaves no message without anything written, but the rest of that one.
+        if !left.is_empty() || writing.rest.cut.is_some() {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
+/// Write what is left of a message that a write ended in the middle of, if anything, to `socket`,
+/// as far as `writing` has the writes go. Its file descriptors went with its first byte. Whether it
+/// wrote it all.
+async fn write_rest_to(socket: &dyn PollSend, writing: &mut Writing<'_>) -> io::Result<bool> {
+    // A copy of the message, so that `writing` can be asked whether to stop while it is written.
+    while let Some((msg, written)) = writing.rest.cut.clone() {
+        let left = [IoSlice::new(&msg.data()[written..])];
+        let polled = poll_fn(|cx| {
+            poll_write(
+                socket,
+                cx,
+                &left,
+                #[cfg(unix)]
+                &[],
+                writing,
+            )
+        });
+        let sent = match polled.await {
+            Ok(sent) => sent,
+            // The socket takes nothing at once, and `writing` has the writes stop.
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(false),
+            Err(e) => return Err(e),
+        };
+        writing.rest.advance(sent);
+    }
+
+    Ok(true)
+}
+
+/// Send `msgs` through the `sendmsg` of `half`, after what the connection has left to write, if
+/// anything, keeping track in `rest` of how far each call takes them, then flush `half`.
+///
+/// Once a hand-over of the connection is prepared, a call that waits is given up on, and so writes
+/// nothing, and what is left is kept in `rest`. A flush that waits is given up on too, which leaves
+/// what the half holds on to for the next flush.
+async fn send_through(
+    half: &mut dyn WriteHalf,
+    msgs: &[Message],
+    rest: &mut Rest,
+) -> io::Result<()> {
+    let mut writing = Writing::sending(rest);
+    if !writing.rest.is_empty() && !write_unwritten_through(half, &mut writing).await? {
+        writing.rest.keep(msgs);
+    } else {
+        let left = write_all_through(half, msgs, &mut writing).await?;
+        writing.rest.keep(left);
+    }
+
+    flush_through(half, &mut writing).await
+}
+
+/// Write what the connection has left to write, if anything, through the `sendmsg` of `half`, as
+/// [`write_unwritten_to`] does to a socket that zbus drives. Whether it wrote it all.
+async fn write_unwritten_through(
+    half: &mut dyn WriteHalf,
+    writing: &mut Writing<'_>,
+) -> io::Result<bool> {
+    if !write_rest_through(half, writing).await? {
+        return Ok(false);
+    }
+    #[cfg(all(unix, feature = "handover"))]
+    while !writing.rest.kept.is_empty() {
+        let copies = writing.rest.kept_copies();
+        let mut taking = TakingKept::new(writing);
+        let left = write_all_through(half, &copies, &mut taking).await?;
+        // As in `write_unwritten_to`.
+        if !left.is_empty() || writing.rest.cut.is_some() {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
 }
 
 /// Write what is left of a message that a write ended in the middle of, if anything, through the
-/// `sendmsg` of `half`. Its file descriptors went with its first byte.
-async fn write_rest_through(half: &mut dyn WriteHalf, rest: &mut Rest) -> io::Result<()> {
-    while let Some(left) = rest.left() {
-        let written = sendmsg(
+/// `sendmsg` of `half`, as far as `writing` has the writes go. Its file descriptors went with its
+/// first byte. Whether it wrote it all.
+async fn write_rest_through(
+    half: &mut dyn WriteHalf,
+    writing: &mut Writing<'_>,
+) -> io::Result<bool> {
+    // A copy of the message, so that `writing` can be asked whether to stop while it is written.
+    while let Some((msg, written)) = writing.rest.cut.clone() {
+        let sent = sendmsg(
             half,
-            left,
+            &msg.data()[written..],
             #[cfg(unix)]
             &[],
+            writing,
         )
         .await?;
-        rest.advance(written);
-    }
-
-    Ok(())
-}
-
-/// Write `msg` through the `sendmsg` of `half`, the file descriptors of the message along with its
-/// first byte, keeping track in `rest` of how far each call takes it.
-async fn write_through(half: &mut dyn WriteHalf, msg: &Message, rest: &mut Rest) -> io::Result<()> {
-    trace!("Sending message: {:?}", msg);
-    let data = msg.data();
-    let mut written = 0;
-    while written < data.len() {
-        #[cfg(unix)]
-        let fds: Vec<_> = if written == 0 {
-            data.fds().iter().map(|fd| fd.as_fd()).collect()
-        } else {
-            vec![]
+        let Some(sent) = sent else {
+            return Ok(false);
         };
-        written += sendmsg(
-            half,
-            &data[written..],
-            #[cfg(unix)]
-            &fds,
-        )
-        .await?;
-        rest.set((written < data.len()).then_some((msg, written)));
+        writing.rest.advance(sent);
     }
-    trace!(
-        "Sent message with serial: {}",
-        msg.primary_header().serial_num()
-    );
 
-    Ok(())
+    Ok(true)
 }
 
-/// One call to the `sendmsg` of `half`. A call that takes none of `buffer` fails, rather than leave
-/// the connection to call again for ever.
-async fn sendmsg(
+/// Write `msgs` through the `sendmsg` of `half`, a message at a time, the file descriptors of each
+/// along with its first byte, telling `progress` how far each call takes them.
+///
+/// Where `progress` says to stop rather than wait for a call ([`Progress::stops`]), the call is
+/// given up on, which writes nothing, and this gives back the messages of which nothing is written,
+/// for the caller to send later. Otherwise it gives back none.
+async fn write_all_through<'m, P>(
+    half: &mut dyn WriteHalf,
+    msgs: &'m [Message],
+    progress: &mut P,
+) -> io::Result<&'m [Message]>
+where
+    P: Progress,
+{
+    for (done, msg) in msgs.iter().enumerate() {
+        trace!("Sending message: {:?}", msg);
+        let data = msg.data();
+        let mut written = 0;
+        while written < data.len() {
+            #[cfg(unix)]
+            let fds: Vec<_> = if written == 0 {
+                data.fds().iter().map(|fd| fd.as_fd()).collect()
+            } else {
+                vec![]
+            };
+            let sent = sendmsg(
+                half,
+                &data[written..],
+                #[cfg(unix)]
+                &fds,
+                progress,
+            )
+            .await?;
+            let Some(sent) = sent else {
+                return Ok(&msgs[done + usize::from(written > 0)..]);
+            };
+            written += sent;
+            let cut = (written < data.len()).then_some((msg, written));
+            progress.wrote(done + usize::from(cut.is_none()), cut);
+        }
+        trace!(
+            "Sent message with serial: {}",
+            msg.primary_header().serial_num()
+        );
+    }
+
+    Ok(&[])
+}
+
+/// One call to the `sendmsg` of `half`: how much it wrote, or `None` where `progress` says to stop
+/// rather than wait for it ([`Progress::stops`]), which gives the call up, so that it writes
+/// nothing. A call that takes none of `buffer` fails, rather than leave the connection to call
+/// again for ever.
+async fn sendmsg<P>(
     half: &mut dyn WriteHalf,
     buffer: &[u8],
     #[cfg(unix)] fds: &[BorrowedFd<'_>],
-) -> io::Result<usize> {
-    match half
-        .sendmsg(
-            buffer,
-            #[cfg(unix)]
-            fds,
-        )
-        .await?
-    {
-        0 => Err(io::Error::new(
+    progress: &mut P,
+) -> io::Result<Option<usize>>
+where
+    P: Progress,
+{
+    let mut sending = half.sendmsg(
+        buffer,
+        #[cfg(unix)]
+        fds,
+    );
+    let sent = poll_fn(|cx| match sending.as_mut().poll(cx) {
+        Poll::Pending if progress.stops(cx) => Poll::Ready(Ok(None)),
+        polled => polled.map_ok(Some),
+    })
+    .await?;
+    match sent {
+        Some(0) => Err(io::Error::new(
             io::ErrorKind::WriteZero,
             "the write half took none of what it was given",
         )),
-        written => Ok(written),
+        sent => Ok(sent),
     }
 }
 
-/// What is left to write of the message that a write ended in the middle of, if any.
-#[derive(Debug)]
+/// Flush `half`, as a send does once it wrote its messages, unless `progress` says to stop rather
+/// than wait for the flush ([`Progress::stops`]), which gives it up: what the half holds on to is
+/// then left for the next flush.
+async fn flush_through<P>(half: &mut dyn WriteHalf, progress: &mut P) -> io::Result<()>
+where
+    P: Progress,
+{
+    let mut flushing = half.flush();
+
+    poll_fn(|cx| match flushing.as_mut().poll(cx) {
+        Poll::Pending if progress.stops(cx) => Poll::Ready(Ok(())),
+        polled => polled,
+    })
+    .await
+}
+
+/// The writes of a send, or of a flush, which keep track in `rest` of how far each takes the
+/// messages.
+struct Writing<'r> {
+    rest: &'r mut Rest,
+    /// Whether the writes wait for the socket for as long as it takes, as those of a flush do,
+    /// rather than stop once a hand-over of the connection is prepared, as those of a send do.
+    #[cfg(all(unix, feature = "handover"))]
+    waits: bool,
+}
+
+impl<'r> Writing<'r> {
+    /// The writes of a send, which stop, rather than wait for the socket, once a hand-over of the
+    /// connection is prepared.
+    fn sending(rest: &'r mut Rest) -> Self {
+        Self {
+            rest,
+            #[cfg(all(unix, feature = "handover"))]
+            waits: false,
+        }
+    }
+
+    /// The writes of a flush, or of a hand-over, which wait for the socket for as long as it takes.
+    fn waiting(rest: &'r mut Rest) -> Self {
+        Self {
+            rest,
+            #[cfg(all(unix, feature = "handover"))]
+            waits: true,
+        }
+    }
+}
+
+impl Progress for Writing<'_> {
+    // Inlined, as every write calls it.
+    #[inline]
+    fn wrote(&mut self, _done: usize, cut: Option<(&Message, usize)>) {
+        self.rest.set(cut);
+    }
+
+    #[cfg(all(unix, feature = "handover"))]
+    fn stops(&mut self, cx: &mut Context<'_>) -> bool {
+        !self.waits && self.rest.prepared(cx)
+    }
+
+    // Without a hand-over, nothing has a send stop.
+    #[cfg(not(all(unix, feature = "handover")))]
+    fn stops(&mut self, _cx: &mut Context<'_>) -> bool {
+        false
+    }
+}
+
+/// The writes of the messages that sends kept, out of copies of the first few of them, as
+/// [`Rest::kept_copies`] gives: each is taken out of `kept` as it is started on, as the writes
+/// can't hold on to `kept` while they do that.
+#[cfg(all(unix, feature = "handover"))]
+struct TakingKept<'w, 'r> {
+    writing: &'w mut Writing<'r>,
+    /// How many of the copies the writes started on.
+    taken: usize,
+}
+
+#[cfg(all(unix, feature = "handover"))]
+impl<'w, 'r> TakingKept<'w, 'r> {
+    /// The writes of copies of the first messages that sends kept, as `writing` has them go.
+    fn new(writing: &'w mut Writing<'r>) -> Self {
+        Self { writing, taken: 0 }
+    }
+}
+
+#[cfg(all(unix, feature = "handover"))]
+impl Progress for TakingKept<'_, '_> {
+    fn wrote(&mut self, done: usize, cut: Option<(&Message, usize)>) {
+        let started = done + usize::from(cut.is_some());
+        self.writing.rest.took(started - self.taken, cut);
+        self.taken = started;
+    }
+
+    fn stops(&mut self, cx: &mut Context<'_>) -> bool {
+        self.writing.stops(cx)
+    }
+}
+
+/// What a connection has left to write: the rest of the message that a write ended in the middle
+/// of, if any, and the messages after it that sends kept, once a hand-over of the connection is
+/// prepared.
 struct Rest {
-    /// The message, and how many of its bytes are written.
+    /// The message that a write ended in the middle of, and how many of its bytes are written.
     cut: Option<(Message, usize)>,
-    /// Where how many bytes are left is kept, for `Connection::unwritten_len` to read.
+    /// The messages that sends kept, none of whose bytes are written, oldest first.
+    #[cfg(all(unix, feature = "handover"))]
+    kept: VecDeque<Message>,
+    /// How many bytes the messages of `kept` come to.
+    #[cfg(all(unix, feature = "handover"))]
+    kept_len: usize,
+    /// Notified once a hand-over of the connection is prepared, from the first time that a send
+    /// waits for the socket on.
+    #[cfg(all(unix, feature = "handover"))]
+    listener: Option<EventListener>,
+    /// Where how many bytes are left is kept, for `Connection::unwritten_len` to read, and whether
+    /// a hand-over of the connection is prepared.
     status: Arc<SocketStatus>,
 }
 
 impl Rest {
-    /// Whether nothing is left.
-    fn is_empty(&self) -> bool {
-        self.cut.is_none()
+    /// Nothing left, for a connection whose status is `status`.
+    fn new(status: Arc<SocketStatus>) -> Self {
+        Self {
+            cut: None,
+            #[cfg(all(unix, feature = "handover"))]
+            kept: VecDeque::new(),
+            #[cfg(all(unix, feature = "handover"))]
+            kept_len: 0,
+            #[cfg(all(unix, feature = "handover"))]
+            listener: None,
+            status,
+        }
     }
 
-    /// What is left of the message, if anything.
-    fn left(&self) -> Option<&[u8]> {
-        self.cut
-            .as_ref()
-            .map(|(msg, written)| &msg.data()[*written..])
+    /// Whether nothing is left.
+    #[cfg(all(unix, feature = "handover"))]
+    fn is_empty(&self) -> bool {
+        self.cut.is_none() && self.kept.is_empty()
+    }
+
+    /// Whether nothing is left.
+    #[cfg(not(all(unix, feature = "handover")))]
+    fn is_empty(&self) -> bool {
+        self.cut.is_none()
     }
 
     /// Note how far a write took the messages that it wrote: `written` bytes into `msg`, or to the
@@ -415,15 +708,13 @@ impl Rest {
     fn set(&mut self, cut: Option<(&Message, usize)>) {
         let Some((msg, written)) = cut else {
             if self.cut.take().is_some() {
-                self.status.unwritten.store(0, Ordering::Relaxed);
+                self.store();
             }
 
             return;
         };
-        self.status
-            .unwritten
-            .store(msg.data().len() - written, Ordering::Relaxed);
         self.cut = Some((msg.clone(), written));
+        self.store();
     }
 
     /// Note that a write took `len` more bytes of what is left of the message.
@@ -432,15 +723,110 @@ impl Rest {
             return;
         };
         *written += len;
-        let left = msg.data().len() - *written;
-        self.status.unwritten.store(left, Ordering::Relaxed);
-        if left == 0 {
+        if *written == msg.data().len() {
             trace!(
                 "Sent message with serial: {}",
                 msg.primary_header().serial_num()
             );
             self.cut = None;
         }
+        self.store();
+    }
+
+    /// Keep `msgs`, of which nothing is written, after what is left, for the next send or flush
+    /// to write, as a send does once a hand-over of the connection is prepared.
+    ///
+    /// Inlined, as every send calls it, most of the time with nothing to keep.
+    #[inline]
+    fn keep(&mut self, msgs: &[Message]) {
+        #[cfg(all(unix, feature = "handover"))]
+        if !msgs.is_empty() {
+            self.keep_all(msgs);
+        }
+        // The writes of a send only stop short once a hand-over is prepared.
+        #[cfg(not(all(unix, feature = "handover")))]
+        debug_assert!(msgs.is_empty(), "a send left messages without a hand-over");
+    }
+
+    /// Keep `msgs`, which are some, as [`Rest::keep`] does.
+    #[cfg(all(unix, feature = "handover"))]
+    #[cold]
+    fn keep_all(&mut self, msgs: &[Message]) {
+        self.kept_len += msgs.iter().map(|msg| msg.data().len()).sum::<usize>();
+        self.kept.extend(msgs.iter().cloned());
+        self.store();
+    }
+
+    /// Copies of the first messages that sends kept, as many as a write takes at most, for writes
+    /// that take them out of `kept` as they go ([`TakingKept`]).
+    #[cfg(all(unix, feature = "handover"))]
+    fn kept_copies(&self) -> Vec<Message> {
+        self.kept.iter().take(MESSAGES_PER_WRITE).cloned().collect()
+    }
+
+    /// Note that writes started on the first `taken` messages of `kept` since they were last told
+    /// of: those before the last are written whole, and so is the last, unless the write ended in
+    /// the middle of it, as `cut` then tells, with how many of its bytes are written.
+    #[cfg(all(unix, feature = "handover"))]
+    fn took(&mut self, taken: usize, cut: Option<(&Message, usize)>) {
+        for msg in self.kept.drain(..taken) {
+            self.kept_len -= msg.data().len();
+        }
+        self.cut = cut.map(|(msg, written)| (msg.clone(), written));
+        self.store();
+    }
+
+    /// Let go of all that is left.
+    fn clear(&mut self) {
+        self.cut = None;
+        #[cfg(all(unix, feature = "handover"))]
+        {
+            self.kept.clear();
+            self.kept_len = 0;
+        }
+        self.store();
+    }
+
+    /// Whether a hand-over of the connection is prepared, which has a send stop rather than wait
+    /// for the socket. Until it is, the task of `cx` is woken once it is.
+    #[cfg(all(unix, feature = "handover"))]
+    fn prepared(&mut self, cx: &mut Context<'_>) -> bool {
+        // Armed before the flag is first looked at, so that a hand-over prepared from then on is
+        // seen, by the flag or through the listener.
+        let prepared = &self.status.prepared;
+        let listener = self.listener.get_or_insert_with(|| prepared.listen());
+
+        prepared.is_set() || Pin::new(listener).poll(cx).is_ready()
+    }
+
+    /// Note how many bytes are left, for `Connection::unwritten_len` to read.
+    #[inline]
+    fn store(&self) {
+        let left = self
+            .cut
+            .as_ref()
+            .map_or(0, |(msg, written)| msg.data().len() - written);
+        #[cfg(all(unix, feature = "handover"))]
+        let left = left + self.kept_len;
+        self.status.unwritten.store(left, Ordering::Relaxed);
+    }
+}
+
+/// Shows how much is left rather than what, which can be many messages, as this is part of what a
+/// connection shows of itself.
+impl fmt::Debug for Rest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut rest = f.debug_struct("Rest");
+        let cut = self
+            .cut
+            .as_ref()
+            .map(|(msg, written)| msg.data().len() - written);
+        rest.field("cut", &cut);
+        #[cfg(all(unix, feature = "handover"))]
+        rest.field("kept", &self.kept.len())
+            .field("kept_len", &self.kept_len);
+
+        rest.finish_non_exhaustive()
     }
 }
 
@@ -494,12 +880,22 @@ mod tests {
         time::Duration,
     };
 
+    #[cfg(feature = "handover")]
+    use std::{
+        collections::VecDeque,
+        sync::{Mutex, atomic::AtomicBool},
+        task::{Context, Poll, Wake, Waker},
+    };
+
     use futures_lite::future::poll_once;
     use ntest::timeout;
     use test_log::test;
 
     #[cfg(feature = "handover")]
-    use crate::MessageStream;
+    use zruntime::Event;
+
+    #[cfg(feature = "handover")]
+    use super::SocketWrite;
     #[cfg(feature = "unixexec")]
     use crate::{
         Address,
@@ -516,6 +912,12 @@ mod tests {
             io::{Reader, RegisteredIo, SocketOps, UnixOps, registered, tests::Recording},
             test_runtime::under_every_runtime,
         },
+    };
+    #[cfg(feature = "handover")]
+    use crate::{
+        MessageStream,
+        connection::{handover::StopStatus, socket::Writes, socket_reader::SocketStatus},
+        runtime::io::PollSend,
     };
 
     /// A send dropped midway, as the peer doesn't read, leaves the rest of its message, which the
@@ -968,6 +1370,338 @@ mod tests {
         });
     }
 
+    /// Once a hand-over of the connection is prepared, sends don't wait for a peer that doesn't
+    /// read: each writes what the socket takes at once, and the connection keeps the rest, in
+    /// order, which `unwritten_len` counts to the byte. Once the peer reads, a flush writes it all.
+    #[cfg(feature = "handover")]
+    #[test]
+    #[timeout(15000)]
+    fn sends_dont_wait_once_a_hand_over_is_prepared() {
+        under_every_runtime(|runtime| async move {
+            let (conn, peer) = served(&runtime).await;
+            let (before, big, after, next) = (signal(1), big_signal(), signal(2), signal(3));
+
+            assert!(conn.prepare_hand_over());
+            assert!(conn.prepare_hand_over(), "the second call refused");
+
+            let msgs = [before.clone(), big.clone(), after.clone()];
+            without_waiting(&runtime, conn.send_all(&msgs)).await;
+            let left = conn.unwritten_len();
+            let cut = left - after.data().len();
+            assert!(
+                0 < cut && cut < big.data().len(),
+                "{cut} of {} bytes left to write",
+                big.data().len(),
+            );
+            without_waiting(&runtime, conn.send(&next)).await;
+            assert_eq!(conn.unwritten_len(), left + next.data().len());
+            let sent = [&before, &big, &after, &next]
+                .iter()
+                .flat_map(|msg| msg.data().to_vec())
+                .collect::<Vec<_>>();
+            let reading = read_in_the_background(&peer, sent.len());
+            conn.flush().await.unwrap();
+
+            assert_eq!(reading.join().unwrap(), sent);
+            assert_eq!(conn.unwritten_len(), 0);
+            assert_nothing_to_read(&peer);
+        });
+    }
+
+    /// A send that waits for the socket as a hand-over of the connection is prepared is woken, and
+    /// stops waiting: the connection keeps the rest of the message that it was in the middle of,
+    /// and the messages after it.
+    #[cfg(feature = "handover")]
+    #[test]
+    #[timeout(15000)]
+    fn a_send_waiting_when_a_hand_over_is_prepared_returns() {
+        under_every_runtime(|runtime| async move {
+            let (conn, peer) = served(&runtime).await;
+            let (before, big, after) = (signal(1), big_signal(), signal(2));
+            let msgs = [before.clone(), big.clone(), after.clone()];
+            let mut sending = pin!(conn.send_all(&msgs));
+            stuck(&runtime, sending.as_mut(), &peer).await;
+            let woken = Arc::new(Woken::default());
+            let waker = Waker::from(woken.clone());
+            let mut cx = Context::from_waker(&waker);
+            assert!(sending.as_mut().poll(&mut cx).is_pending());
+            assert!(!woken.0.load(Ordering::Relaxed));
+
+            assert!(conn.prepare_hand_over());
+
+            assert!(woken.0.load(Ordering::Relaxed), "the send wasn't woken");
+            let sent = sending.as_mut().poll(&mut cx);
+            assert!(matches!(sent, Poll::Ready(Ok(()))), "{sent:?}");
+            let cut = conn.unwritten_len() - after.data().len();
+            assert!(
+                0 < cut && cut < big.data().len(),
+                "{cut} of {} bytes left to write",
+                big.data().len(),
+            );
+            let sent: Vec<u8> = msgs.iter().flat_map(|msg| msg.data().to_vec()).collect();
+            let reading = read_in_the_background(&peer, sent.len());
+            conn.flush().await.unwrap();
+
+            assert_eq!(reading.join().unwrap(), sent);
+            assert_eq!(conn.unwritten_len(), 0);
+        });
+    }
+
+    /// Once a hand-over of the connection is prepared, a send that the socket takes whole leaves
+    /// nothing to write, whatever the runtime knows of the socket.
+    #[cfg(feature = "handover")]
+    #[test]
+    #[timeout(15000)]
+    fn a_prepared_send_writes_what_the_socket_takes_at_once() {
+        under_every_runtime(|runtime| async move {
+            let (conn, peer) = served(&runtime).await;
+            let msgs = [signal(1), signal(2), signal(3)];
+            assert!(conn.prepare_hand_over());
+
+            without_waiting(&runtime, conn.send(&msgs[0])).await;
+            without_waiting(&runtime, conn.send_all(&msgs[1..])).await;
+
+            assert_eq!(conn.unwritten_len(), 0);
+            let mut received = vec![0; msgs.iter().map(|msg| msg.data().len()).sum()];
+            (&peer).read_exact(&mut received).unwrap();
+            let sent: Vec<u8> = msgs.iter().flat_map(|msg| msg.data().to_vec()).collect();
+            assert_eq!(received, sent);
+        });
+    }
+
+    /// A send that fails once a hand-over of the connection is prepared, as the peer went, keeps
+    /// none of its messages.
+    #[cfg(feature = "handover")]
+    #[test]
+    #[timeout(15000)]
+    fn a_prepared_send_that_fails_keeps_nothing() {
+        under_every_runtime(|runtime| async move {
+            let (conn, peer) = served(&runtime).await;
+            assert!(conn.prepare_hand_over());
+            drop(peer);
+
+            let sent = conn.send_all(&[signal(1), signal(2)]).await;
+
+            let Err(Error::InputOutput(e)) = &sent else {
+                panic!("the send to a peer that went didn't fail: {sent:?}");
+            };
+            assert_eq!(e.kind(), ErrorKind::BrokenPipe, "{e}");
+            assert_eq!(conn.unwritten_len(), 0);
+        });
+    }
+
+    /// The file descriptors of a message that a send kept go with its first byte, once a flush
+    /// writes it.
+    #[cfg(feature = "handover")]
+    #[test]
+    #[timeout(15000)]
+    fn a_kept_message_goes_with_its_descriptors() {
+        under_every_runtime(|runtime| async move {
+            let (conn, peer) = served(&runtime).await;
+            let (read_end, _write_end) = io::pipe().unwrap();
+            let big = big_signal();
+            let with_fd = Message::signal(PATH, INTERFACE, "WithFd")
+                .build(&Fd::from(read_end.as_fd()))
+                .unwrap();
+            assert!(conn.prepare_hand_over());
+            without_waiting(&runtime, conn.send(&big)).await;
+            without_waiting(&runtime, conn.send(&with_fd)).await;
+            assert!(conn.unwritten_len() > with_fd.data().len());
+
+            let mut peer = Reader::new(Arc::new(registered(&runtime, peer, UnixOps).unwrap()));
+            let receiving = async {
+                let (mut bytes, mut fds) = (vec![], vec![]);
+                let first = peer.receive_message(0, &mut bytes, &mut fds).await.unwrap();
+                let second = peer.receive_message(1, &mut bytes, &mut fds).await.unwrap();
+
+                (first, second)
+            };
+            let (flushed, (first, second)) = futures_util::join!(conn.flush(), receiving);
+
+            flushed.unwrap();
+            assert_eq!(&first.data()[..], &big.data()[..]);
+            assert_eq!(first.data().fds().len(), 0);
+            assert_eq!(&second.data()[..], &with_fd.data()[..]);
+            assert_eq!(second.data().fds().len(), 1);
+        });
+    }
+
+    /// A flush writes the messages that sends kept several at a time, as a send writes those that
+    /// it is given.
+    #[cfg(feature = "handover")]
+    #[test]
+    #[timeout(15000)]
+    fn kept_messages_go_in_writes_of_several() {
+        under_every_runtime(|runtime| async move {
+            let ops = Recording::default();
+            let writes = ops.writes.clone();
+            let (conn, peer) = over(&runtime, ops).await;
+            let big = big_signal();
+            let msgs: Vec<_> = (0..20).map(signal).collect();
+            assert!(conn.prepare_hand_over());
+            without_waiting(&runtime, conn.send(&big)).await;
+            without_waiting(&runtime, conn.send_all(&msgs)).await;
+            writes.lock().unwrap().clear();
+
+            let sent: Vec<u8> = [&big]
+                .into_iter()
+                .chain(&msgs)
+                .flat_map(|msg| msg.data().to_vec())
+                .collect();
+            let reading = read_in_the_background(&peer, sent.len());
+            conn.flush().await.unwrap();
+
+            assert_eq!(reading.join().unwrap(), sent);
+            // The rest of the big message goes in writes of its own, and the first write of the
+            // kept messages takes as many as a write takes.
+            let writes = writes.lock().unwrap();
+            assert!(writes.contains(&(16, 0)), "{writes:?}");
+        });
+    }
+
+    /// The messages of a send go after what sends kept, even where the writes of that stop in the
+    /// middle of the last message that they started on, as the socket takes no more: the send
+    /// then keeps its messages, whatever the socket takes of them by then, and a flush writes all
+    /// of it, in order.
+    #[cfg(feature = "handover")]
+    #[test]
+    #[timeout(15000)]
+    fn a_send_keeps_its_messages_until_what_was_kept_is_written() {
+        let (kept, msg) = (signal(1), signal(2));
+        let half = kept.data().len() / 2;
+        let socket = Arc::new(Scripted::new([None, Some(half), None]));
+        let status = prepared_status();
+        let mut write = SocketWrite::new(
+            Box::new(Unused),
+            Some(Writes::Driven(socket.clone())),
+            status.clone(),
+            None,
+        );
+
+        keep_until_what_was_kept_is_written(&mut write, &socket, &status, &kept, &msg);
+    }
+
+    /// The messages of a send through a write half of your own that can resume writes go after
+    /// what sends kept, as they do over a socket that zbus drives.
+    #[cfg(feature = "handover")]
+    #[test]
+    #[timeout(15000)]
+    fn a_send_through_a_half_keeps_its_messages_until_what_was_kept_is_written() {
+        let (kept, msg) = (signal(1), signal(2));
+        let half = kept.data().len() / 2;
+        let socket = Arc::new(Scripted::new([None, Some(half), None]));
+        let status = prepared_status();
+        let mut write = SocketWrite::new(
+            Box::new(ScriptedHalf(socket.clone())),
+            None,
+            status.clone(),
+            None,
+        );
+
+        keep_until_what_was_kept_is_written(&mut write, &socket, &status, &kept, &msg);
+    }
+
+    /// A connection over a write half of your own that can't resume writes isn't prepared for a
+    /// hand-over: a send waits for the half as before.
+    #[cfg(feature = "handover")]
+    #[test]
+    #[timeout(15000)]
+    fn a_connection_over_a_half_that_cant_resume_writes_isnt_prepared() {
+        under_every_runtime(|runtime| async move {
+            let (conn, peer, _) = over_a_half_of_your_own(&runtime, false, None).await;
+            let big = big_signal();
+            let mut sending = pin!(conn.send(&big));
+            stuck(&runtime, sending.as_mut(), &peer).await;
+
+            assert!(!conn.prepare_hand_over());
+
+            let sent = poll_once(sending.as_mut()).await;
+            assert!(sent.is_none(), "the send stopped waiting: {sent:?}");
+            assert_eq!(conn.unwritten_len(), 0);
+        });
+    }
+
+    /// Once a hand-over of a connection over a write half of your own that can resume writes is
+    /// prepared, sends don't wait for the half: a call to its `sendmsg` that waits is given up on,
+    /// and the connection keeps what is left, which a flush writes, before it flushes the half.
+    #[cfg(feature = "handover")]
+    #[test]
+    #[timeout(15000)]
+    fn sends_through_a_half_that_can_resume_writes_dont_wait_once_prepared() {
+        under_every_runtime(|runtime| async move {
+            let (conn, peer, counts) = over_a_half_of_your_own(&runtime, true, None).await;
+            let (big, next) = (big_signal(), signal(1));
+            assert!(conn.prepare_hand_over());
+
+            without_waiting(&runtime, conn.send(&big)).await;
+            without_waiting(&runtime, conn.send(&next)).await;
+
+            // A runtime that waits to hear that the socket is writable before it writes has
+            // `sendmsg` wait at its first call, which leaves the whole message to write.
+            let cut = conn.unwritten_len() - next.data().len();
+            assert!(
+                0 < cut && cut <= big.data().len(),
+                "{cut} of {} bytes left to write",
+                big.data().len(),
+            );
+            let flushes = counts.flushes.load(Ordering::Relaxed);
+            let sent = [&big.data()[..], &next.data()[..]].concat();
+            let reading = read_in_the_background(&peer, sent.len());
+            conn.flush().await.unwrap();
+
+            assert_eq!(reading.join().unwrap(), sent);
+            assert_eq!(conn.unwritten_len(), 0);
+            assert_eq!(counts.flushes.load(Ordering::Relaxed), flushes + 1);
+        });
+    }
+
+    /// A hand-over of a connection whose sends kept messages, once it was prepared, writes them
+    /// before it commits, once the peer reads.
+    #[cfg(feature = "handover")]
+    #[test]
+    #[timeout(15000)]
+    fn what_sends_kept_goes_out_before_a_hand_over() {
+        under_every_runtime(|runtime| async move {
+            let (conn, peer) = served(&runtime).await;
+            let (big, next) = (big_signal(), signal(1));
+            assert!(conn.prepare_hand_over());
+            without_waiting(&runtime, conn.send(&big)).await;
+            without_waiting(&runtime, conn.send(&next)).await;
+
+            let sent = [&big.data()[..], &next.data()[..]].concat();
+            let reading = read_in_the_background(&peer, sent.len());
+            let handed_over = MessageStream::from(&conn).hand_over().await;
+
+            assert!(handed_over.is_ok(), "{handed_over:?}");
+            assert_eq!(reading.join().unwrap(), sent);
+            assert_eq!(conn.unwritten_len(), 0);
+        });
+    }
+
+    /// Closing a connection whose sends kept messages, once a hand-over of it was prepared, lets
+    /// go of them, and a flush fails from then on.
+    #[cfg(feature = "handover")]
+    #[test]
+    #[timeout(15000)]
+    fn closing_a_prepared_connection_lets_go_of_what_sends_kept() {
+        under_every_runtime(|runtime| async move {
+            let (conn, _peer) = served(&runtime).await;
+            assert!(conn.prepare_hand_over());
+            without_waiting(&runtime, conn.send(&big_signal())).await;
+            without_waiting(&runtime, conn.send(&signal(1))).await;
+            assert!(conn.unwritten_len() > 0);
+
+            conn.clone().close().await.unwrap();
+
+            assert_eq!(conn.unwritten_len(), 0);
+            let flushed = conn.flush().await;
+            let Err(Error::InputOutput(e)) = &flushed else {
+                panic!("the flush of a closed connection didn't fail: {flushed:?}");
+            };
+            assert_eq!(e.kind(), ErrorKind::NotConnected, "{e}");
+        });
+    }
+
     /// The server end of a peer-to-peer connection over a unix socket pair, on `runtime`, which
     /// zbus drives itself, and the other end of the pair, through which the test plays the client.
     async fn served(runtime: &Runtime) -> (Connection, UnixStream) {
@@ -1175,6 +1909,169 @@ mod tests {
         assert_eq!(conn.unwritten_len(), 0);
     }
 
+    /// Sends `kept` through `write`, of a connection whose hand-over is prepared and whose status
+    /// is `status`, which `socket` takes none of, and then `msg`, of which `socket` takes nothing,
+    /// as it takes half of `kept`, then no more: `msg` is kept. Then empties `socket`, and flushes.
+    #[cfg(feature = "handover")]
+    fn keep_until_what_was_kept_is_written(
+        write: &mut SocketWrite,
+        socket: &Scripted,
+        status: &SocketStatus,
+        kept: &Message,
+        msg: &Message,
+    ) {
+        let half = kept.data().len() / 2;
+        futures_lite::future::block_on(async {
+            write.send_message(kept).await.unwrap();
+            assert_eq!(status.unwritten.load(Ordering::Relaxed), kept.data().len());
+
+            write.send_message(msg).await.unwrap();
+
+            assert_eq!(socket.written(), &kept.data()[..half]);
+            let unwritten = kept.data().len() - half + msg.data().len();
+            assert_eq!(status.unwritten.load(Ordering::Relaxed), unwritten);
+            socket.empty();
+            write.flush().await.unwrap();
+        });
+
+        assert_eq!(
+            socket.written(),
+            [&kept.data()[..], &msg.data()[..]].concat()
+        );
+        assert_eq!(status.unwritten.load(Ordering::Relaxed), 0);
+    }
+
+    /// The status of a connection whose hand-over is prepared.
+    #[cfg(feature = "handover")]
+    fn prepared_status() -> Arc<SocketStatus> {
+        let status = Arc::new(SocketStatus {
+            activity_event: Event::new(),
+            closed: AtomicBool::new(false),
+            closed_event: Event::new(),
+            unwritten: AtomicUsize::new(0),
+            stop: StopStatus::new(),
+            prepared: Default::default(),
+        });
+        status.prepared.set();
+
+        status
+    }
+
+    /// A socket of the test's own, as a connection writes a socket that zbus drives. While it is
+    /// full, `poll_send` takes nothing, and each `try_send` takes as many bytes at most as the next
+    /// of its attempts says, or none, for an attempt of `None`, until it is out of attempts, and
+    /// then all. Once it is emptied, `poll_send` takes all too.
+    #[cfg(feature = "handover")]
+    #[derive(Debug)]
+    struct Scripted {
+        full: AtomicBool,
+        attempts: Mutex<VecDeque<Option<usize>>>,
+        /// What it took, in order.
+        written: Mutex<Vec<u8>>,
+    }
+
+    #[cfg(feature = "handover")]
+    impl Scripted {
+        /// A full socket, which `try_send` makes `attempts` at.
+        fn new(attempts: impl IntoIterator<Item = Option<usize>>) -> Self {
+            Self {
+                full: AtomicBool::new(true),
+                attempts: Mutex::new(attempts.into_iter().collect()),
+                written: Mutex::default(),
+            }
+        }
+
+        /// Have it take all that it is given from now on, as a socket whose peer reads at last.
+        fn empty(&self) {
+            self.full.store(false, Ordering::Relaxed);
+        }
+
+        /// What it took, in order.
+        fn written(&self) -> Vec<u8> {
+            self.written.lock().unwrap().clone()
+        }
+
+        /// Takes the first `len` bytes of `buffers`, or all of them if there are fewer.
+        fn take(&self, buffers: &[IoSlice<'_>], len: usize) -> usize {
+            let mut written = self.written.lock().unwrap();
+            let mut taken = 0;
+            for buffer in buffers {
+                let part = &buffer[..buffer.len().min(len - taken)];
+                written.extend_from_slice(part);
+                taken += part.len();
+            }
+
+            taken
+        }
+    }
+
+    #[cfg(feature = "handover")]
+    impl PollSend for Scripted {
+        fn poll_send(
+            &self,
+            _cx: &mut Context<'_>,
+            buffers: &[IoSlice<'_>],
+            _fds: &[BorrowedFd<'_>],
+        ) -> Poll<io::Result<usize>> {
+            if self.full.load(Ordering::Relaxed) {
+                return Poll::Pending;
+            }
+
+            Poll::Ready(Ok(self.take(buffers, usize::MAX)))
+        }
+
+        fn try_send(&self, buffers: &[IoSlice<'_>], _fds: &[BorrowedFd<'_>]) -> io::Result<usize> {
+            match self.attempts.lock().unwrap().pop_front() {
+                Some(None) => Err(ErrorKind::WouldBlock.into()),
+                Some(Some(len)) => Ok(self.take(buffers, len)),
+                None => Ok(self.take(buffers, usize::MAX)),
+            }
+        }
+    }
+
+    /// A write half of your own that can resume writes, over a [`Scripted`] socket, whose `sendmsg`
+    /// waits for as long as the socket takes nothing.
+    #[cfg(feature = "handover")]
+    #[derive(Debug)]
+    struct ScriptedHalf(Arc<Scripted>);
+
+    #[cfg(feature = "handover")]
+    #[async_trait::async_trait]
+    impl WriteHalf for ScriptedHalf {
+        async fn sendmsg(&mut self, buffer: &[u8], _fds: &[BorrowedFd<'_>]) -> io::Result<usize> {
+            let buffers = [IoSlice::new(buffer)];
+            let sent = match self.0.full.load(Ordering::Relaxed) {
+                true => self.0.try_send(&buffers, &[]),
+                false => Ok(self.0.take(&buffers, usize::MAX)),
+            };
+            match sent {
+                Err(e) if e.kind() == ErrorKind::WouldBlock => std::future::pending().await,
+                sent => sent,
+            }
+        }
+
+        async fn close(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn can_resume_writes(&self) -> bool {
+            true
+        }
+    }
+
+    /// The write half of a socket that zbus drives, which a connection writes directly instead.
+    #[cfg(feature = "handover")]
+    #[derive(Debug)]
+    struct Unused;
+
+    #[cfg(feature = "handover")]
+    #[async_trait::async_trait]
+    impl WriteHalf for Unused {
+        async fn close(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
     /// Polls `sending` until it wrote part of its message to the socket of `peer`, which doesn't
     /// read, and waits for room for the rest, then drops it.
     async fn stuck<F>(runtime: &Runtime, mut sending: Pin<&mut F>, peer: &UnixStream)
@@ -1189,6 +2086,30 @@ mod tests {
             );
             // For the runtime to see the socket writable, if it waits for that first.
             runtime.sleep(Duration::from_millis(1)).await;
+        }
+    }
+
+    /// Waits for `sending`, on `runtime`, which is not to wait for a peer that doesn't read: a send
+    /// that waited for it would time out. It can still give way to the other tasks, as a runtime
+    /// that counts what a task does between its waits has it do now and then.
+    #[cfg(feature = "handover")]
+    async fn without_waiting<F>(runtime: &Runtime, sending: F)
+    where
+        F: Future<Output = Result<()>>,
+    {
+        let sent = runtime.timeout(sending, Duration::from_secs(5)).await;
+        assert!(sent.is_ok(), "the send didn't go through: {sent:?}");
+    }
+
+    /// A waker that notes that it was woken.
+    #[cfg(feature = "handover")]
+    #[derive(Debug, Default)]
+    struct Woken(AtomicBool);
+
+    #[cfg(feature = "handover")]
+    impl Wake for Woken {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::Relaxed);
         }
     }
 

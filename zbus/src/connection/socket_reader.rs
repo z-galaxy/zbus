@@ -29,6 +29,8 @@ use crate::{
 #[cfg(feature = "handover")]
 use super::handover::{ReadParts, ReaderEnd, StopStatus, ends_input, stopped_error};
 use super::socket::ReadHalf;
+#[cfg(all(unix, feature = "handover"))]
+use super::socket_write::Prepared;
 
 #[derive(Debug)]
 pub(crate) struct SocketReader {
@@ -322,6 +324,10 @@ pub(super) struct SocketStatus {
     /// Whether the reader is to stop, or did, for the connection to be handed over.
     #[cfg(feature = "handover")]
     pub stop: StopStatus,
+    /// Whether a hand-over of the connection is prepared, which has its sends stop, rather than
+    /// wait for the socket.
+    #[cfg(all(unix, feature = "handover"))]
+    pub prepared: Prepared,
 }
 
 #[cfg(all(test, feature = "p2p"))]
