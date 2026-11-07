@@ -466,12 +466,10 @@ async fn fallback_registering_served_objects_() {
     let items = format!("{manager}/items");
     let one = format!("{items}/one");
     let setup = Setup::new(Builder::session().serve_at(manager, ObjectManager)).await;
-    setup
-        .service
-        .object_server()
-        .at_fallback(items.as_str(), Demo { label: "fallback" })
-        .await
-        .unwrap();
+
+    // Creating the stream waits for the match rule to be in place, so no signal is missed. A
+    // stream created once the fallback is registered could still get the signal of the fallback,
+    // as the bus orders no message of one connection against those of another.
     let proxy = ObjectManagerProxy::builder(&setup.client)
         .destination(setup.dest.as_str())
         .path(manager)
@@ -479,6 +477,16 @@ async fn fallback_registering_served_objects_() {
         .await
         .unwrap();
     let mut added_stream = proxy.receive_interfaces_added().await.unwrap();
+    setup
+        .service
+        .object_server()
+        .at_fallback(items.as_str(), Demo { label: "fallback" })
+        .await
+        .unwrap();
+    let signals = added(&mut added_stream, 1).await;
+    let expected_signals =
+        BTreeMap::from([(items.clone(), (vec![DEMO.to_string()], Some(items.clone())))]);
+    assert_eq!(signals, expected_signals);
 
     // A `&self` method of the fallback registers an object that the fallback serves, which the
     // `ObjectManager` then reports with the properties of the fallback.
