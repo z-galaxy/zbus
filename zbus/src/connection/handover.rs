@@ -1611,10 +1611,10 @@ mod tests {
         });
     }
 
-    /// A send through a write half of your own, cut off midway, keeps a connection from being
-    /// handed over, as the socket may hold a part of a message, of which the peer could make no
-    /// sense. The hand-over finds that out before it stops the connection reading, so the
-    /// connection reads on. It still sends, and closing it shuts the socket down.
+    /// A send through a write half of your own that can't resume writes, cut off midway, keeps a
+    /// connection from being handed over, as the socket may hold a part of a message, of which the
+    /// peer could make no sense. The hand-over finds that out before it stops the connection
+    /// reading, so the connection reads on. It still sends, and closing it shuts the socket down.
     #[cfg(unix)]
     #[test]
     #[timeout(15000)]
@@ -1720,8 +1720,8 @@ mod tests {
     }
 
     /// A hand-over that fails once it stopped the connection reading, as a send under way through
-    /// a write half of your own is cut off midway, leaves the messages that it took off its stream
-    /// with the stream, which yields them, then ends.
+    /// a write half of your own that can't resume writes is cut off midway, leaves the messages
+    /// that it took off its stream with the stream, which yields them, then ends.
     #[cfg(unix)]
     #[test]
     #[timeout(15000)]
@@ -2598,8 +2598,9 @@ mod tests {
         (stream, peer)
     }
 
-    /// As `over_a_socket_pair`, but through a write half of your own that only sends bytes, so
-    /// that a send that is cut off midway can leave part of a message in the socket.
+    /// As `over_a_socket_pair`, but through a write half of your own that only sends bytes, and
+    /// can't resume writes, so that a send that is cut off midway can leave part of a message in
+    /// the socket.
     #[cfg(unix)]
     async fn over_a_socket_pair_of_your_own(runtime: &Runtime) -> (MessageStream, UnixStream) {
         let (peer, theirs) = UnixStream::pair().unwrap();
@@ -2621,7 +2622,7 @@ mod tests {
     }
 
     /// A write half that only sends bytes, and leaves everything else to the defaults of
-    /// `WriteHalf`.
+    /// `WriteHalf`, which can't resume writes.
     #[cfg(unix)]
     #[derive(Debug)]
     struct SendmsgOnly(Arc<RegisteredIo<UnixOps>>);

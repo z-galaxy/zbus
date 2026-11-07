@@ -469,6 +469,12 @@ where
     async fn peer_credentials(&mut self) -> io::Result<ConnectionCredentials> {
         self.ops.peer_credentials(&self.source, &self.runtime).await
     }
+
+    // Each call to `sendmsg` is one attempt at the syscall, as soon as the socket is writable, and
+    // nothing underneath holds on to what it wrote.
+    fn can_resume_writes(&self) -> bool {
+        true
+    }
 }
 
 /// Whether `msg` carries file descriptors, which only a message on unix can.

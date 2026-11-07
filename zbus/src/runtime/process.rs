@@ -170,6 +170,12 @@ impl WriteHalf for Stdin {
     async fn peer_credentials(&mut self) -> io::Result<ConnectionCredentials> {
         WriteHalf::peer_credentials(self.pipe()?).await
     }
+
+    // `sendmsg` writes through that of the pipe, which can resume writes, or fails, with nothing
+    // written, once the half is closed.
+    fn can_resume_writes(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(feature = "unixexec")]

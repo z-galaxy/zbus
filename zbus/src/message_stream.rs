@@ -326,11 +326,12 @@ impl MessageStream {
     ///   * it was closed with [`Connection::close`], or it was handed over already, such as through
     ///     another stream;
     ///   * a hand-over through another stream stopped the connection reading before, as told above;
-    ///   * a send over a socket of your own was cut off midway, by an error or by its future being
-    ///     dropped. The socket may then hold part of a message, and the peer can make no sense of
-    ///     what follows it. If no send is under way as the hand-over starts, it fails on this
-    ///     before anything is done to the connection, which reads on. A send that failed with an
-    ///     I/O error of kind `BrokenPipe`, `ConnectionReset` or `ConnectionAborted`, as one to a
+    ///   * a send over a socket of your own whose write half can't resume writes
+    ///     ([`WriteHalf::can_resume_writes`]) was cut off midway, by an error or by its future
+    ///     being dropped. The socket may then hold part of a message, and the peer can make no
+    ///     sense of what follows it. If no send is under way as the hand-over starts, it fails on
+    ///     this before anything is done to the connection, which reads on. A send that failed with
+    ///     an I/O error of kind `BrokenPipe`, `ConnectionReset` or `ConnectionAborted`, as one to a
     ///     peer that closed its end does, doesn't count: the peer receives nothing that follows it;
     ///   * writing what is left of a message that a send was cut off in the middle of fails, with
     ///     the error that it fails with, unless that is an I/O error of one of the kinds above, as
@@ -346,6 +347,7 @@ impl MessageStream {
     /// [`Error::InputOutput`]: crate::Error::InputOutput
     /// [`Error::Unsupported`]: crate::Error::Unsupported
     /// [`ReadHalf::can_take_unread`]: crate::connection::socket::ReadHalf::can_take_unread
+    /// [`WriteHalf::can_resume_writes`]: crate::connection::socket::WriteHalf::can_resume_writes
     #[cfg(feature = "handover")]
     pub async fn hand_over(&mut self) -> Result<Handover> {
         if self.inner.match_rule.is_some() {

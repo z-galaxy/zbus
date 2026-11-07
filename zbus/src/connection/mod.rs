@@ -288,11 +288,13 @@ impl Connection {
     /// the order that they were sent, unless [`Connection::close`] closes the connection with part
     /// of one left to write. [`Connection::unwritten_len`] tells how much is left.
     ///
-    /// That is so over the sockets that zbus creates. A send over a [`Socket`] of your own hands
+    /// That is so over the sockets that zbus creates, and over a [`Socket`] of your own whose write
+    /// half can resume writes ([`WriteHalf::can_resume_writes`]). A send over any other hands
     /// `msg` to [`WriteHalf::send_message`] instead. If it is dropped, or fails, midway, it can
     /// leave part of `msg` on the socket, which leaves the peer unable to make sense of anything
     /// sent on the connection after it.
     ///
+    /// [`WriteHalf::can_resume_writes`]: socket::WriteHalf::can_resume_writes
     /// [`WriteHalf::send_message`]: socket::WriteHalf::send_message
     pub async fn send(&self, msg: &Message) -> Result<()> {
         #[cfg(unix)]
@@ -327,11 +329,13 @@ impl Connection {
     ///   it sends, and otherwise that one isn't sent;
     /// * the messages after it aren't sent.
     ///
-    /// A send over a [`Socket`] of your own hands all of `msgs` to [`WriteHalf::send_messages`]
+    /// A send over a [`Socket`] of your own whose write half can't resume writes
+    /// ([`WriteHalf::can_resume_writes`]) hands all of `msgs` to [`WriteHalf::send_messages`]
     /// instead. If it is dropped, or fails, the messages before the one that it was sending then
     /// have been sent in full, and that one may have been sent in part, which leaves the peer
     /// unable to make sense of anything sent on the connection after it.
     ///
+    /// [`WriteHalf::can_resume_writes`]: socket::WriteHalf::can_resume_writes
     /// [`WriteHalf::send_messages`]: socket::WriteHalf::send_messages
     pub async fn send_all(&self, msgs: &[Message]) -> Result<()> {
         #[cfg(unix)]
