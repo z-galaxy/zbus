@@ -177,10 +177,10 @@ impl Message {
     /// The message, at position `recv_seq` of those that a connection received.
     ///
     /// The position is set on the message itself, unless a clone of it is held elsewhere, such as
-    /// by the sender of one that came over a channel. That clone keeps its own position, so the
-    /// message is then a new one, which shares the bytes and the file descriptors of this one,
-    /// and what was parsed of them.
-    #[cfg(feature = "p2p")]
+    /// by the sender of one that came over a channel, or by a stream of a connection that was
+    /// handed over. That clone keeps its own position, so the message is then a new one, which
+    /// shares the bytes and the file descriptors of this one, and what was parsed of them.
+    #[cfg(any(feature = "p2p", all(unix, feature = "handover")))]
     pub(crate) fn at_position(mut self, recv_seq: u64) -> Self {
         if let Some(inner) = Arc::get_mut(&mut self.inner) {
             inner.recv_seq = Sequence { recv_seq };

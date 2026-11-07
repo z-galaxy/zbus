@@ -354,18 +354,15 @@ pub trait ReadHalf: std::fmt::Debug + Send + Sync + 'static {
     /// out.
     ///
     /// The read half of a `Channel` returns `true`. A channel carries whole messages, so it takes
-    /// back the whole messages that a connection over a channel leaves unread, and fails on part of
-    /// one, which can only come from a connection over some other socket. The end of its input is
-    /// the other end of the channel being closed.
+    /// the whole messages that it is given as already received ahead of those that come over the
+    /// channel, and fails on part of one. The end of its input is the other end of the channel
+    /// being closed.
     ///
     /// The default implementation returns `false`. Then [`MessageStream::hand_over`] fails with
-    /// [`Error::Unsupported`] for a connection over this half, and so does [`Builder::build`] for a
-    /// connection that takes over ([`Builder::take_over`]) a hand-over that holds unread bytes or
-    /// file descriptors.
+    /// [`Error::Unsupported`] for a connection over this half.
     ///
     /// This method is only available on unix, with the `handover` feature.
     ///
-    /// [`Builder::build`]: crate::connection::Builder::build
     /// [`Builder::take_over`]: crate::connection::Builder::take_over
     /// [`Error::Unsupported`]: crate::Error::Unsupported
     /// [`MessageStream::hand_over`]: crate::MessageStream::hand_over

@@ -35,6 +35,7 @@ use crate::{
     fdo::ConnectionCredentials,
     log::trace,
     runtime::io::{PollSend, Progress, poll_write, write_message, write_messages},
+    wire::serialized::Data,
 };
 
 /// What a connection writes its socket through, which those that write it, shut it down or hand it
@@ -73,18 +74,24 @@ pub(super) struct SocketWrite {
 
 impl SocketWrite {
     /// What a connection writes through `half`, or as `writes` tells, if zbus made the socket.
-    /// `status` is where the connection keeps how many bytes it has left to write.
+    /// `status` is where the connection keeps how many bytes it has left to write. `unwritten` is
+    /// what a connection that this one took over left unwritten, which it writes ahead of all else.
     pub(super) fn new(
         half: Box<dyn WriteHalf>,
         writes: Option<Writes>,
         status: Arc<SocketStatus>,
         #[cfg(all(unix, feature = "handover"))] source: Option<(IoSource, SocketKind)>,
+        #[cfg(all(unix, feature = "handover"))] unwritten: Unwritten,
     ) -> Self {
         Self {
             half_resumes: half.can_resume_writes(),
             half: Some(half),
             writes,
-            rest: Rest::new(status),
+            rest: Rest::new(
+                status,
+                #[cfg(all(unix, feature = "handover"))]
+                unwritten,
+            ),
             #[cfg(all(unix, feature = "handover"))]
             source,
             #[cfg(all(unix, feature = "handover"))]
@@ -364,6 +371,35 @@ impl Prepared {
     }
 }
 
+/// What a connection took to send and didn't write, as a connection that is handed over leaves it,
+/// for the one that takes over to write ahead of anything else.
+#[cfg(all(unix, feature = "handover"))]
+#[derive(Default)]
+pub(crate) struct Unwritten {
+    /// The bytes of a message that a write ended in the middle of, or of what is left of one, and
+    /// how many of them are written. The file descriptors of the message went with its first byte.
+    pub(crate) cut: Option<(Data<'static, 'static>, usize)>,
+    /// The messages after it, none of whose bytes are written, oldest first.
+    pub(crate) kept: VecDeque<Message>,
+}
+
+#[cfg(all(unix, feature = "handover"))]
+impl Unwritten {
+    /// What is left of the message that a write ended in the middle of, if anything.
+    pub(crate) fn rest(&self) -> &[u8] {
+        self.cut
+            .as_ref()
+            .map_or(&[], |(bytes, written)| &bytes[*written..])
+    }
+
+    /// How many bytes are left to write.
+    pub(crate) fn len(&self) -> usize {
+        let kept = self.kept.iter().map(|msg| msg.data().len()).sum::<usize>();
+
+        self.rest().len() + kept
+    }
+}
+
 /// Write what the connection has left to write, if anything, to `socket`: the rest of a message
 /// that a write ended in the middle of, then the messages that sends kept, as far as `writing` has
 /// the writes go. Whether it wrote it all.
@@ -390,9 +426,9 @@ async fn write_unwritten_to(socket: &dyn PollSend, writing: &mut Writing<'_>) ->
 /// as far as `writing` has the writes go. Its file descriptors went with its first byte. Whether it
 /// wrote it all.
 async fn write_rest_to(socket: &dyn PollSend, writing: &mut Writing<'_>) -> io::Result<bool> {
-    // A copy of the message, so that `writing` can be asked whether to stop while it is written.
-    while let Some((msg, written)) = writing.rest.cut.clone() {
-        let left = [IoSlice::new(&msg.data()[written..])];
+    // A copy of the bytes, so that `writing` can be asked whether to stop while they are written.
+    while let Some((bytes, written)) = writing.rest.cut.clone() {
+        let left = [IoSlice::new(&bytes[written..])];
         let polled = poll_fn(|cx| {
             poll_write(
                 socket,
@@ -467,11 +503,11 @@ async fn write_rest_through(
     half: &mut dyn WriteHalf,
     writing: &mut Writing<'_>,
 ) -> io::Result<bool> {
-    // A copy of the message, so that `writing` can be asked whether to stop while it is written.
-    while let Some((msg, written)) = writing.rest.cut.clone() {
+    // A copy of the bytes, so that `writing` can be asked whether to stop while they are written.
+    while let Some((bytes, written)) = writing.rest.cut.clone() {
         let sent = sendmsg(
             half,
-            &msg.data()[written..],
+            &bytes[written..],
             #[cfg(unix)]
             &[],
             writing,
@@ -731,10 +767,12 @@ impl Progress for TakingKept<'_, '_> {
 
 /// What a connection has left to write: the rest of the message that a write ended in the middle
 /// of, if any, and the messages after it that sends kept, once a hand-over of the connection is
-/// prepared.
+/// prepared, or that a connection that this one took over left unwritten.
 struct Rest {
-    /// The message that a write ended in the middle of, and how many of its bytes are written.
-    cut: Option<(Message, usize)>,
+    /// The bytes of the message that a write ended in the middle of, and how many of them are
+    /// written. Those of what a connection that this one took over left of a message are only
+    /// what is left of it, none of which is written yet.
+    cut: Option<(Data<'static, 'static>, usize)>,
     /// The messages that sends kept, none of whose bytes are written, oldest first.
     #[cfg(all(unix, feature = "handover"))]
     kept: VecDeque<Message>,
@@ -751,18 +789,30 @@ struct Rest {
 }
 
 impl Rest {
-    /// Nothing left, for a connection whose status is `status`.
-    fn new(status: Arc<SocketStatus>) -> Self {
-        Self {
-            cut: None,
+    /// What is left to write of a connection whose status is `status`: what a connection that it
+    /// took over left unwritten, `unwritten`, which is counted from the start, if any, and nothing
+    /// otherwise.
+    fn new(
+        status: Arc<SocketStatus>,
+        #[cfg(all(unix, feature = "handover"))] unwritten: Unwritten,
+    ) -> Self {
+        #[cfg(all(unix, feature = "handover"))]
+        let Unwritten { cut, kept } = unwritten;
+        #[cfg(not(all(unix, feature = "handover")))]
+        let cut = None;
+        let rest = Self {
+            cut,
             #[cfg(all(unix, feature = "handover"))]
-            kept: VecDeque::new(),
+            kept_len: kept.iter().map(|msg| msg.data().len()).sum(),
             #[cfg(all(unix, feature = "handover"))]
-            kept_len: 0,
+            kept,
             #[cfg(all(unix, feature = "handover"))]
             listener: None,
             status,
-        }
+        };
+        rest.store();
+
+        rest
     }
 
     /// Whether nothing is left.
@@ -785,27 +835,25 @@ impl Rest {
     #[inline]
     fn set(&mut self, cut: Option<(&Message, usize)>) {
         let Some((msg, written)) = cut else {
-            if self.cut.take().is_some() {
+            if self.cut.is_some() {
+                self.cut = None;
                 self.store();
             }
 
             return;
         };
-        self.cut = Some((msg.clone(), written));
+        self.cut = Some((msg.data().clone(), written));
         self.store();
     }
 
     /// Note that a write took `len` more bytes of what is left of the message.
     fn advance(&mut self, len: usize) {
-        let Some((msg, written)) = &mut self.cut else {
+        let Some((bytes, written)) = &mut self.cut else {
             return;
         };
         *written += len;
-        if *written == msg.data().len() {
-            trace!(
-                "Sent message with serial: {}",
-                msg.primary_header().serial_num()
-            );
+        if *written == bytes.len() {
+            trace!("Sent the rest of a message");
             self.cut = None;
         }
         self.store();
@@ -850,7 +898,7 @@ impl Rest {
         for msg in self.kept.drain(..taken) {
             self.kept_len -= msg.data().len();
         }
-        self.cut = cut.map(|(msg, written)| (msg.clone(), written));
+        self.cut = cut.map(|(msg, written)| (msg.data().clone(), written));
         self.store();
     }
 
@@ -883,7 +931,7 @@ impl Rest {
         let left = self
             .cut
             .as_ref()
-            .map_or(0, |(msg, written)| msg.data().len() - written);
+            .map_or(0, |(bytes, written)| bytes.len() - written);
         #[cfg(all(unix, feature = "handover"))]
         let left = left + self.kept_len;
         self.status.unwritten.store(left, Ordering::Relaxed);
@@ -898,7 +946,7 @@ impl fmt::Debug for Rest {
         let cut = self
             .cut
             .as_ref()
-            .map(|(msg, written)| msg.data().len() - written);
+            .map(|(bytes, written)| bytes.len() - written);
         rest.field("cut", &cut);
         #[cfg(all(unix, feature = "handover"))]
         rest.field("kept", &self.kept.len())
@@ -1654,6 +1702,7 @@ mod tests {
             Some(Writes::Driven(socket.clone())),
             status.clone(),
             None,
+            Default::default(),
         );
 
         keep_until_what_was_kept_is_written(&mut write, &socket, &status, &kept, &msg);
@@ -1674,6 +1723,7 @@ mod tests {
             None,
             status.clone(),
             None,
+            Default::default(),
         );
 
         keep_until_what_was_kept_is_written(&mut write, &socket, &status, &kept, &msg);

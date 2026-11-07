@@ -1,3 +1,5 @@
+#[cfg(all(unix, feature = "handover"))]
+use std::collections::VecDeque;
 use std::{
     collections::HashMap,
     io,
@@ -46,6 +48,10 @@ pub(crate) struct SocketReader {
     /// Whether the body of each message is checked against its signature as it's received.
     #[cfg(feature = "bus-impl")]
     validate_bodies: bool,
+    /// The messages that a connection that this one took over left unread, oldest first, which
+    /// the reader yields ahead of what it reads off the socket.
+    #[cfg(all(unix, feature = "handover"))]
+    taken_over: VecDeque<Message>,
 }
 
 impl SocketReader {
@@ -69,7 +75,18 @@ impl SocketReader {
             socket_status,
             #[cfg(feature = "bus-impl")]
             validate_bodies,
+            #[cfg(all(unix, feature = "handover"))]
+            taken_over: VecDeque::new(),
         }
+    }
+
+    /// The reader, to yield `msgs`, which a connection that this one took over left unread, ahead
+    /// of what it reads off the socket.
+    #[cfg(all(unix, feature = "handover"))]
+    pub fn yielding_first(mut self, msgs: Vec<Message>) -> Self {
+        self.taken_over = msgs.into();
+
+        self
     }
 
     pub fn spawn(self, runtime: &Runtime) -> Task<()> {
@@ -154,6 +171,7 @@ impl SocketReader {
                         Err(e) if stop.is_some() && ends_input(e) => {
                             ReaderEnd::Ended(ReadParts::new(
                                 self.socket.take().expect("the reader ends only once"),
+                                mem::take(&mut self.taken_over),
                                 mem::take(&mut self.already_received_bytes),
                                 mem::take(&mut self.already_received_fds),
                             ))
@@ -213,6 +231,7 @@ impl SocketReader {
         self.senders.lock().await.clear();
         let parts = ReadParts::new(
             self.socket.take().expect("the reader stops only once"),
+            mem::take(&mut self.taken_over),
             mem::take(&mut self.already_received_bytes),
             mem::take(&mut self.already_received_fds),
         );
@@ -252,20 +271,32 @@ impl SocketReader {
     async fn read_socket(&mut self) -> crate::Result<Message> {
         self.socket_status.activity_event.notify(usize::MAX);
         let seq = self.prev_seq + 1;
-        // Through the socket itself rather than through the `Box`, whose own implementation would
-        // box the future of the call a second time.
-        let socket = self
-            .socket
-            .as_deref_mut()
-            .expect("the reader reads only until it stops");
-        let msg = socket
-            .receive_message(
-                seq,
-                &mut self.already_received_bytes,
-                #[cfg(unix)]
-                &mut self.already_received_fds,
-            )
-            .await?;
+        // The messages that a connection that this one took over left unread come first, each at
+        // its position among those of this connection.
+        #[cfg(all(unix, feature = "handover"))]
+        let taken_over = self.taken_over.pop_front().map(|msg| msg.at_position(seq));
+        #[cfg(not(all(unix, feature = "handover")))]
+        let taken_over = None;
+        let msg = match taken_over {
+            Some(msg) => msg,
+            None => {
+                // Through the socket itself rather than through the `Box`, whose own
+                // implementation would box the future of the call a second time.
+                let socket = self
+                    .socket
+                    .as_deref_mut()
+                    .expect("the reader reads only until it stops");
+
+                socket
+                    .receive_message(
+                        seq,
+                        &mut self.already_received_bytes,
+                        #[cfg(unix)]
+                        &mut self.already_received_fds,
+                    )
+                    .await?
+            }
+        };
         self.prev_seq = seq;
         #[cfg(feature = "bus-impl")]
         if self.validate_bodies {

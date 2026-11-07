@@ -241,11 +241,10 @@ impl MessageStream {
     ///    socket. The connection is closed, as [`Connection::is_closed`] and [`Connection::closed`]
     ///    tell. The socket is neither shut down nor closed, so the peer sees nothing but a pause.
     ///
-    /// The `unread_bytes` of the [`Handover`] that it gives are those of the messages that were
-    /// queued on this stream and that it did not yield, oldest first, followed by what the
-    /// connection read off the socket after them and made no message of yet. Its `unread_fds` are
-    /// the file descriptors of those messages, in their order, followed by those that came in with
-    /// the rest. The stream then ends: it yields `None`, as it has nothing left to yield.
+    /// The [`Handover`] that it gives holds the messages that were queued on this stream and that
+    /// it did not yield, oldest first, as they are, then what the connection read off the socket
+    /// after them and made no message of yet, with the file descriptors of all of those. The
+    /// stream then ends: it yields `None`, as it has nothing left to yield.
     ///
     /// # The messages of the stream
     ///
@@ -336,8 +335,8 @@ impl MessageStream {
     ///   * writing what the connection has left to write ([`Connection::unwritten_len`]) fails,
     ///     with the error that it fails with, unless that is an I/O error of one of the kinds
     ///     above, as the peer then receives nothing more;
-    ///   * the socket or a file descriptor of a message fails to be duplicated, as when the process
-    ///     has too many file descriptors open.
+    ///   * the socket fails to be duplicated, as when the process has too many file descriptors
+    ///     open.
     ///
     ///   The connection has then stopped reading, unless it ended before, or the hand-over failed
     ///   before anything was done to it. The stream keeps what the hand-over took off its queue,

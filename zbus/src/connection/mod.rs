@@ -44,11 +44,11 @@ pub use socket::Socket;
 #[cfg(all(unix, feature = "handover"))]
 pub mod handover;
 #[cfg(all(unix, feature = "handover"))]
+pub use handover::Handover;
+#[cfg(all(unix, feature = "handover"))]
 use handover::SocketKind;
 #[cfg(all(unix, feature = "handover"))]
 use handover::StopStatus;
-#[cfg(all(unix, feature = "handover"))]
-pub use handover::{Handover, HandoverSocket};
 
 mod socket_reader;
 use socket_reader::{SocketReader, SocketStatus};
@@ -379,6 +379,10 @@ impl Connection {
     /// (`Connection::prepare_hand_over`), it is also the messages that sends kept, after that rest,
     /// as sends no longer wait for the socket, while this does.
     ///
+    /// With the `handover` feature, on unix, for a connection that took over another one
+    /// (`Builder::take_over`), it is also, ahead of all else, what that one took to send and didn't
+    /// write, which the peer may be waiting for.
+    ///
     /// On a connection closed with [`Connection::close`], which lets go of what is left, this fails
     /// with an I/O error of kind [`NotConnected`](io::ErrorKind::NotConnected). A connection whose
     /// peer went away keeps it, and this tries to write it, as a send would.
@@ -411,6 +415,10 @@ impl Connection {
     /// With the `handover` feature, on unix, once a hand-over of the connection is prepared
     /// (`Connection::prepare_hand_over`), this also counts the messages that sends kept, whole,
     /// from the moment that a send kept them.
+    ///
+    /// With the `handover` feature, on unix, for a connection that took over another one
+    /// (`Builder::take_over`), it also counts what that one took to send and didn't write, from the
+    /// moment that it is built.
     ///
     /// [`Connection::close`] lets go of these bytes. The peer going away doesn't, so they stay
     /// counted for as long as no write takes them.
@@ -1402,6 +1410,7 @@ impl Connection {
         auth: Authenticated,
         writes: Option<socket::Writes>,
         #[cfg(all(unix, feature = "handover"))] source: Option<(IoSource, SocketKind)>,
+        #[cfg(all(unix, feature = "handover"))] unwritten: socket_write::Unwritten,
         #[allow(unused)] bus_connection: bool,
         runtime: Runtime,
         method_timeout: Option<Duration>,
@@ -1442,6 +1451,8 @@ impl Connection {
             socket_status.clone(),
             #[cfg(all(unix, feature = "handover"))]
             source,
+            #[cfg(all(unix, feature = "handover"))]
+            unwritten,
         );
         #[cfg(all(unix, feature = "handover"))]
         let can_prepare_hand_over = socket_write.can_prepare_hand_over();
@@ -1660,6 +1671,7 @@ impl Connection {
         already_read: Vec<u8>,
         #[cfg(unix)] already_received_fds: Vec<std::os::fd::OwnedFd>,
         #[cfg(feature = "bus-impl")] validate_bodies: bool,
+        #[cfg(all(unix, feature = "handover"))] taken_over: Vec<Message>,
     ) {
         let inner = &self.inner;
         #[cfg(all(unix, feature = "handover"))]
@@ -1668,22 +1680,22 @@ impl Connection {
             .stop
             .can_stop
             .store(socket_read.can_take_unread(), Ordering::Release);
+        let reader = SocketReader::new(
+            socket_read,
+            inner.msg_senders.clone(),
+            inner.pending_method_calls.clone(),
+            already_read,
+            #[cfg(unix)]
+            already_received_fds,
+            inner.socket_status.clone(),
+            #[cfg(feature = "bus-impl")]
+            validate_bodies,
+        );
+        #[cfg(all(unix, feature = "handover"))]
+        let reader = reader.yielding_first(taken_over);
         inner
             .socket_reader_task
-            .set(
-                SocketReader::new(
-                    socket_read,
-                    inner.msg_senders.clone(),
-                    inner.pending_method_calls.clone(),
-                    already_read,
-                    #[cfg(unix)]
-                    already_received_fds,
-                    inner.socket_status.clone(),
-                    #[cfg(feature = "bus-impl")]
-                    validate_bodies,
-                )
-                .spawn(&inner.runtime),
-            )
+            .set(reader.spawn(&inner.runtime))
             .expect("Attempted to set `socket_reader_task` twice");
     }
 
