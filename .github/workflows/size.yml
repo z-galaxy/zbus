@@ -12,10 +12,9 @@ jobs:
       - uses: moonrepo/setup-rust@v1
         with:
           channel: stable
-      - name: Install a session bus
-        run: sudo apt-get update && sudo apt-get install -y dbus
       - name: Fetch the base commit
         run: git fetch --no-tags --depth=1 origin "${{ github.event.pull_request.base.sha }}"
+      # The smoke test runs the fixtures under `dbus-run-session`, which the runner image ships.
       - name: Build, measure and compare the fixtures
         shell: bash
         run: |
