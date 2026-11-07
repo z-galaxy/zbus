@@ -559,7 +559,8 @@ pub trait WriteHalf: std::fmt::Debug + Send + Sync + 'static {
         doc = "Once a hand-over of the connection is prepared \
                ([`Connection::prepare_hand_over`](crate::Connection::prepare_hand_over)), a send \
                gives up a call to `sendmsg` or `flush` that waits, rather than wait for it, and \
-               the connection keeps what is left, for a later send or flush."
+               the connection keeps what is left, for a later send or flush, or for a hand-over \
+               to hand over."
     )]
     ///
     /// The default implementation returns `false`, which suits a half that sends whole messages

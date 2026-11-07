@@ -287,7 +287,7 @@ impl Connection {
                ([`Connection::prepare_hand_over`]), this doesn't wait for the socket: it writes \
                what the connection has left to write, then `msg`, as far as the socket takes \
                them at once, and keeps the rest, for the next send or [`Connection::flush`] to \
-               write.",
+               write, or for the hand-over to hand over.",
         doc = ""
     )]
     ///
@@ -339,7 +339,7 @@ impl Connection {
                ([`Connection::prepare_hand_over`]), this doesn't wait for the socket: it writes \
                what the connection has left to write, then `msgs`, as far as the socket takes \
                them at once, and keeps the rest, for the next send or [`Connection::flush`] to \
-               write.",
+               write, or for the hand-over to hand over.",
         doc = ""
     )]
     ///
@@ -453,8 +453,9 @@ impl Connection {
     /// what is kept first, as far as the socket takes it then, and [`Connection::flush`] writes all
     /// of it, waiting on the socket for as long as it takes. A send that waits for the socket as
     /// this is called stops waiting the same way. Nothing bounds what the sends keep, which
-    /// [`Connection::unwritten_len`] counts. The connection reads on, as before, and a hand-over
-    /// writes what the sends kept before it commits, waiting on the socket.
+    /// [`Connection::unwritten_len`] counts. The connection reads on, as before, and a hand-over,
+    /// which prepares the connection first, as this does, hands over what the sends kept, for the
+    /// connection that takes over to write.
     ///
     /// This can't be undone. It returns `true` once the connection is prepared, the second time
     /// too, which changes nothing. That is so over the sockets that zbus creates, a
