@@ -1816,7 +1816,8 @@ mod tests {
     }
 
     /// As for a message that fits in the buffer of the reader, but for one that doesn't, of which
-    /// as much as came in is handed over, with no room for the rest.
+    /// as much as came in is handed over in the allocation of the message, which has room for the
+    /// rest of it.
     #[test]
     #[timeout(15000)]
     fn a_long_message_cut_short_is_handed_over() {
@@ -1827,9 +1828,10 @@ mod tests {
 
             let room = hand_over_in_the_middle_of(&runtime, &long, 6000).await;
 
-            assert!(
-                room < long.data().len(),
-                "the hand-over keeps room for the rest of the message",
+            assert_eq!(
+                room,
+                long.data().len(),
+                "the hand-over has no room for the rest of the message",
             );
         });
     }
