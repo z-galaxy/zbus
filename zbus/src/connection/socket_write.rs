@@ -1235,7 +1235,7 @@ mod tests {
     #[timeout(15000)]
     fn a_half_that_can_resume_writes_is_written_through_sendmsg() {
         under_every_runtime(|runtime| async move {
-            let (conn, peer, counts) = over_a_half_of_your_own(&runtime, true, None).await;
+            let (conn, peer, counts) = over_a_half_of_your_own(&runtime, Some(CAP), None).await;
             let pipes = [pipe(), pipe(), pipe()];
             let fd = |i: usize| Fd::from(pipes[i].as_fd());
             let msgs = [
@@ -1273,7 +1273,7 @@ mod tests {
     #[timeout(15000)]
     fn a_send_through_a_half_that_can_resume_writes_dropped_midway_is_finished() {
         under_every_runtime(|runtime| async move {
-            let (conn, peer, _) = over_a_half_of_your_own(&runtime, true, None).await;
+            let (conn, peer, _) = over_a_half_of_your_own(&runtime, Some(BIG_CAP), None).await;
 
             finish_a_send_dropped_midway(&runtime, &conn, &peer).await;
         });
@@ -1286,7 +1286,7 @@ mod tests {
     fn a_send_through_a_half_that_can_resume_writes_that_fails_midway_leaves_the_rest() {
         under_every_runtime(|runtime| async move {
             // The second call to `sendmsg` fails, once the first took `CAP` bytes.
-            let (conn, peer, _) = over_a_half_of_your_own(&runtime, true, Some(2)).await;
+            let (conn, peer, _) = over_a_half_of_your_own(&runtime, Some(CAP), Some(2)).await;
             let (msg, next) = (signal(1), signal(2));
 
             let failed = conn.send(&msg).await;
@@ -1311,7 +1311,7 @@ mod tests {
     #[timeout(15000)]
     fn a_half_that_cant_resume_writes_is_given_whole_messages() {
         under_every_runtime(|runtime| async move {
-            let (conn, peer, counts) = over_a_half_of_your_own(&runtime, false, None).await;
+            let (conn, peer, counts) = over_a_half_of_your_own(&runtime, None, None).await;
             let msgs = [signal(1), signal(2), signal(3)];
 
             conn.send(&msgs[0]).await.unwrap();
@@ -1365,7 +1365,7 @@ mod tests {
     #[timeout(15000)]
     fn the_rest_of_a_send_through_a_half_that_can_resume_writes_goes_out_before_a_hand_over() {
         under_every_runtime(|runtime| async move {
-            let (conn, peer, _) = over_a_half_of_your_own(&runtime, true, None).await;
+            let (conn, peer, _) = over_a_half_of_your_own(&runtime, Some(BIG_CAP), None).await;
             let big = big_signal();
             stuck(&runtime, pin!(conn.send(&big)), &peer).await;
 
@@ -1692,7 +1692,7 @@ mod tests {
     #[timeout(15000)]
     fn a_connection_over_a_half_that_cant_resume_writes_isnt_prepared() {
         under_every_runtime(|runtime| async move {
-            let (conn, peer, _) = over_a_half_of_your_own(&runtime, false, None).await;
+            let (conn, peer, _) = over_a_half_of_your_own(&runtime, None, None).await;
             let big = big_signal();
             let mut sending = pin!(conn.send(&big));
             stuck(&runtime, sending.as_mut(), &peer).await;
@@ -1713,7 +1713,7 @@ mod tests {
     #[timeout(15000)]
     fn sends_through_a_half_that_can_resume_writes_dont_wait_once_prepared() {
         under_every_runtime(|runtime| async move {
-            let (conn, peer, counts) = over_a_half_of_your_own(&runtime, true, None).await;
+            let (conn, peer, counts) = over_a_half_of_your_own(&runtime, Some(BIG_CAP), None).await;
             let (big, next) = (big_signal(), signal(1));
             assert!(conn.prepare_hand_over());
 
@@ -1931,12 +1931,12 @@ mod tests {
     }
 
     /// A peer-to-peer connection over one end of a unix socket pair, on `runtime`, through a write
-    /// half of your own, and the other end of the pair. The half can resume writes as `resumes`
-    /// says, takes at most `CAP` bytes in each call to `sendmsg` if it can, and fails the call
+    /// half of your own, and the other end of the pair. The half can resume writes if `cap` is
+    /// some, and then takes at most that many bytes in each call to `sendmsg`. It fails the call
     /// numbered `fail_at`, if any.
     async fn over_a_half_of_your_own(
         runtime: &Runtime,
-        resumes: bool,
+        cap: Option<usize>,
         fail_at: Option<usize>,
     ) -> (Connection, UnixStream, Arc<Counts>) {
         let (ours, theirs) = UnixStream::pair().unwrap();
@@ -1944,7 +1944,7 @@ mod tests {
         let counts = Arc::new(Counts::default());
         let half = OfYourOwn {
             socket: socket.clone(),
-            resumes,
+            cap,
             calls: 0,
             fail_at,
             counts: counts.clone(),
@@ -1969,9 +1969,9 @@ mod tests {
     #[derive(Debug)]
     struct OfYourOwn {
         socket: Arc<RegisteredIo<UnixOps>>,
-        /// Whether it can resume writes. If it can, it takes at most `CAP` bytes in each call to
-        /// `sendmsg`, and fails if it is handed a whole message.
-        resumes: bool,
+        /// The most that it takes in each call to `sendmsg`, if it can resume writes, which has it
+        /// fail if it is handed a whole message.
+        cap: Option<usize>,
         /// How many calls to `sendmsg` were made.
         calls: usize,
         /// The call to `sendmsg` that fails, if any.
@@ -1992,7 +1992,7 @@ mod tests {
     impl WriteHalf for OfYourOwn {
         async fn send_message(&mut self, msg: &Message) -> Result<()> {
             assert!(
-                !self.resumes,
+                self.cap.is_none(),
                 "a half that can resume writes was handed {msg:?}"
             );
             self.counts.whole.fetch_add(1, Ordering::Relaxed);
@@ -2002,7 +2002,7 @@ mod tests {
 
         async fn send_messages(&mut self, msgs: &[Message]) -> Result<()> {
             assert!(
-                !self.resumes,
+                self.cap.is_none(),
                 "a half that can resume writes was handed {msgs:?}"
             );
             self.counts.whole.fetch_add(1, Ordering::Relaxed);
@@ -2015,11 +2015,7 @@ mod tests {
             if self.fail_at == Some(self.calls) {
                 return Err(io::Error::other("the test failed this write"));
             }
-            let len = if self.resumes {
-                buffer.len().min(CAP)
-            } else {
-                buffer.len()
-            };
+            let len = buffer.len().min(self.cap.unwrap_or(usize::MAX));
 
             WriteHalf::sendmsg(&mut self.socket, &buffer[..len], fds).await
         }
@@ -2039,7 +2035,7 @@ mod tests {
         }
 
         fn can_resume_writes(&self) -> bool {
-            self.resumes
+            self.cap.is_some()
         }
     }
 
@@ -2331,6 +2327,10 @@ mod tests {
     const CUT: usize = 16;
     /// The most that a write half of your own that can resume writes takes in a call to `sendmsg`.
     const CAP: usize = 16;
+    /// The most that a write half of your own that can resume writes takes in a call to `sendmsg`
+    /// for a send of a message longer than the socket holds, which would take tens of thousands of
+    /// calls of `CAP` bytes. It still takes such a message in several calls.
+    const BIG_CAP: usize = 64 * 1024;
     const PATH: &str = "/org/zbus/Test";
     const INTERFACE: &str = "org.zbus.Test";
 }
