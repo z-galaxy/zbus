@@ -98,8 +98,8 @@ ibus = ["comms", "tokio?/process"]
 p2p = ["comms", "uuid?/v4"]
 # Enables API that is only needed for bus implementations (enables `p2p`).
 bus-impl = ["p2p"]
-# Enables API to hand a connection over, for it to go on in this process or in another one, as a
-# service or a bus that restarts does.
+# Enables API, on unix, to hand a connection over, for it to go on in this process or in another
+# one, as a service or a bus that restarts does.
 handover = ["comms"]
 
 [dependencies]

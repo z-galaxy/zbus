@@ -9,6 +9,7 @@ pub mod channel;
 pub use channel::Channel;
 
 mod split;
+pub(crate) use split::Writes;
 pub use split::{BoxedSplit, Split};
 
 use std::{io, mem};
@@ -137,6 +138,12 @@ pub(crate) type RecvmsgResult = io::Result<usize>;
 ///     async fn close(&mut self) -> io::Result<()> {
 ///         self.0.shutdown().await
 ///     }
+///
+///     fn can_resume_writes(&self) -> bool {
+///         // `write` takes nothing in a call that is dropped before it returns, and `flush` sends
+///         // on what a buffered stream holds, so a send can stop midway and go on later.
+///         true
+///     }
 /// }
 /// # }
 /// #
@@ -205,25 +212,19 @@ pub trait ReadHalf: std::fmt::Debug + Send + Sync + 'static {
     /// - `already_received_bytes`: Sometimes, zbus already received some bytes from the socket
     ///   belonging to the first message(s) (as part of the connection handshake process). This is
     ///   the buffer containing those bytes (if any). If you're implementing this method, most
-    ///   likely you can safely ignore this parameter.
-    #[cfg_attr(
-        feature = "handover",
-        doc = "   A half that can take what it left unread ([`ReadHalf::can_take_unread`]) is the \
-               exception: it has to take these ahead of anything that it reads, or fail on them if \
-               it can't make messages of them, as they are also how a connection that takes over \
-               ([`Builder::take_over`](crate::connection::Builder::take_over)) gets what the \
-               other one left unread."
-    )]
+    ///   likely you can safely ignore this parameter. With the `handover` feature, on unix, a half
+    ///   that can take what it left unread (`ReadHalf::can_take_unread`) is the exception: it has
+    ///   to take these ahead of anything that it reads, or fail on them if it can't make messages
+    ///   of them, as they are also how a connection that takes over (`Builder::take_over`) gets
+    ///   what the other one left unread.
     /// - `already_received_fds`: Same goes for file descriptors belonging to first messages.
     ///
     /// # Cancellation
-    #[cfg_attr(
-        feature = "handover",
-        doc = "A hand-over ([`MessageStream::hand_over`](crate::MessageStream::hand_over)) stops \
-               the connection reading by dropping the future of this method wherever it waits, if \
-               [`ReadHalf::can_take_unread`] says that it can.",
-        doc = ""
-    )]
+    ///
+    /// With the `handover` feature, on unix, a hand-over (`MessageStream::hand_over`) stops the
+    /// connection reading by dropping the future of this method wherever it waits, if
+    /// `ReadHalf::can_take_unread` says that it can.
+    ///
     /// The default implementation keeps what it read of a message in `already_received_bytes`
     /// and `already_received_fds`, and never reads past the end of the message. So a call that is
     /// dropped while it waits loses nothing, as long as a call to `recvmsg` that is dropped while
@@ -352,26 +353,20 @@ pub trait ReadHalf: std::fmt::Debug + Send + Sync + 'static {
     /// implementation, keeps the first three promises, and holds nothing for `take_unread` to take
     /// out.
     ///
-    /// The read half of a
-    #[cfg_attr(feature = "p2p", doc = "[`Channel`]")]
-    #[cfg_attr(not(feature = "p2p"), doc = "`Channel`")]
-    /// returns `true`. A channel carries whole messages, so it takes back the whole messages that
-    /// a connection over a channel leaves unread, and fails on part of one, which can only come
-    /// from a connection over some other socket. The end of its input is the other end of the
-    /// channel being closed.
+    /// The read half of a `Channel` returns `true`. A channel carries whole messages, so it takes
+    /// the whole messages that it is given as already received ahead of those that come over the
+    /// channel, and fails on part of one. The end of its input is the other end of the channel
+    /// being closed.
     ///
     /// The default implementation returns `false`. Then [`MessageStream::hand_over`] fails with
-    /// [`Error::Unsupported`] for a connection over this half, and so does [`Builder::build`] for a
-    /// connection that takes over ([`Builder::take_over`]) a hand-over that holds unread bytes or
-    /// file descriptors.
+    /// [`Error::Unsupported`] for a connection over this half.
     ///
-    /// This method is only available when the `handover` feature is enabled.
+    /// This method is only available on unix, with the `handover` feature.
     ///
-    /// [`Builder::build`]: crate::connection::Builder::build
     /// [`Builder::take_over`]: crate::connection::Builder::take_over
     /// [`Error::Unsupported`]: crate::Error::Unsupported
     /// [`MessageStream::hand_over`]: crate::MessageStream::hand_over
-    #[cfg(feature = "handover")]
+    #[cfg(all(unix, feature = "handover"))]
     fn can_take_unread(&self) -> bool {
         false
     }
@@ -390,14 +385,12 @@ pub trait ReadHalf: std::fmt::Debug + Send + Sync + 'static {
     /// from one call of `receive_message` to the next, such as one that leaves `receive_message`
     /// to the default implementation.
     ///
-    /// This method is only available when the `handover` feature is enabled.
+    /// This method is only available on unix, with the `handover` feature.
     ///
     /// [`MessageStream::hand_over`]: crate::MessageStream::hand_over
-    #[cfg(feature = "handover")]
-    fn take_unread(&mut self, bytes: &mut Vec<u8>, #[cfg(unix)] fds: &mut Vec<OwnedFd>) {
-        let _ = bytes;
-        #[cfg(unix)]
-        let _ = fds;
+    #[cfg(all(unix, feature = "handover"))]
+    fn take_unread(&mut self, bytes: &mut Vec<u8>, fds: &mut Vec<OwnedFd>) {
+        let _ = (bytes, fds);
     }
 }
 
@@ -411,7 +404,8 @@ pub trait WriteHalf: std::fmt::Debug + Send + Sync + 'static {
     /// This is the higher-level method to send a full D-Bus message.
     ///
     /// The default implementation uses `sendmsg` to send the message, and then `flush`.
-    /// Implementers should override either this or `sendmsg`.
+    /// Implementers should override either this or `sendmsg`. A connection over a half that can
+    /// resume writes ([`WriteHalf::can_resume_writes`]) doesn't call this.
     async fn send_message(&mut self, msg: &Message) -> crate::Result<()> {
         let data = msg.data();
         let serial = msg.primary_header().serial_num();
@@ -452,6 +446,9 @@ pub trait WriteHalf: std::fmt::Debug + Send + Sync + 'static {
     ///
     /// If this fails, the messages before the one that it failed on have been sent in full, and
     /// that one may have been sent in part.
+    ///
+    /// A connection over a half that can resume writes ([`WriteHalf::can_resume_writes`]) doesn't
+    /// call this.
     async fn send_messages(&mut self, msgs: &[Message]) -> crate::Result<()> {
         for msg in msgs {
             self.send_message(msg).await?;
@@ -464,7 +461,7 @@ pub trait WriteHalf: std::fmt::Debug + Send + Sync + 'static {
     ///
     /// On success, return the number of bytes written. There may be a partial write, in
     /// which case the caller is responsible for sending the remaining data by calling this
-    /// method again until everything is written or it returns an error of kind `WouldBlock`.
+    /// method again until everything is written, or it fails.
     ///
     /// If at least one byte has been written, then all the provided file descriptors will
     /// have been sent as well, and should not be provided again in subsequent calls.
@@ -473,7 +470,8 @@ pub trait WriteHalf: std::fmt::Debug + Send + Sync + 'static {
     /// will return `Err(ErrorKind::InvalidInput)`.
     ///
     /// The default implementation simply panics. Implementers must override either `send_message`
-    /// or this method.
+    /// or this method. A half that can resume writes ([`WriteHalf::can_resume_writes`]) must
+    /// override this one, which zbus then calls directly.
     async fn sendmsg(
         &mut self,
         _buffer: &[u8],
@@ -484,14 +482,18 @@ pub trait WriteHalf: std::fmt::Debug + Send + Sync + 'static {
 
     /// Flush whatever the socket holds on to of the bytes `sendmsg` was given.
     ///
-    /// The default `send_message` calls this once it has handed a whole message to `sendmsg`. The
-    /// authentication handshake calls it each time before it waits for the peer to answer, so the
-    /// commands it pipelines go out together. A socket that holds on to what it is given, such as
-    /// one over a buffered or encrypted stream, has to send it on here: zbus has no other way to
-    /// flush it, and the peer would never see it otherwise.
+    /// The default `send_message` calls this once it has handed a whole message to `sendmsg`, and a
+    /// connection over a half that can resume writes ([`WriteHalf::can_resume_writes`]) once a send
+    /// has handed it all of its messages. The authentication handshake calls it each time before
+    /// it waits for the peer to answer, so the commands it pipelines go out together, and
+    /// [`Connection::flush`] calls it last. A socket that holds on to what it is given, such as one
+    /// over a buffered or encrypted stream, has to send it on here: zbus has no other way to flush
+    /// it, and the peer would never see it otherwise.
     ///
     /// The default implementation does nothing, which suits a socket that sends what it is given
     /// right away.
+    ///
+    /// [`Connection::flush`]: crate::Connection::flush
     async fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
@@ -520,6 +522,53 @@ pub trait WriteHalf: std::fmt::Debug + Send + Sync + 'static {
     /// The peer credentials.
     async fn peer_credentials(&mut self) -> io::Result<ConnectionCredentials> {
         Ok(ConnectionCredentials::default())
+    }
+
+    /// Whether writes through this half can be resumed: whether, once a send on the connection is
+    /// dropped, or fails, in the middle of a message, the next send or [`Connection::flush`] can
+    /// write the rest of that message.
+    ///
+    /// For that, zbus writes through [`WriteHalf::sendmsg`] itself, a message at a time, counting
+    /// what each call takes, and calls neither [`WriteHalf::send_message`] nor
+    /// [`WriteHalf::send_messages`]. A half that returns `true` promises that `sendmsg`:
+    ///
+    /// * takes the bytes that it is given as they are, in order, for the peer;
+    /// * returns exactly how many of them it took;
+    /// * sends the file descriptors that it is given along with the first byte that it takes;
+    /// * takes nothing in a call whose future is dropped before it returns;
+    ///
+    /// and that [`WriteHalf::flush`] sends on all that `sendmsg` took and the half still holds, and
+    /// loses none of it in a call whose future is dropped before it returns, which leaves it for
+    /// the next call to `flush`.
+    ///
+    /// zbus hands `sendmsg` the file descriptors of each message along with its first byte, and
+    /// calls `flush` once a send wrote all of its messages. A call to `sendmsg` that takes none of
+    /// what it is given fails the send, with an I/O error of kind
+    /// [`WriteZero`](io::ErrorKind::WriteZero). A send that is dropped, or that fails, midway
+    /// leaves the rest of its message for the connection to write ahead of anything else, as
+    /// [`Connection::send`] tells.
+    ///
+    /// With the `handover` feature, on unix, once a hand-over of the connection is prepared
+    /// (`Connection::prepare_hand_over`), a send drops the future of a call to `sendmsg` or `flush`
+    /// that waits, rather than wait for it, and the connection keeps what is left, for a later send
+    /// or [`Connection::flush`], or for a hand-over to hand over.
+    ///
+    /// The default implementation returns `false`, which suits a half that sends whole messages
+    /// through `send_message` and `send_messages`. Over such a half, a send that is dropped, or
+    /// that fails, in the middle of a message can leave part of it on the socket, after which the
+    /// peer can make no sense of anything that the connection sends.
+    ///
+    /// With the `handover` feature, on unix, a hand-over (`MessageStream::hand_over`) of a
+    /// connection over such a half waits for a send under way, and fails once one was cut off
+    /// midway. `Connection::prepare_hand_over` returns `false` for such a connection, as its sends
+    /// have to wait for the half.
+    ///
+    /// zbus asks this once, as the connection is built.
+    ///
+    /// [`Connection::flush`]: crate::Connection::flush
+    /// [`Connection::send`]: crate::Connection::send
+    fn can_resume_writes(&self) -> bool {
+        false
     }
 }
 
@@ -650,18 +699,14 @@ impl ReadHalf for Box<dyn ReadHalf> {
         (**self).auth_mechanism()
     }
 
-    #[cfg(feature = "handover")]
+    #[cfg(all(unix, feature = "handover"))]
     fn can_take_unread(&self) -> bool {
         (**self).can_take_unread()
     }
 
-    #[cfg(feature = "handover")]
-    fn take_unread(&mut self, bytes: &mut Vec<u8>, #[cfg(unix)] fds: &mut Vec<OwnedFd>) {
-        (**self).take_unread(
-            bytes,
-            #[cfg(unix)]
-            fds,
-        )
+    #[cfg(all(unix, feature = "handover"))]
+    fn take_unread(&mut self, bytes: &mut Vec<u8>, fds: &mut Vec<OwnedFd>) {
+        (**self).take_unread(bytes, fds)
     }
 }
 
@@ -708,6 +753,10 @@ impl WriteHalf for Box<dyn WriteHalf> {
 
     async fn peer_credentials(&mut self) -> io::Result<ConnectionCredentials> {
         (**self).peer_credentials().await
+    }
+
+    fn can_resume_writes(&self) -> bool {
+        (**self).can_resume_writes()
     }
 }
 
