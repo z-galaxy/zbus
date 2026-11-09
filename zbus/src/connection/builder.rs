@@ -1,9 +1,9 @@
 #[cfg(feature = "service")]
 use std::collections::HashMap;
-#[cfg(all(unix, feature = "handover"))]
+#[cfg(all(target_os = "linux", feature = "handover"))]
 use std::os::fd::OwnedFd;
 use std::{collections::HashSet, mem, num::NonZeroUsize, vec};
-#[cfg(all(unix, feature = "handover"))]
+#[cfg(all(target_os = "linux", feature = "handover"))]
 use std::{fmt, num::NonZeroU32};
 #[cfg(feature = "service")]
 use zruntime::Event;
@@ -18,7 +18,7 @@ use uds_windows::UnixStream;
 
 #[cfg(any(feature = "bus-impl", feature = "handover"))]
 use crate::MessageStream;
-#[cfg(all(unix, feature = "handover"))]
+#[cfg(all(target_os = "linux", feature = "handover"))]
 use crate::runtime::IoSource;
 #[cfg(any(unix, windows))]
 use crate::runtime::io::UnixOps;
@@ -40,17 +40,17 @@ use crate::{
     names::InterfaceName,
     object_server::{ArcInterface, Interface},
 };
-#[cfg(all(unix, feature = "handover"))]
+#[cfg(all(target_os = "linux", feature = "handover"))]
 use crate::{message::header::raise_next_serial, names::OwnedUniqueName};
 
-#[cfg(all(unix, feature = "handover"))]
+#[cfg(all(target_os = "linux", feature = "handover"))]
 use super::handover::SocketKind;
 use super::{
     DEFAULT_MAX_QUEUED,
     handshake::{AuthMechanism, Authenticated},
     socket::{BoxedSplit, ReadHalf, Split, WriteHalf, Writes},
 };
-#[cfg(all(unix, feature = "handover"))]
+#[cfg(all(target_os = "linux", feature = "handover"))]
 use super::{Handover, handover::HandoverSocket, socket_write::Unwritten};
 
 #[derive(Debug)]
@@ -118,11 +118,11 @@ pub struct Builder<'a> {
     writes: Option<Writes>,
     // The socket that the connection runs over, once connected, if zbus drives it and so can give
     // a descriptor of it for a hand-over.
-    #[cfg(all(unix, feature = "handover"))]
+    #[cfg(all(target_os = "linux", feature = "handover"))]
     io_source: Option<(IoSource, SocketKind)>,
     // What a connection that was handed over leaves to the one that takes it over, if this is
     // the builder of that one.
-    #[cfg(all(unix, feature = "handover"))]
+    #[cfg(all(target_os = "linux", feature = "handover"))]
     taken_over: Option<TakenOver>,
     error: Option<Error>,
 }
@@ -274,7 +274,7 @@ impl<'a> Builder<'a> {
     /// This is similar to [`Builder::socket`], except that the socket is either already
     /// authenticated or does not require authentication.
     ///
-    /// With the `handover` feature, on unix, to go on with a connection that was handed over, use
+    /// With the `handover` feature, on Linux, to go on with a connection that was handed over, use
     /// `Builder::take_over` instead, which also takes what that connection left unread.
     ///
     /// An invalid GUID is reported by [`Builder::build`].
@@ -302,7 +302,7 @@ impl<'a> Builder<'a> {
     /// handed over. It goes through no authentication handshake, and a connection to a bus says no
     /// `Hello`.
     ///
-    /// This method is only available on unix, with the `handover` feature.
+    /// This method is only available on Linux, with the `handover` feature.
     ///
     /// It yields the messages that the other connection left unread first: those that were queued
     /// on its stream, as they were, then those of what it read off the socket after them, and then
@@ -338,7 +338,7 @@ impl<'a> Builder<'a> {
     /// [`Connection::flush`]: crate::Connection::flush
     /// [`Connection::unwritten_len`]: crate::Connection::unwritten_len
     /// [`MessageStream::hand_over`]: crate::MessageStream::hand_over
-    #[cfg(all(unix, feature = "handover"))]
+    #[cfg(all(target_os = "linux", feature = "handover"))]
     pub fn take_over(handover: Handover) -> Self {
         let Handover {
             socket,
@@ -666,7 +666,7 @@ impl<'a> Builder<'a> {
     /// To get the [`Connection`] out of the returned stream, use `Connection::from(&stream)` —
     /// this is cheap (an `Arc` clone).
     ///
-    /// With the `handover` feature, on unix, the stream has had every message of the connection,
+    /// With the `handover` feature, on Linux, the stream has had every message of the connection,
     /// from the first, so the connection can be handed over through it
     /// (`MessageStream::hand_over`). A connection that takes over (`Builder::take_over`) yields the
     /// messages that it was handed as soon as it is built. A stream made from it once it is built
@@ -763,7 +763,7 @@ impl<'a> Builder<'a> {
         let mut auth = self.connect(is_bus_conn, &runtime).await?;
         // What is left of a hand-over that the connection takes over, if any: the messages that it
         // yields first, and what it writes first.
-        #[cfg(all(unix, feature = "handover"))]
+        #[cfg(all(target_os = "linux", feature = "handover"))]
         let (taken_over, unwritten) = self
             .taken_over
             .take()
@@ -779,9 +779,9 @@ impl<'a> Builder<'a> {
         let mut conn = Connection::new(
             auth,
             self.writes.take(),
-            #[cfg(all(unix, feature = "handover"))]
+            #[cfg(all(target_os = "linux", feature = "handover"))]
             self.io_source.take(),
-            #[cfg(all(unix, feature = "handover"))]
+            #[cfg(all(target_os = "linux", feature = "handover"))]
             unwritten,
             is_bus_conn,
             runtime,
@@ -823,7 +823,7 @@ impl<'a> Builder<'a> {
             already_received_fds,
             #[cfg(feature = "bus-impl")]
             self.validate_bodies,
-            #[cfg(all(unix, feature = "handover"))]
+            #[cfg(all(target_os = "linux", feature = "handover"))]
             taken_over,
         );
 
@@ -865,9 +865,9 @@ impl<'a> Builder<'a> {
             user_id: None,
             runtime: None,
             writes: None,
-            #[cfg(all(unix, feature = "handover"))]
+            #[cfg(all(target_os = "linux", feature = "handover"))]
             io_source: None,
-            #[cfg(all(unix, feature = "handover"))]
+            #[cfg(all(target_os = "linux", feature = "handover"))]
             taken_over: None,
             error,
         }
@@ -909,7 +909,7 @@ impl<'a> Builder<'a> {
         self.writes = stream.take_writes();
         // Ahead of the authenticated socket that it builds on, as the GUID that comes with it is
         // that of the hand-over, not the one that `target_connect` gives.
-        #[cfg(all(unix, feature = "handover"))]
+        #[cfg(all(target_os = "linux", feature = "handover"))]
         if let Some(taken_over) = &mut self.taken_over {
             return taken_over.authenticated(
                 stream,
@@ -1001,7 +1001,7 @@ impl<'a> Builder<'a> {
             #[cfg(unix)]
             Target::UnixStream(stream) => {
                 let socket = registered(runtime, stream, UnixOps)?;
-                #[cfg(all(unix, feature = "handover"))]
+                #[cfg(all(target_os = "linux", feature = "handover"))]
                 {
                     self.io_source = Some((socket.source().clone(), SocketKind::Unix));
                 }
@@ -1020,7 +1020,7 @@ impl<'a> Builder<'a> {
             }
             Target::TcpStream(stream) => {
                 let socket = registered(runtime, stream, TcpOps)?;
-                #[cfg(all(unix, feature = "handover"))]
+                #[cfg(all(target_os = "linux", feature = "handover"))]
                 {
                     self.io_source = Some((socket.source().clone(), SocketKind::Tcp));
                 }
@@ -1030,7 +1030,7 @@ impl<'a> Builder<'a> {
             Target::Address(address) => {
                 guid = address.guid().map(|g| g.to_owned().into());
                 let stream = address.connect(runtime).await?;
-                #[cfg(all(unix, feature = "handover"))]
+                #[cfg(all(target_os = "linux", feature = "handover"))]
                 {
                     self.io_source = stream.source();
                 }
@@ -1051,7 +1051,7 @@ impl<'a> Builder<'a> {
 
 /// What [`Builder::take_over`] keeps of a [`Handover`] for the build: everything but the socket,
 /// which is the target of the builder.
-#[cfg(all(unix, feature = "handover"))]
+#[cfg(all(target_os = "linux", feature = "handover"))]
 struct TakenOver {
     server_guid: OwnedGuid,
     unique_name: Option<OwnedUniqueName>,
@@ -1065,7 +1065,7 @@ struct TakenOver {
     unwritten: Unwritten,
 }
 
-#[cfg(all(unix, feature = "handover"))]
+#[cfg(all(target_os = "linux", feature = "handover"))]
 impl TakenOver {
     /// The connection over `stream` that goes on from the hand-over, with `unique_name` in place
     /// of that of the hand-over, if any, as the builder says that it is `p2p` or not.
@@ -1107,7 +1107,7 @@ impl TakenOver {
 
 /// Shows how many messages, bytes and file descriptors were left unread and unwritten rather than
 /// which, as a `Handover` does.
-#[cfg(all(unix, feature = "handover"))]
+#[cfg(all(target_os = "linux", feature = "handover"))]
 impl fmt::Debug for TakenOver {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut taken_over = f.debug_struct("TakenOver");

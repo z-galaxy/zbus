@@ -1,4 +1,4 @@
-#[cfg(all(unix, feature = "handover"))]
+#[cfg(all(target_os = "linux", feature = "handover"))]
 use std::collections::VecDeque;
 use std::{
     collections::HashMap,
@@ -8,7 +8,7 @@ use std::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
-#[cfg(all(unix, feature = "handover"))]
+#[cfg(all(target_os = "linux", feature = "handover"))]
 use std::{
     future::{Future, poll_fn},
     mem,
@@ -17,7 +17,7 @@ use std::{
 };
 
 use zruntime::Event;
-#[cfg(all(unix, feature = "handover"))]
+#[cfg(all(target_os = "linux", feature = "handover"))]
 use zruntime::EventListener;
 
 use crate::{
@@ -28,10 +28,10 @@ use crate::{
     runtime::{Runtime, Task, locks::Mutex},
 };
 
-#[cfg(all(unix, feature = "handover"))]
+#[cfg(all(target_os = "linux", feature = "handover"))]
 use super::handover::{ReadParts, ReaderEnd, StopStatus, ends_input, stopped_error};
 use super::socket::ReadHalf;
-#[cfg(all(unix, feature = "handover"))]
+#[cfg(all(target_os = "linux", feature = "handover"))]
 use super::socket_write::Prepared;
 
 #[derive(Debug)]
@@ -50,7 +50,7 @@ pub(crate) struct SocketReader {
     validate_bodies: bool,
     /// The messages that a connection that this one took over left unread, oldest first, which
     /// the reader yields ahead of what it reads off the socket.
-    #[cfg(all(unix, feature = "handover"))]
+    #[cfg(all(target_os = "linux", feature = "handover"))]
     taken_over: VecDeque<Message>,
 }
 
@@ -75,14 +75,14 @@ impl SocketReader {
             socket_status,
             #[cfg(feature = "bus-impl")]
             validate_bodies,
-            #[cfg(all(unix, feature = "handover"))]
+            #[cfg(all(target_os = "linux", feature = "handover"))]
             taken_over: VecDeque::new(),
         }
     }
 
     /// The reader, to yield `msgs`, which a connection that this one took over left unread, ahead
     /// of what it reads off the socket.
-    #[cfg(all(unix, feature = "handover"))]
+    #[cfg(all(target_os = "linux", feature = "handover"))]
     pub fn yielding_first(mut self, msgs: Vec<Message>) -> Self {
         self.taken_over = msgs.into();
 
@@ -102,15 +102,15 @@ impl SocketReader {
     async fn receive_msg(mut self) {
         // Armed once, before the flag is first looked at: a stop asked for from now on is seen, by
         // the flag before a read or by the listener during one.
-        #[cfg(all(unix, feature = "handover"))]
+        #[cfg(all(target_os = "linux", feature = "handover"))]
         let mut stop = self.socket_status.stop.listener();
         loop {
             trace!("Waiting for message on the socket..");
-            #[cfg(all(unix, feature = "handover"))]
+            #[cfg(all(target_os = "linux", feature = "handover"))]
             let Some(msg) = self.read_unless_stopped(&mut stop).await else {
                 return self.stop().await;
             };
-            #[cfg(not(all(unix, feature = "handover")))]
+            #[cfg(not(all(target_os = "linux", feature = "handover")))]
             let msg = self.read_socket().await;
             match &msg {
                 Ok(msg) => {
@@ -165,7 +165,7 @@ impl SocketReader {
                 // end, which takes nothing away from what the connection read, and the connection
                 // that takes over comes to the same end. Nothing waits from here on, so the reader
                 // can't be let go of with them.
-                #[cfg(all(unix, feature = "handover"))]
+                #[cfg(all(target_os = "linux", feature = "handover"))]
                 {
                     let end = match &msg {
                         Err(e) if stop.is_some() && ends_input(e) => {
@@ -198,7 +198,7 @@ impl SocketReader {
     ///
     /// A read that comes to a message in the same poll as the stop still yields it. A connection
     /// that can't stop has no `stop` listener, and reads on.
-    #[cfg(all(unix, feature = "handover"))]
+    #[cfg(all(target_os = "linux", feature = "handover"))]
     async fn read_unless_stopped(
         &mut self,
         stop: &mut Option<EventListener>,
@@ -224,7 +224,7 @@ impl SocketReader {
     ///
     /// The reader only gets here between messages, so each message that it read whole has gone to
     /// every stream that it was due to by now. Nothing is done to the socket itself.
-    #[cfg(all(unix, feature = "handover"))]
+    #[cfg(all(target_os = "linux", feature = "handover"))]
     async fn stop(mut self) {
         // Each stream yields what is queued for it, then ends. This is the only wait, so a reader
         // let go of here still holds the read half, and ends the connection as one that failed.
@@ -273,9 +273,9 @@ impl SocketReader {
         let seq = self.prev_seq + 1;
         // The messages that a connection that this one took over left unread come first, each at
         // its position among those of this connection.
-        #[cfg(all(unix, feature = "handover"))]
+        #[cfg(all(target_os = "linux", feature = "handover"))]
         let taken_over = self.taken_over.pop_front().map(|msg| msg.at_position(seq));
-        #[cfg(not(all(unix, feature = "handover")))]
+        #[cfg(not(all(target_os = "linux", feature = "handover")))]
         let taken_over = None;
         let msg = match taken_over {
             Some(msg) => msg,
@@ -324,7 +324,7 @@ impl SocketReader {
 /// [`MessageStream`]: crate::MessageStream
 impl Drop for SocketReader {
     fn drop(&mut self) {
-        #[cfg(all(unix, feature = "handover"))]
+        #[cfg(all(target_os = "linux", feature = "handover"))]
         {
             if self.socket.is_none() {
                 return;
@@ -351,11 +351,11 @@ pub(super) struct SocketStatus {
     /// without it. Nothing else is read along with it, so it is stored and loaded `Relaxed`.
     pub unwritten: AtomicUsize,
     /// Whether the reader is to stop, or did, for the connection to be handed over.
-    #[cfg(all(unix, feature = "handover"))]
+    #[cfg(all(target_os = "linux", feature = "handover"))]
     pub stop: StopStatus,
     /// Whether a hand-over of the connection is prepared, which has its sends stop, rather than
     /// wait for the socket.
-    #[cfg(all(unix, feature = "handover"))]
+    #[cfg(all(target_os = "linux", feature = "handover"))]
     pub prepared: Prepared,
 }
 

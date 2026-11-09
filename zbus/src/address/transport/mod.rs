@@ -11,7 +11,7 @@ use std::{
 #[cfg(windows)]
 use crate::win32::autolaunch_bus_address;
 use crate::{Address, Error, Result, connection::socket::BoxedSplit, runtime::Runtime};
-#[cfg(all(unix, feature = "handover"))]
+#[cfg(all(target_os = "linux", feature = "handover"))]
 use crate::{connection::handover::SocketKind, runtime::IoSource};
 
 #[cfg(all(unix, feature = "unixexec"))]
@@ -142,7 +142,7 @@ pub(crate) enum Stream {
     Unix {
         split: BoxedSplit,
         /// The socket itself, which a connection that is handed over gives a descriptor of.
-        #[cfg(all(unix, feature = "handover"))]
+        #[cfg(all(target_os = "linux", feature = "handover"))]
         source: IoSource,
     },
     #[cfg(all(unix, feature = "unixexec"))]
@@ -150,7 +150,7 @@ pub(crate) enum Stream {
     Tcp {
         split: BoxedSplit,
         /// As for `Unix`. WASI can't duplicate a descriptor, so it has no use for it.
-        #[cfg(all(unix, feature = "handover"))]
+        #[cfg(all(target_os = "linux", feature = "handover"))]
         source: IoSource,
     },
 }
@@ -158,7 +158,7 @@ pub(crate) enum Stream {
 impl Stream {
     /// The socket itself, and its kind, which a connection that is handed over gives a descriptor
     /// of, if zbus drives it.
-    #[cfg(all(unix, feature = "handover"))]
+    #[cfg(all(target_os = "linux", feature = "handover"))]
     pub(crate) fn source(&self) -> Option<(IoSource, SocketKind)> {
         match self {
             Self::Unix { source, .. } => Some((source.clone(), SocketKind::Unix)),

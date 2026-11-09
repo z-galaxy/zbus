@@ -180,7 +180,7 @@ impl Message {
     /// by the sender of one that came over a channel, or by a stream of a connection that was
     /// handed over. That clone keeps its own position, so the message is then a new one, which
     /// shares the bytes and the file descriptors of this one, and what was parsed of them.
-    #[cfg(any(feature = "p2p", all(unix, feature = "handover")))]
+    #[cfg(any(feature = "p2p", all(target_os = "linux", feature = "handover")))]
     pub(crate) fn at_position(mut self, recv_seq: u64) -> Self {
         if let Some(inner) = Arc::get_mut(&mut self.inner) {
             inner.recv_seq = Sequence { recv_seq };

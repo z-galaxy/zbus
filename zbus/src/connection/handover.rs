@@ -1,7 +1,7 @@
 //! Handing a connection over, for a connection in this process or in another one to go on from
 //! where it stopped, as a service or a bus that restarts does.
 //!
-//! This is behind the `handover` cargo feature, which is off by default, and only on unix.
+//! This is behind the `handover` cargo feature, which is off by default, and only on Linux.
 //!
 //! # How it goes
 //!
@@ -163,7 +163,7 @@ use crate::{
 /// The other process can be the next instance of a service that restarts, or a helper process.
 /// Nothing in a hand-over changes once it exists.
 ///
-/// This type is only available on unix, with the `handover` feature.
+/// This type is only available on Linux, with the `handover` feature.
 ///
 /// # Passing it to another process
 ///
