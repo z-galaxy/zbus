@@ -294,7 +294,7 @@ impl<'a> Builder<'a> {
     }
 
     /// A builder for the connection that goes on from `handover`, whichever of
-    /// [`MessageStream::hand_over`] or [`Handover::restore`] gave it, in this process or in another
+    /// [`MessageStream::hand_over`] or [`Restore::restore`] gave it, in this process or in another
     /// one.
     ///
     /// The connection runs over the socket of `handover`. It has the GUID, the unique name, the
@@ -338,6 +338,7 @@ impl<'a> Builder<'a> {
     /// [`Connection::flush`]: crate::Connection::flush
     /// [`Connection::unwritten_len`]: crate::Connection::unwritten_len
     /// [`MessageStream::hand_over`]: crate::MessageStream::hand_over
+    /// [`Restore::restore`]: zoter::Restore::restore
     #[cfg(all(target_os = "linux", feature = "handover"))]
     pub fn take_over(handover: Handover) -> Self {
         let Handover {

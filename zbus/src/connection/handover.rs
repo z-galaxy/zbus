@@ -23,9 +23,9 @@
 //!    took to send and didn't write, the file descriptors that came with all of those, and what a
 //!    connection that goes on needs to know of this one.
 //! 4. To pass the hand-over to another process, or to keep it while this one restarts, such as in
-//!    the file descriptor store of systemd, copy its record into memory with [`Handover::save`],
-//!    and pass the record on, with the file descriptors that [`Handover::fds`] gives. Then drop the
-//!    hand-over. [`Handover::restore`] gives it back from them, in the process that they go to.
+//!    the file descriptor store of systemd, copy its record into memory with [`Save::save`], and
+//!    pass the record on, with the file descriptors that [`Save::fds`] gives. Then drop the
+//!    hand-over. [`Restore::restore`] gives it back from them, in the process that they go to.
 //! 5. Build the connection that goes on, in this process or in another one that the hand-over is
 //!    passed to, with [`Builder::take_over`], and its stream with `build_message_stream`. It yields
 //!    the messages of the hand-over first, then goes on reading the socket where the other one
@@ -69,6 +69,7 @@
 //!     Connection, Error, block_on,
 //!     connection::{Builder, Handover},
 //! };
+//! use zoter::{Restore, Save};
 //!
 //! # fn main() -> zbus::Result<()> {
 //! block_on(async {
@@ -81,10 +82,11 @@
 //!     let mut record = vec![0; handover.saved_len().ok_or(Error::Unsupported)?];
 //!     handover.save(&mut record)?;
 //!     // Pass `record` and the descriptors on, such as to the file descriptor store of systemd,
-//!     // which keeps descriptors of its own, and get them back, such as in the next instance of
-//!     // the service. Duplicates stand for that here.
+//!     // which keeps descriptors of its own, as an item of a `zoter::Handover`, and get them back,
+//!     // such as in the next instance of the service. Duplicates stand for that here.
 //!     let fds = handover
 //!         .fds()
+//!         .iter()
 //!         .map(|fd| fd.try_clone_to_owned())
 //!         .collect::<std::io::Result<Vec<OwnedFd>>>()?;
 //!     drop(handover);
@@ -116,6 +118,9 @@
 //! [`Connection::prepare_hand_over`]: crate::Connection::prepare_hand_over
 //! [`MessageStream`]: crate::MessageStream
 //! [`MessageStream::hand_over`]: crate::MessageStream::hand_over
+//! [`Save::save`]: zoter::Save::save
+//! [`Save::fds`]: zoter::Save::fds
+//! [`Restore::restore`]: zoter::Restore::restore
 
 use std::{
     collections::VecDeque,
@@ -157,7 +162,7 @@ use crate::{
 };
 
 /// A connection taken apart by [`MessageStream::hand_over`], or put back together by
-/// [`Handover::restore`], for [`Builder::take_over`] to build a connection that goes on from where
+/// [`Restore::restore`], for [`Builder::take_over`] to build a connection that goes on from where
 /// it stopped, in this process or in another one.
 ///
 /// The other process can be the next instance of a service that restarts, or a helper process.
@@ -167,16 +172,16 @@ use crate::{
 ///
 /// # Passing it to another process
 ///
-/// [`Handover::save`] copies the record of the hand-over into memory that you give, anywhere, such
-/// as the place of the connection in a file that is mapped into memory, and [`Handover::fds`]
+/// [`Save::save`] copies the record of the hand-over into memory that you give, anywhere, such
+/// as the place of the connection in a file that is mapped into memory, and [`Save::fds`]
 /// gives the file descriptors that go with the record, that of the socket first. Pass the record on
 /// as bytes, and the descriptors as descriptors, such as over a unix socket or through the file
-/// descriptor store of systemd, and [`Handover::restore`] gives the hand-over back from them,
+/// descriptor store of systemd, and [`Restore::restore`] gives the hand-over back from them,
 /// wherever they go.
 ///
 /// The hand-over of a connection over a socket of your own, such as a `Channel`, or over the pipes
 /// of a `unixexec:` address, has no record: its halves can only go on in this process, which
-/// [`Handover::saved_len`] tells.
+/// [`Save::saved_len`] tells.
 ///
 /// What the hand-over holds of what the peer sent is the messages that were queued on the stream,
 /// then what was read after them and made no message of yet: whole messages, and the start of one
@@ -190,6 +195,10 @@ use crate::{
 /// [`Builder::take_over`]: super::Builder::take_over
 /// [`Connection::prepare_hand_over`]: crate::Connection::prepare_hand_over
 /// [`MessageStream::hand_over`]: crate::MessageStream::hand_over
+/// [`Save::save`]: zoter::Save::save
+/// [`Save::saved_len`]: zoter::Save::saved_len
+/// [`Save::fds`]: zoter::Save::fds
+/// [`Restore::restore`]: zoter::Restore::restore
 #[must_use = "dropping a `Handover` closes the descriptors that it holds, which disconnects the \
               peer unless they were passed on"]
 pub struct Handover {
@@ -236,13 +245,19 @@ impl Handover {
     pub fn unwritten_len(&self) -> usize {
         self.unwritten.len()
     }
+}
 
-    /// The exact length of the record that [`Handover::save`] writes, a multiple of 8, or `None`
+/// The record of the hand-over, and its file descriptors, to pass on to another process, such as
+/// through the file descriptor store of systemd, which [`Handover`]'s [`zoter::Restore`] impl
+/// gives the hand-over back from.
+impl zoter::Save for Handover {
+    /// The exact length of the record that [`Save::save`] writes, a multiple of 8, or `None`
     /// for the hand-over of a connection over a socket of your own, which only goes on in this
     /// process: a [`Socket`] of yours, a `Channel`, or the pipes of a `unixexec:` address.
     ///
     /// [`Socket`]: super::Socket
-    pub fn saved_len(&self) -> Option<usize> {
+    /// [`Save::save`]: zoter::Save::save
+    fn saved_len(&self) -> Option<usize> {
         match self.socket {
             HandoverSocket::Socket(_) => None,
             _ => Some(self.layout().len),
@@ -252,7 +267,7 @@ impl Handover {
     /// Copy the record of the hand-over into `dest`, which can be any memory, at any address, such
     /// as the place of the connection in a file that is mapped into memory.
     ///
-    /// `dest` is to be exactly [`Handover::saved_len`] bytes long. Each of its bytes is written
+    /// `dest` is to be exactly [`Save::saved_len`] bytes long. Each of its bytes is written
     /// once, the padding of the record included, and the bytes that the hand-over holds are copied
     /// once, from where it holds them. The hand-over is left as it was, so a caller that gives up
     /// on passing it on can still go on with it in this process, once it took back the descriptors
@@ -266,20 +281,26 @@ impl Handover {
     ///
     /// Nothing is written on an error, which is one of:
     ///
-    /// * [`Error::Unsupported`] for the hand-over of a connection over a socket of your own, whose
-    ///   `saved_len` is `None`.
-    /// * An I/O error ([`Error::InputOutput`]) of kind `InvalidInput` for a `dest` that is not
-    ///   `saved_len` bytes long, or for a hand-over with more messages or file descriptors than a
-    ///   record can count (4 billion).
-    pub fn save(&self, dest: &mut [u8]) -> Result<()> {
+    /// * [`io::ErrorKind::Unsupported`] for the hand-over of a connection over a socket of your
+    ///   own, whose `saved_len` is `None`.
+    /// * [`io::ErrorKind::InvalidInput`] for a `dest` that is not `saved_len` bytes long, or for a
+    ///   hand-over with more messages or file descriptors than a record can count (4 billion).
+    ///
+    /// [`Save::saved_len`]: zoter::Save::saved_len
+    fn save(&self, dest: &mut [u8]) -> io::Result<()> {
         let kind = match &self.socket {
             HandoverSocket::UnixStream(_) => UNIX_STREAM,
             HandoverSocket::TcpStream(_) => TCP_STREAM,
-            HandoverSocket::Socket(_) => return Err(Error::Unsupported),
+            HandoverSocket::Socket(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "the hand-over of a connection over a socket of your own has no record",
+                ));
+            }
         };
         let layout = self.layout();
         if dest.len() != layout.len {
-            return Err(invalid_input("the memory is not as long as the record").into());
+            return Err(invalid_input("the memory is not as long as the record"));
         }
         let kept = &self.unwritten.kept;
         let counts = [
@@ -300,7 +321,9 @@ impl Handover {
             .chain(&mut table)
             .any(|count| u32::try_from(count).is_err())
         {
-            return Err(invalid_input("too many messages or file descriptors for a record").into());
+            return Err(invalid_input(
+                "too many messages or file descriptors for a record",
+            ));
         }
         let name = self.unique_name.as_ref().map_or("", |name| name.as_str());
         let mut flags = 0;
@@ -361,39 +384,42 @@ impl Handover {
         Ok(())
     }
 
-    /// The file descriptors to pass on with the record, in the order that [`Handover::restore`]
+    /// The file descriptors to pass on with the record, in the order that [`Restore::restore`]
     /// takes them: that of the socket, then those of the messages that were queued on the stream,
     /// in their order, those that came in with what was read after them, and those of the messages
     /// that the connection took to send and didn't write, in their order. There are none for a
-    /// hand-over whose [`Handover::saved_len`] is `None`.
+    /// hand-over whose [`Save::saved_len`] is `None`.
     ///
     /// They are borrowed, so none is duplicated, and this can't fail on the limit of descriptors
     /// that a process may have open. That of the socket is close-on-exec in a hand-over that
     /// [`MessageStream::hand_over`](crate::MessageStream::hand_over) gave. The others, and all
     /// those of a restored hand-over, are as they came in, and zbus receives descriptors without
     /// close-on-exec.
-    pub fn fds(&self) -> impl ExactSizeIterator<Item = BorrowedFd<'_>> + '_ {
+    ///
+    /// [`Save::saved_len`]: zoter::Save::saved_len
+    /// [`Restore::restore`]: zoter::Restore::restore
+    fn fds(&self) -> Vec<BorrowedFd<'_>> {
         let socket = match &self.socket {
-            HandoverSocket::UnixStream(socket) => Some(socket.as_fd()),
-            HandoverSocket::TcpStream(socket) => Some(socket.as_fd()),
-            HandoverSocket::Socket(_) => None,
+            HandoverSocket::UnixStream(socket) => socket.as_fd(),
+            HandoverSocket::TcpStream(socket) => socket.as_fd(),
+            HandoverSocket::Socket(_) => return Vec::new(),
         };
         let kept = &self.unwritten.kept;
-        let len = socket.map_or(0, |_| {
-            1 + fd_count_of(&self.queued) + self.tail_fds.len() + fd_count_of(kept)
-        });
-        let fds = socket.into_iter().flat_map(move |socket| {
-            iter::once(socket)
-                .chain(fds_of(&self.queued))
-                .chain(self.tail_fds.iter().map(AsFd::as_fd))
-                .chain(fds_of(kept))
-        });
 
-        Counted { fds, len }
+        iter::once(socket)
+            .chain(fds_of(&self.queued))
+            .chain(self.tail_fds.iter().map(AsFd::as_fd))
+            .chain(fds_of(kept))
+            .collect()
     }
+}
 
-    /// The hand-over that [`Handover::save`] copied into `record`, given exactly those bytes, at
-    /// any address, with the file descriptors that [`Handover::fds`] gave, in their order, in this
+/// The hand-over that [`zoter::Save`] saved, out of its record and its file descriptors.
+impl zoter::Restore for Handover {
+    type Error = Error;
+
+    /// The hand-over that [`Save::save`] copied into `record`, given exactly those bytes, at
+    /// any address, with the file descriptors that [`Save::fds`] gave, in their order, in this
     /// process or in another one.
     ///
     /// This copies what it needs out of `record` before it returns.
@@ -408,7 +434,10 @@ impl Handover {
     ///   it counts.
     ///
     /// The file descriptors are closed on an error.
-    pub fn restore(record: &[u8], fds: Vec<OwnedFd>) -> Result<Handover> {
+    ///
+    /// [`Save::save`]: zoter::Save::save
+    /// [`Save::fds`]: zoter::Save::fds
+    fn restore(record: &[u8], fds: Vec<OwnedFd>) -> Result<Handover> {
         if record.get(..MAGIC.len()) != Some(MAGIC) {
             return Err(malformed());
         }
@@ -518,7 +547,9 @@ impl Handover {
             unwritten: Unwritten { cut, kept },
         })
     }
+}
 
+impl Handover {
     /// How the record of the hand-over is laid out.
     fn layout(&self) -> Layout {
         let name = self
@@ -1073,33 +1104,6 @@ fn fds_of<'m>(msgs: impl IntoIterator<Item = &'m Message>) -> impl Iterator<Item
         .map(AsFd::as_fd)
 }
 
-/// File descriptors, out of an iterator that can't tell how many it has left, with how many that
-/// is.
-struct Counted<I> {
-    fds: I,
-    len: usize,
-}
-
-impl<'f, I> Iterator for Counted<I>
-where
-    I: Iterator<Item = BorrowedFd<'f>>,
-{
-    type Item = BorrowedFd<'f>;
-
-    fn next(&mut self) -> Option<BorrowedFd<'f>> {
-        let fd = self.fds.next()?;
-        self.len -= 1;
-
-        Some(fd)
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        (self.len, Some(self.len))
-    }
-}
-
-impl<'f, I> ExactSizeIterator for Counted<I> where I: Iterator<Item = BorrowedFd<'f>> {}
-
 // The record of a hand-over, as `Handover::save` copies it and `Handover::restore` reads it.
 //
 // Its integers are little-endian, and its offsets are from its start, so that it can be anywhere
@@ -1231,8 +1235,10 @@ fn framed(
     Ok(msg)
 }
 
-/// The error of a record, or of file descriptors, that [`Handover::restore`] can make no hand-over
+/// The error of a record, or of file descriptors, that [`Restore::restore`] can make no hand-over
 /// of.
+///
+/// [`Restore::restore`]: zoter::Restore::restore
 fn malformed() -> Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
@@ -1241,7 +1247,9 @@ fn malformed() -> Error {
     .into()
 }
 
-/// The error, for `reason`, of memory that [`Handover::save`] can't copy a record into.
+/// The error, for `reason`, of memory that [`Save::save`] can't copy a record into.
+///
+/// [`Save::save`]: zoter::Save::save
 fn invalid_input(reason: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, reason)
 }
@@ -1303,6 +1311,8 @@ mod tests {
     use futures_util::StreamExt;
     use ntest::timeout;
     use test_log::test;
+
+    use zoter::{Restore, Save};
 
     use super::{Handover, HandoverSocket, MAJOR, NAME, ReaderEnd, TCP_STREAM, UNIX_STREAM};
     use crate::{
@@ -1693,7 +1703,12 @@ mod tests {
                 assert_eq!(handover.queued.len(), 2, "record: {record}");
                 assert_eq!(handover.tail, &msgs[2].data()[..20], "record: {record}");
                 assert_eq!(handover.fds().len(), 1 + pipes.len());
-                let inodes: Vec<_> = handover.fds().skip(1).map(|fd| inode(&fd)).collect();
+                let inodes: Vec<_> = handover
+                    .fds()
+                    .into_iter()
+                    .skip(1)
+                    .map(|fd| inode(&fd))
+                    .collect();
                 assert_eq!(inodes, pipes.each_ref().map(inode), "record: {record}");
                 drop(conn);
                 let handover = if record {
@@ -1856,7 +1871,12 @@ mod tests {
             let handover = stream.hand_over().await.unwrap();
 
             assert_eq!(unread(&handover), &msg.data()[..20]);
-            let inodes: Vec<_> = handover.fds().skip(1).map(|fd| inode(&fd)).collect();
+            let inodes: Vec<_> = handover
+                .fds()
+                .into_iter()
+                .skip(1)
+                .map(|fd| inode(&fd))
+                .collect();
             assert_eq!(inodes, pipes.each_ref().map(inode));
             let mut stream = on(Builder::take_over(handover), &runtime)
                 .build_message_stream()
@@ -2285,7 +2305,12 @@ mod tests {
             let handover = stream.hand_over().await.unwrap();
 
             assert!(handover.unwritten_len() > concat(&kept[1..]).len());
-            let inodes: Vec<_> = handover.fds().skip(1).map(|fd| inode(&fd)).collect();
+            let inodes: Vec<_> = handover
+                .fds()
+                .into_iter()
+                .skip(1)
+                .map(|fd| inode(&fd))
+                .collect();
             assert_eq!(inodes, pipes.each_ref().map(inode));
             drop(conn);
             let handover = through_a_record(handover, 6);
@@ -2832,7 +2857,12 @@ mod tests {
             assert_eq!(handover.server_guid, guid);
             assert_eq!(handover.unique_name.as_ref().unwrap().as_str(), UNIQUE_NAME);
             assert_eq!(unread(&handover), left);
-            let inodes: Vec<_> = handover.fds().skip(1).map(|fd| inode(&fd)).collect();
+            let inodes: Vec<_> = handover
+                .fds()
+                .into_iter()
+                .skip(1)
+                .map(|fd| inode(&fd))
+                .collect();
             assert_eq!(inodes, pipes.each_ref().map(inode));
             assert!(handover.unix_fd_passing);
             assert!(handover.p2p);
@@ -2891,14 +2921,14 @@ mod tests {
         let (handover, _peer) = every_part();
         let (record, _fds) = saved(&handover);
         assert_eq!(record.len() % 8, 0, "{} bytes of record", record.len());
-        let inodes: Vec<_> = handover.fds().map(|fd| inode(&fd)).collect();
+        let inodes: Vec<_> = handover.fds().into_iter().map(|fd| inode(&fd)).collect();
 
         let mut handover = handover;
         for at in [1, 2, 3, 4, 5, 6, 7, 8, 13] {
             handover = through_a_record(handover, at);
 
             assert_eq!(saved(&handover).0, record, "at {at}");
-            let restored: Vec<_> = handover.fds().map(|fd| inode(&fd)).collect();
+            let restored: Vec<_> = handover.fds().into_iter().map(|fd| inode(&fd)).collect();
             assert_eq!(restored, inodes, "at {at}");
         }
         assert_eq!(handover.queued.len(), 2);
@@ -3023,7 +3053,7 @@ mod tests {
 
             let saved = handover.save(&mut memory);
 
-            let Err(Error::InputOutput(e)) = &saved else {
+            let Err(e) = &saved else {
                 panic!("a record was saved into {len} bytes: {saved:?}");
             };
             assert_eq!(e.kind(), ErrorKind::InvalidInput, "{e}");
@@ -3044,10 +3074,12 @@ mod tests {
 
         let saved = handover.save(&mut []);
 
-        assert!(matches!(saved, Err(Error::Unsupported)), "{saved:?}");
+        let Err(e) = saved else {
+            panic!("a record of a socket of your own was saved");
+        };
+        assert_eq!(e.kind(), ErrorKind::Unsupported, "{e}");
         assert_eq!(handover.saved_len(), None);
-        assert_eq!(handover.fds().len(), 0);
-        assert_eq!(handover.fds().count(), 0);
+        assert!(handover.fds().is_empty());
     }
 
     /// A hand-over shows how much it holds rather than what, and can go to another thread.
@@ -3358,6 +3390,7 @@ mod tests {
     fn duplicates(handover: &Handover) -> Vec<OwnedFd> {
         handover
             .fds()
+            .into_iter()
             .map(|fd| fd.try_clone_to_owned().unwrap())
             .collect()
     }
@@ -3594,6 +3627,8 @@ mod tests_without_p2p {
         os::{fd::OwnedFd, unix::net::UnixStream},
     };
 
+    use zoter::{Restore, Save};
+
     use super::{Handover, HandoverSocket, P2P};
     use crate::{Error, Guid, OwnedGuid, connection::socket_write::Unwritten};
 
@@ -3656,6 +3691,7 @@ mod tests_without_p2p {
         handover.save(&mut record).unwrap();
         let fds = handover
             .fds()
+            .into_iter()
             .map(|fd| fd.try_clone_to_owned().unwrap())
             .collect();
 

@@ -1020,6 +1020,8 @@ mod tests {
     use test_log::test;
 
     #[cfg(all(target_os = "linux", feature = "handover"))]
+    use zoter::Save;
+    #[cfg(all(target_os = "linux", feature = "handover"))]
     use zruntime::Event;
 
     #[cfg(all(target_os = "linux", feature = "handover"))]
