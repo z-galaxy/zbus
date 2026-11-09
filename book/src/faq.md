@@ -88,7 +88,7 @@ Since the fields have to be transformed from/into `zbus::Variant`, make sure to 
 
 Moreover, since D-Bus does not have a concept of nullable types, it's important to ensure that
 `skip_serializing_if` and `default` attributes are used for optional fields. Fortunately, you can
-make use of the `default` container attribute if your struct can implemented the `Default` trait:
+make use of the `default` container attribute if your struct has implemented the `Default` trait:
 
 ```rust,noplayground
 # use zbus::{as_variant::{self, optional}, Type};
