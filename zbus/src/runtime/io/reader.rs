@@ -314,7 +314,7 @@ where
         self.socket.ops.auth_mechanism()
     }
 
-    #[cfg(all(unix, feature = "handover"))]
+    #[cfg(all(target_os = "linux", feature = "handover"))]
     fn can_take_unread(&self) -> bool {
         true
     }
@@ -332,7 +332,7 @@ where
     /// for the sets that waited here, of which there was at least one, so no more sets wait in
     /// that reader than would have in this one, and a sender that counts its descriptors still
     /// never has more than `MAX_FD_SETS` wait.
-    #[cfg(all(unix, feature = "handover"))]
+    #[cfg(all(target_os = "linux", feature = "handover"))]
     fn take_unread(&mut self, bytes: &mut Vec<u8>, fds: &mut Vec<OwnedFd>) {
         if !self.long.is_empty() {
             let mut long = mem::take(&mut self.long);

@@ -20,7 +20,7 @@ use zruntime::{
 use crate::ObjectServer;
 #[cfg(feature = "service")]
 use crate::log::debug;
-#[cfg(all(unix, feature = "handover"))]
+#[cfg(all(target_os = "linux", feature = "handover"))]
 use crate::runtime::IoSource;
 use crate::{
     DBusError, Error, MatchRule, ObjectPath, OwnedGuid, OwnedMatchRule, Result,
@@ -41,13 +41,13 @@ pub use builder::Builder;
 pub mod socket;
 pub use socket::Socket;
 
-#[cfg(all(unix, feature = "handover"))]
+#[cfg(all(target_os = "linux", feature = "handover"))]
 pub mod handover;
-#[cfg(all(unix, feature = "handover"))]
+#[cfg(all(target_os = "linux", feature = "handover"))]
 pub use handover::Handover;
-#[cfg(all(unix, feature = "handover"))]
+#[cfg(all(target_os = "linux", feature = "handover"))]
 use handover::SocketKind;
-#[cfg(all(unix, feature = "handover"))]
+#[cfg(all(target_os = "linux", feature = "handover"))]
 use handover::StopStatus;
 
 mod socket_reader;
@@ -80,7 +80,7 @@ pub(crate) struct ConnectionInner {
     socket_write: Mutex<SocketWrite>,
     /// Whether the connection can be prepared for a hand-over, as
     /// [`Connection::prepare_hand_over`] tells.
-    #[cfg(all(unix, feature = "handover"))]
+    #[cfg(all(target_os = "linux", feature = "handover"))]
     can_prepare_hand_over: bool,
 
     // Socket reader task
@@ -281,7 +281,7 @@ impl Connection {
     /// If `msg` carries file descriptors and the connection can't pass them, this fails with
     /// [`Error::Unsupported`] before it sends anything.
     ///
-    /// With the `handover` feature, on unix, once a hand-over of the connection is prepared
+    /// With the `handover` feature, on Linux, once a hand-over of the connection is prepared
     /// (`Connection::prepare_hand_over`), this doesn't wait for the socket: it writes what the
     /// connection has left to write, then `msg`, as far as the socket takes them at once, and keeps
     /// the rest, for the next send or [`Connection::flush`] to write, or for the hand-over to hand
@@ -329,7 +329,7 @@ impl Connection {
     /// If any of `msgs` carries file descriptors and the connection can't pass them, this fails
     /// with [`Error::Unsupported`] before it sends anything.
     ///
-    /// With the `handover` feature, on unix, once a hand-over of the connection is prepared
+    /// With the `handover` feature, on Linux, once a hand-over of the connection is prepared
     /// (`Connection::prepare_hand_over`), this doesn't wait for the socket: it writes what the
     /// connection has left to write, then `msgs`, as far as the socket takes them at once, and
     /// keeps the rest, for the next send or [`Connection::flush`] to write, or for the hand-over to
@@ -377,11 +377,11 @@ impl Connection {
     /// messages, so this is for a connection that is to send nothing more for a while, or for one
     /// that is about to be closed, whose peer would otherwise wait for the rest of that message.
     ///
-    /// With the `handover` feature, on unix, once a hand-over of the connection is prepared
+    /// With the `handover` feature, on Linux, once a hand-over of the connection is prepared
     /// (`Connection::prepare_hand_over`), it is also the messages that sends kept, after that rest,
     /// as sends no longer wait for the socket, while this does.
     ///
-    /// With the `handover` feature, on unix, for a connection that took over another one
+    /// With the `handover` feature, on Linux, for a connection that took over another one
     /// (`Builder::take_over`), it is also, ahead of all else, what that one took to send and didn't
     /// write, which the peer may be waiting for.
     ///
@@ -414,11 +414,11 @@ impl Connection {
     /// message that the send is in the middle of, if any, but not the messages that the send is
     /// yet to write any of.
     ///
-    /// With the `handover` feature, on unix, once a hand-over of the connection is prepared
+    /// With the `handover` feature, on Linux, once a hand-over of the connection is prepared
     /// (`Connection::prepare_hand_over`), this also counts the messages that sends kept, whole,
     /// from the moment that a send kept them.
     ///
-    /// With the `handover` feature, on unix, for a connection that took over another one
+    /// With the `handover` feature, on Linux, for a connection that took over another one
     /// (`Builder::take_over`), it also counts what that one took to send and didn't write, from the
     /// moment that it is built.
     ///
@@ -452,11 +452,11 @@ impl Connection {
     /// resume writes, this returns `false`, changing nothing, as a send over it has to wait for the
     /// half.
     ///
-    /// This method is only available on unix, with the `handover` feature.
+    /// This method is only available on Linux, with the `handover` feature.
     ///
     /// [`MessageStream::hand_over`]: crate::MessageStream::hand_over
     /// [`WriteHalf::can_resume_writes`]: socket::WriteHalf::can_resume_writes
-    #[cfg(all(unix, feature = "handover"))]
+    #[cfg(all(target_os = "linux", feature = "handover"))]
     pub fn prepare_hand_over(&self) -> bool {
         let inner = &*self.inner;
         if !inner.can_prepare_hand_over {
@@ -600,7 +600,7 @@ impl Connection {
             let pending_call = self.inner.pending_method_calls.register_call(serial)?;
             // The reader fails the calls that wait for their replies once it stops, which can be
             // a while after it was asked to, but a call made since is not to go out at all.
-            #[cfg(all(unix, feature = "handover"))]
+            #[cfg(all(target_os = "linux", feature = "handover"))]
             self.inner.socket_status.stop.ensure_reading()?;
             self.send(&msg).await?;
 
@@ -1295,7 +1295,7 @@ impl Connection {
 
         // A connection asked to stop reading makes no more streams, though its reader may be yet
         // to stop and close the channels of the others.
-        #[cfg(all(unix, feature = "handover"))]
+        #[cfg(all(target_os = "linux", feature = "handover"))]
         self.inner.socket_status.stop.ensure_reading()?;
         if self.inner.msg_senders.lock().await.is_empty() {
             return Err(self.reader_ended_error());
@@ -1347,7 +1347,7 @@ impl Connection {
 
     /// The error of a stream that can't be made, as the reader closed the channels of the others.
     fn reader_ended_error(&self) -> Error {
-        #[cfg(all(unix, feature = "handover"))]
+        #[cfg(all(target_os = "linux", feature = "handover"))]
         if let Err(e) = self.inner.socket_status.stop.ensure_reading() {
             return e;
         }
@@ -1412,8 +1412,11 @@ impl Connection {
     pub(crate) async fn new(
         auth: Authenticated,
         writes: Option<socket::Writes>,
-        #[cfg(all(unix, feature = "handover"))] source: Option<(IoSource, SocketKind)>,
-        #[cfg(all(unix, feature = "handover"))] unwritten: socket_write::Unwritten,
+        #[cfg(all(target_os = "linux", feature = "handover"))] source: Option<(
+            IoSource,
+            SocketKind,
+        )>,
+        #[cfg(all(target_os = "linux", feature = "handover"))] unwritten: socket_write::Unwritten,
         #[allow(unused)] bus_connection: bool,
         runtime: Runtime,
         method_timeout: Option<Duration>,
@@ -1443,28 +1446,28 @@ impl Connection {
             closed: AtomicBool::new(false),
             closed_event: Event::new(),
             unwritten: AtomicUsize::new(0),
-            #[cfg(all(unix, feature = "handover"))]
+            #[cfg(all(target_os = "linux", feature = "handover"))]
             stop: StopStatus::new(),
-            #[cfg(all(unix, feature = "handover"))]
+            #[cfg(all(target_os = "linux", feature = "handover"))]
             prepared: Default::default(),
         });
         let socket_write = SocketWrite::new(
             auth.socket_write,
             writes,
             socket_status.clone(),
-            #[cfg(all(unix, feature = "handover"))]
+            #[cfg(all(target_os = "linux", feature = "handover"))]
             source,
-            #[cfg(all(unix, feature = "handover"))]
+            #[cfg(all(target_os = "linux", feature = "handover"))]
             unwritten,
         );
-        #[cfg(all(unix, feature = "handover"))]
+        #[cfg(all(target_os = "linux", feature = "handover"))]
         let can_prepare_hand_over = socket_write.can_prepare_hand_over();
 
         let connection = Self {
             inner: Arc::new(ConnectionInner {
                 socket_status,
                 socket_write: Mutex::new(socket_write),
-                #[cfg(all(unix, feature = "handover"))]
+                #[cfg(all(target_os = "linux", feature = "handover"))]
                 can_prepare_hand_over,
                 server_guid: auth.server_guid,
                 #[cfg(unix)]
@@ -1523,7 +1526,7 @@ impl Connection {
     /// A connection is considered closed either when the remote peer disconnects, an I/O error
     /// occurs on the socket, or [`Connection::close`] is called.
     ///
-    /// With the `handover` feature, on unix, it is also closed once it was handed over
+    /// With the `handover` feature, on Linux, it is also closed once it was handed over
     /// (`MessageStream::hand_over`).
     pub fn is_closed(&self) -> bool {
         self.inner.is_closed()
@@ -1534,7 +1537,7 @@ impl Connection {
     /// A connection is considered closed either when the remote peer disconnects, an I/O error
     /// occurs on the socket, or [`Connection::close`] is called.
     ///
-    /// With the `handover` feature, on unix, it is also closed once it was handed over
+    /// With the `handover` feature, on Linux, it is also closed once it was handed over
     /// (`MessageStream::hand_over`).
     ///
     /// Returns immediately if the connection is already closed.
@@ -1590,7 +1593,7 @@ impl Connection {
     /// written yet ([`Connection::unwritten_len`]) is let go of. Call [`Connection::flush`] first
     /// to have it written.
     ///
-    /// With the `handover` feature, on unix, this does nothing to the socket of a connection that
+    /// With the `handover` feature, on Linux, this does nothing to the socket of a connection that
     /// was handed over (`MessageStream::hand_over`), as the socket is no longer the connection's.
     pub async fn close(self) -> Result<()> {
         self.inner.socket_status.activity_event.notify(usize::MAX);
@@ -1674,10 +1677,10 @@ impl Connection {
         already_read: Vec<u8>,
         #[cfg(unix)] already_received_fds: Vec<std::os::fd::OwnedFd>,
         #[cfg(feature = "bus-impl")] validate_bodies: bool,
-        #[cfg(all(unix, feature = "handover"))] taken_over: Vec<Message>,
+        #[cfg(all(target_os = "linux", feature = "handover"))] taken_over: Vec<Message>,
     ) {
         let inner = &self.inner;
-        #[cfg(all(unix, feature = "handover"))]
+        #[cfg(all(target_os = "linux", feature = "handover"))]
         inner
             .socket_status
             .stop
@@ -1694,7 +1697,7 @@ impl Connection {
             #[cfg(feature = "bus-impl")]
             validate_bodies,
         );
-        #[cfg(all(unix, feature = "handover"))]
+        #[cfg(all(target_os = "linux", feature = "handover"))]
         let reader = reader.yielding_first(taken_over);
         inner
             .socket_reader_task

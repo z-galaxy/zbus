@@ -19,7 +19,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, ToSocketAddrs},
     sync::Arc,
 };
-#[cfg(all(unix, feature = "handover"))]
+#[cfg(all(target_os = "linux", feature = "handover"))]
 use std::{
     pin::Pin,
     sync::atomic::{AtomicBool, Ordering},
@@ -997,7 +997,7 @@ where
 /// the rest once stopped again. A reader that takes over that rest, over a socket that carries what
 /// follows it, yields the messages that are left. All of them come with the same descriptors as
 /// from a reader that was never stopped.
-#[cfg(all(unix, feature = "handover"))]
+#[cfg(all(target_os = "linux", feature = "handover"))]
 #[test]
 #[timeout(15000)]
 fn a_reader_hands_over_what_it_is_yet_to_return() {
@@ -1216,7 +1216,7 @@ fn a_reader_hands_over_what_it_is_yet_to_return() {
 }
 
 /// Where a reader is stopped, in [`a_reader_hands_over_what_it_is_yet_to_return`].
-#[cfg(all(unix, feature = "handover"))]
+#[cfg(all(target_os = "linux", feature = "handover"))]
 struct Stop<'a> {
     /// The reads, each as where in the bytes of the messages it ends, and the pipes whose
     /// descriptors come with it.
@@ -1232,7 +1232,7 @@ struct Stop<'a> {
 /// The file descriptors that a reader takes over wait as one set, however many sets they waited
 /// in where they were handed over. Two more sets may then come in for them to wait with, and a
 /// fourth is an error, as with the sets that come with the reads of a reader of its own.
-#[cfg(all(unix, feature = "handover"))]
+#[cfg(all(target_os = "linux", feature = "handover"))]
 #[test]
 #[timeout(15000)]
 fn descriptors_taken_over_wait_as_one_set() {
@@ -1296,7 +1296,7 @@ fn descriptors_taken_over_wait_as_one_set() {
 /// nothing else over, or else one that the start moves into, out of the buffer, which grew to hold
 /// what the reader took over and then gives that room back. Either way, the read after the message
 /// has no more room than that of a reader that took nothing over.
-#[cfg(all(unix, feature = "handover"))]
+#[cfg(all(target_os = "linux", feature = "handover"))]
 #[test]
 #[timeout(15000)]
 fn the_start_of_a_long_message_taken_over_is_read_into_an_allocation_of_its_own() {
@@ -1353,7 +1353,7 @@ fn the_start_of_a_long_message_taken_over_is_read_into_an_allocation_of_its_own(
 /// the allocation of a message longer than its buffer that it was stopped in the middle of as it
 /// is too, with room for the rest of the message, which a reader that takes it over reads the rest
 /// into: the message that it yields is in that very allocation.
-#[cfg(all(unix, feature = "handover"))]
+#[cfg(all(target_os = "linux", feature = "handover"))]
 #[test]
 #[timeout(15000)]
 fn a_reader_hands_its_buffer_over_as_it_is() {
@@ -1408,7 +1408,7 @@ fn a_reader_hands_its_buffer_over_as_it_is() {
 
 /// A reader that handed its buffer over, and isn't given back what it held, as nothing else does,
 /// reads on into a new buffer.
-#[cfg(all(unix, feature = "handover"))]
+#[cfg(all(target_os = "linux", feature = "handover"))]
 #[test]
 #[timeout(15000)]
 fn a_reader_that_handed_its_buffer_over_reads_into_a_new_one() {
@@ -1443,7 +1443,7 @@ fn a_reader_that_handed_its_buffer_over_reads_into_a_new_one() {
 /// them out, whether the last of them is whole, or comes in part and moves into an allocation of
 /// its own: the read after the messages has no more room than that of a reader that took nothing
 /// over.
-#[cfg(all(unix, feature = "handover"))]
+#[cfg(all(target_os = "linux", feature = "handover"))]
 #[test]
 #[timeout(15000)]
 fn a_reader_gives_back_the_room_of_the_messages_that_it_took_over() {
@@ -1495,7 +1495,7 @@ fn a_reader_gives_back_the_room_of_the_messages_that_it_took_over() {
 }
 
 /// The room of the read of a reader that took nothing over, and reads `msg`.
-#[cfg(all(unix, feature = "handover"))]
+#[cfg(all(target_os = "linux", feature = "handover"))]
 async fn room_of_a_fresh_reader(runtime: &Runtime, msg: &Message) -> usize {
     let rooms = Arc::new(Mutex::new(vec![]));
     let script = VecDeque::from([(msg.data().to_vec(), vec![])]);
@@ -1514,7 +1514,7 @@ async fn room_of_a_fresh_reader(runtime: &Runtime, msg: &Message) -> usize {
 ///
 /// A runtime that waits for the socket to be readable before each read can have a call wait before
 /// it gets to that read, so a call that waits may not be done with the script yet.
-#[cfg(all(unix, feature = "handover"))]
+#[cfg(all(target_os = "linux", feature = "handover"))]
 async fn drop_once_stalled<F>(mut call: F, stalled: &AtomicBool)
 where
     F: Future<Output = crate::Result<Message>> + Unpin,
@@ -1532,7 +1532,7 @@ where
 ///
 /// The other end has written a byte, which the reads of `ops` leave alone, so the socket stays
 /// readable for any runtime that waits for it to be before each read.
-#[cfg(all(unix, feature = "handover"))]
+#[cfg(all(target_os = "linux", feature = "handover"))]
 fn scripted<O>(runtime: &Runtime, ops: O) -> (Box<dyn ReadHalf>, UnixStream)
 where
     O: SocketOps,
@@ -1545,11 +1545,11 @@ where
 
 /// The operations of a [`Scripted`] socket whose peer sends nothing more once the script is out,
 /// rather than closing its end, so that a read then waits. The flag is set once a read finds that.
-#[cfg(all(unix, feature = "handover"))]
+#[cfg(all(target_os = "linux", feature = "handover"))]
 #[derive(Debug)]
 struct Stalling(Scripted, Arc<AtomicBool>);
 
-#[cfg(all(unix, feature = "handover"))]
+#[cfg(all(target_os = "linux", feature = "handover"))]
 impl SocketOps for Stalling {
     fn recv(&self, source: &IoSource, buffer: &mut [u8]) -> RecvmsgResult {
         if self.0.0.lock().unwrap().is_empty() {
@@ -1576,11 +1576,11 @@ impl SocketOps for Stalling {
 }
 
 /// The operations of a [`Scripted`] socket that note how much room each read is given.
-#[cfg(all(unix, feature = "handover"))]
+#[cfg(all(target_os = "linux", feature = "handover"))]
 #[derive(Debug)]
 struct Rooms(Scripted, Arc<Mutex<Vec<usize>>>);
 
-#[cfg(all(unix, feature = "handover"))]
+#[cfg(all(target_os = "linux", feature = "handover"))]
 impl SocketOps for Rooms {
     fn recv(&self, source: &IoSource, buffer: &mut [u8]) -> RecvmsgResult {
         self.1.lock().unwrap().push(buffer.len());

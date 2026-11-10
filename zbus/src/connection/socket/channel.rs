@@ -130,7 +130,7 @@ impl super::ReadHalf for Reader {
         AuthMechanism::Anonymous
     }
 
-    #[cfg(all(unix, feature = "handover"))]
+    #[cfg(all(target_os = "linux", feature = "handover"))]
     fn can_take_unread(&self) -> bool {
         // zruntime's `Receiver::recv` loses no message when dropped, and the reader holds nothing
         // of its own. A channel carries whole messages, so the bytes and file descriptors that a

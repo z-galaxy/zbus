@@ -90,7 +90,7 @@ where
     }
 
     /// The socket itself, which a connection that is handed over gives a descriptor of.
-    #[cfg(all(unix, feature = "handover"))]
+    #[cfg(all(target_os = "linux", feature = "handover"))]
     pub(crate) fn source(&self) -> &IoSource {
         &self.source
     }

@@ -98,9 +98,9 @@ ibus = ["comms", "tokio?/process"]
 p2p = ["comms", "uuid?/v4"]
 # Enables API that is only needed for bus implementations (enables `p2p`).
 bus-impl = ["p2p"]
-# Enables API, on unix, to hand a connection over, for it to go on in this process or in another
-# one, as a service or a bus that restarts does.
-handover = ["comms"]
+# Enables API, on Linux, to hand a connection over, for it to go on in this process or in another
+# one, as a service or a bus that restarts through systemd's file descriptor store does.
+handover = ["comms", "dep:zoter"]
 
 [dependencies]
 zbus_macros = { path = "../zbus_macros", version = "6.2.1", default-features = false }
@@ -147,6 +147,9 @@ uds_windows = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+zoter = { workspace = true, optional = true }
 
 # On WASI, rustix is what a socket is read from, written to and switched to non-blocking mode
 # through: it has no sockets there, but a socket is a descriptor like any other.

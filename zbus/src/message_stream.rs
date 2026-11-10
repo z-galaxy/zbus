@@ -10,7 +10,7 @@ use futures_core::stream::{self, FusedStream};
 use ordered_stream::{OrderedStream, PollResult};
 use zruntime::{EventListener, broadcast::Receiver as ActiveReceiver};
 
-#[cfg(all(unix, feature = "handover"))]
+#[cfg(all(target_os = "linux", feature = "handover"))]
 use crate::connection::{Handover, handover::Backlog};
 use crate::{
     AsyncDrop, Connection, MatchRule, OwnedMatchRule, Result,
@@ -35,7 +35,7 @@ use crate::{
 /// remote peer going away, an I/O error on the socket, or the runtime taking away the task that
 /// reads it.
 ///
-/// With the `handover` feature, on unix, the stream also ends once a hand-over of its connection
+/// With the `handover` feature, on Linux, the stream also ends once a hand-over of its connection
 /// through another stream (`MessageStream::hand_over`) stops the connection reading, after
 /// everything that the connection read before it stopped and queued for the stream. Its `None` then
 /// comes with no error before it.
@@ -51,7 +51,7 @@ pub struct MessageStream {
     terminated: bool,
     // What a hand-over through this stream took off its queue and the stream is yet to yield,
     // which it yields first.
-    #[cfg(all(unix, feature = "handover"))]
+    #[cfg(all(target_os = "linux", feature = "handover"))]
     backlog: Backlog,
 }
 
@@ -63,7 +63,7 @@ impl Clone for MessageStream {
             // listener when it first needs one and runs to its own end.
             closed_listener: None,
             terminated: false,
-            #[cfg(all(unix, feature = "handover"))]
+            #[cfg(all(target_os = "linux", feature = "handover"))]
             backlog: self.backlog.clone(),
         }
     }
@@ -224,7 +224,7 @@ impl MessageStream {
     /// [`Builder::build_message_stream`] builds along with the connection has. Stop taking
     /// messages off it, and finish what you do with those that you took, before you call this.
     ///
-    /// This method is only available on unix, with the `handover` feature.
+    /// This method is only available on Linux, with the `handover` feature.
     ///
     /// This proceeds in order, once the checks that fail before anything is done to the
     /// connection, which the errors below tell, have passed:
@@ -355,7 +355,7 @@ impl MessageStream {
     /// [`Error::Unsupported`]: crate::Error::Unsupported
     /// [`ReadHalf::can_take_unread`]: crate::connection::socket::ReadHalf::can_take_unread
     /// [`WriteHalf::can_resume_writes`]: crate::connection::socket::WriteHalf::can_resume_writes
-    #[cfg(all(unix, feature = "handover"))]
+    #[cfg(all(target_os = "linux", feature = "handover"))]
     pub async fn hand_over(&mut self) -> Result<Handover> {
         if self.inner.match_rule.is_some() {
             return Err(crate::Error::Unsupported);
@@ -385,7 +385,7 @@ impl MessageStream {
             },
             closed_listener: None,
             terminated: false,
-            #[cfg(all(unix, feature = "handover"))]
+            #[cfg(all(target_os = "linux", feature = "handover"))]
             backlog: Backlog::default(),
         }
     }
@@ -397,7 +397,7 @@ impl stream::Stream for MessageStream {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
 
-        #[cfg(all(unix, feature = "handover"))]
+        #[cfg(all(target_os = "linux", feature = "handover"))]
         if let Some(item) = this.backlog.pop() {
             return Poll::Ready(Some(item));
         }
@@ -486,7 +486,7 @@ impl OrderedStream for MessageStream {
 impl FusedStream for MessageStream {
     fn is_terminated(&self) -> bool {
         // The queue can be over while the backlog, which comes before it, still holds messages.
-        #[cfg(all(unix, feature = "handover"))]
+        #[cfg(all(target_os = "linux", feature = "handover"))]
         if !self.backlog.is_empty() {
             return false;
         }
@@ -508,7 +508,7 @@ impl From<Connection> for MessageStream {
             },
             closed_listener: None,
             terminated: false,
-            #[cfg(all(unix, feature = "handover"))]
+            #[cfg(all(target_os = "linux", feature = "handover"))]
             backlog: Backlog::default(),
         }
     }

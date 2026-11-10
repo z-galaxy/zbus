@@ -116,3 +116,10 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 zruntime = { version = "0.2.0", default-features = false }
+
+# The traits through which a connection is handed over, as a record and file descriptors, to a
+# service's next instance through systemd's file descriptor store. From git until its first release.
+[workspace.dependencies.zoter]
+git = "https://github.com/z-galaxy/zoter"
+branch = "main"
+default-features = false
