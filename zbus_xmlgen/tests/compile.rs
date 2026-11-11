@@ -2,6 +2,11 @@
 //! zbus types. Catches regressions where xmlgen emits code that no longer
 //! satisfies the trait bounds expected by the `#[proxy]` macro.
 
+// The fixtures are generated from the sample XML, which gives their names and types, such as a
+// `foo` argument and deeply nested return types: lints about those would be about the inputs, not
+// about xmlgen, and would fail `cargo clippy --all-targets`.
+#![allow(clippy::disallowed_names, clippy::type_complexity)]
+
 mod sample_object0 {
     use zbus::proxy;
     include!("data/sample_object0.rs");
