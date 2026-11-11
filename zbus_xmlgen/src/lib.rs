@@ -528,7 +528,7 @@ fn write_member_docs<W: Write>(
         writeln!(
             w,
             "    /// * `{}` - {}",
-            to_identifier(name),
+            arg_name(name),
             lines.next().unwrap_or_default()
         )?;
         // Indent continuation lines so they stay part of the list item.
@@ -1028,7 +1028,7 @@ fn inputs_output_from_args(args: &[Arg<'_>], types: &Types<'_>) -> (String, Stri
                     .resolve(a.tp_type(), a.ty(), true)
                     .unwrap_or_else(|| to_rust_type(a.ty(), true, true));
                 let arg = if let Some(name) = a.name() {
-                    to_identifier(name)
+                    arg_name(name)
                 } else {
                     gen_name()
                 };
@@ -1094,7 +1094,7 @@ fn parse_signal_args(args: &[Arg<'_>], types: &Types<'_>) -> String {
             .resolve(a.tp_type(), a.ty(), false)
             .unwrap_or_else(|| to_rust_type(a.ty(), true, false));
         let arg = if let Some(name) = a.name() {
-            to_identifier(name)
+            arg_name(name)
         } else {
             gen_name()
         };
@@ -1102,6 +1102,12 @@ fn parse_signal_args(args: &[Arg<'_>], types: &Types<'_>) -> String {
     }
 
     inputs.join(", ")
+}
+
+/// The Rust name for a method or signal argument, from its D-Bus `name`, which can be in any case,
+/// e. g. `UUID` -> `uuid`.
+fn arg_name(name: &str) -> String {
+    to_identifier(&to_snakecase(name))
 }
 
 fn to_rust_type(ty: &Signature, input: bool, as_ref: bool) -> String {
