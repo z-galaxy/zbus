@@ -223,66 +223,67 @@ impl ConnectionStats {
         self.peak_bus_names
     }
 
-    /// The total number of messages received by this connection.
+    /// The number of messages queued in the message bus that have been received from this
+    /// connection and not yet dispatched.
     pub fn incoming_messages(&self) -> Option<u32> {
         self.incoming_messages
     }
 
-    /// The total number of messages sent by this connection.
+    /// The number of messages queued in the message bus to be delivered to this connection.
     pub fn outgoing_messages(&self) -> Option<u32> {
         self.outgoing_messages
     }
 
-    /// The total number of bytes received by this connection.
+    /// The number of bytes in the incoming messages, those of [`Self::incoming_messages`].
     pub fn incoming_bytes(&self) -> Option<u32> {
         self.incoming_bytes
     }
 
-    /// The total number of bytes sent by this connection.
+    /// The number of bytes in the outgoing messages, those of [`Self::outgoing_messages`].
     pub fn outgoing_bytes(&self) -> Option<u32> {
         self.outgoing_bytes
     }
 
-    /// The total number of file descriptors received by this connection.
+    /// The number of Unix file descriptors attached to the incoming messages.
     pub fn incoming_fds(&self) -> Option<u32> {
         self.incoming_fds
     }
 
-    /// The total number of file descriptors sent by this connection.
+    /// The number of Unix file descriptors attached to the outgoing messages.
     pub fn outgoing_fds(&self) -> Option<u32> {
         self.outgoing_fds
     }
 
-    /// The largest total number of messages that have been in use by this connection at any one
-    /// time.
+    /// The value of a `PeakIncomingMessages` entry. The specification doesn't define this entry: it
+    /// defines peaks of bytes and file descriptors only.
     pub fn peak_incoming_messages(&self) -> Option<u32> {
         self.peak_incoming_messages
     }
 
-    /// The largest total number of messages that have been in use by this connection at any one
-    /// time.
+    /// The value of a `PeakOutgoingMessages` entry. The specification doesn't define this entry: it
+    /// defines peaks of bytes and file descriptors only.
     pub fn peak_outgoing_messages(&self) -> Option<u32> {
         self.peak_outgoing_messages
     }
 
-    /// The largest total number of bytes that have been in use by this connection at any one time.
+    /// The highest number of bytes in the incoming messages at any one time.
     pub fn peak_incoming_bytes(&self) -> Option<u32> {
         self.peak_incoming_bytes
     }
 
-    /// The largest total number of bytes that have been in use by this connection at any one time.
+    /// The highest number of bytes in the outgoing messages at any one time.
     pub fn peak_outgoing_bytes(&self) -> Option<u32> {
         self.peak_outgoing_bytes
     }
 
-    /// The largest total number of file descriptors that have been in use by this connection at any
-    /// one time.
+    /// The highest number of Unix file descriptors attached to the incoming messages at any one
+    /// time.
     pub fn peak_incoming_fds(&self) -> Option<u32> {
         self.peak_incoming_fds
     }
 
-    /// The largest total number of file descriptors that have been in use by this connection at any
-    /// one time.
+    /// The highest number of Unix file descriptors attached to the outgoing messages at any one
+    /// time.
     pub fn peak_outgoing_fds(&self) -> Option<u32> {
         self.peak_outgoing_fds
     }
