@@ -94,3 +94,8 @@ fn shared_node_types_in_one_file() -> Result<(), Box<dyn Error>> {
 
     Ok(())
 }
+
+#[test]
+fn uppercase_args() -> Result<(), Box<dyn Error>> {
+    gen_diff!("uppercase_args.xml", "uppercase_args.rs")
+}

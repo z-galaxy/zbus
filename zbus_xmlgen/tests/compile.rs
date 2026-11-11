@@ -32,3 +32,12 @@ mod telepathy_edge_cases {
     use zbus::proxy;
     include!("data/telepathy_edge_cases.rs");
 }
+
+mod uppercase_args {
+    // Argument names are converted to snake case, so the generated code compiles without the
+    // `non_snake_case` warning.
+    #![deny(non_snake_case)]
+
+    use zbus::proxy;
+    include!("data/uppercase_args.rs");
+}
