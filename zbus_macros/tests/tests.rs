@@ -650,3 +650,54 @@ fn interface_property_setter_with_lifetime_parameter() {
 
     assert_eq!(Lifetimes::name(), "org.freedesktop.Lifetimes");
 }
+
+#[test]
+fn interface_arguments_named_like_generated_locals() {
+    use zbus::{Connection, ObjectServer, message::Header, object_server::Interface};
+
+    struct Names;
+
+    // The generated method dispatch must not depend on names the arguments can take.
+    #[interface(name = "org.freedesktop.Names")]
+    impl Names {
+        fn header_named_msg_body(&self, #[zbus(header)] msg_body: Header<'_>) -> bool {
+            msg_body.path().is_some()
+        }
+
+        fn emitter_named_hdr(&self, #[zbus(signal_emitter)] hdr: SignalEmitter<'_>) -> String {
+            hdr.path().to_string()
+        }
+
+        fn connection_named_hdr(&self, #[zbus(connection)] hdr: &Connection, n: u32) -> u32 {
+            let _ = hdr;
+            n
+        }
+
+        async fn server_named_hdr(
+            &self,
+            #[zbus(object_server)] hdr: &ObjectServer,
+            s: &str,
+        ) -> String {
+            let _ = hdr;
+            s.to_string()
+        }
+
+        fn args_named_hdr_and_msg_body(&self, hdr: u32, msg_body: u32) -> u32 {
+            hdr + msg_body
+        }
+
+        // `GetAll` collects the properties in a map, and `Set` receives the new value.
+        #[zbus(property)]
+        fn connection_named_props(&self, #[zbus(connection)] props: &Connection) -> u32 {
+            let _ = props;
+            0
+        }
+
+        #[zbus(property)]
+        fn set_connection_named_props(&self, input: u32, #[zbus(connection)] value: &Connection) {
+            let _ = (input, value);
+        }
+    }
+
+    assert_eq!(Names::name(), "org.freedesktop.Names");
+}
