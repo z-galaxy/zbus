@@ -159,16 +159,24 @@ pub(crate) fn array_display_fmt(
     if let [leading @ .., Variant::U8(b'\0')] = array.as_ref()
         && !leading.contains(&Variant::U8(b'\0'))
     {
-        let bytes = leading
-            .iter()
-            .map(|v| {
-                v.downcast_ref::<u8>()
-                    .expect("item must have a signature of a byte")
-            })
-            .collect::<Vec<_>>();
+        let bytes = leading.iter().map(|v| {
+            v.downcast_ref::<u8>()
+                .expect("item must have a signature of a byte")
+        });
 
-        let string = String::from_utf8_lossy(&bytes);
-        write!(f, "b{:?}", string.as_ref())?;
+        // Escape the bytes one by one, as a Rust byte string literal does, rather than decoding
+        // them as UTF-8, which would turn every invalid sequence into the same U+FFFD.
+        // Unlike `escape_ascii`, keep `'` as it is: it needs no escaping inside double
+        // quotes.
+        f.write_str("b\"")?;
+        for byte in bytes {
+            if byte == b'\'' {
+                f.write_char('\'')?;
+            } else {
+                write!(f, "{}", std::ascii::escape_default(byte))?;
+            }
+        }
+        f.write_char('"')?;
 
         return Ok(());
     }
