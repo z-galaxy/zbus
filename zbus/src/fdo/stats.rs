@@ -150,9 +150,19 @@ pub struct ConnectionStats {
     pub(crate) incoming_bytes: Option<u32>,
     #[serde(with = "optional", skip_serializing_if = "Option::is_none")]
     pub(crate) outgoing_bytes: Option<u32>,
-    #[serde(with = "optional", skip_serializing_if = "Option::is_none")]
+    // `PascalCase` would give `IncomingFds`, where the specification has `IncomingFDs`.
+    #[serde(
+        rename = "IncomingFDs",
+        with = "optional",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub(crate) incoming_fds: Option<u32>,
-    #[serde(with = "optional", skip_serializing_if = "Option::is_none")]
+    // `PascalCase` would give `OutgoingFds`, where the specification has `OutgoingFDs`.
+    #[serde(
+        rename = "OutgoingFDs",
+        with = "optional",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub(crate) outgoing_fds: Option<u32>,
     #[serde(with = "optional", skip_serializing_if = "Option::is_none")]
     pub(crate) peak_incoming_messages: Option<u32>,
@@ -162,9 +172,19 @@ pub struct ConnectionStats {
     pub(crate) peak_incoming_bytes: Option<u32>,
     #[serde(with = "optional", skip_serializing_if = "Option::is_none")]
     pub(crate) peak_outgoing_bytes: Option<u32>,
-    #[serde(with = "optional", skip_serializing_if = "Option::is_none")]
+    // `PascalCase` would give `PeakIncomingFds`, where the specification has `PeakIncomingFDs`.
+    #[serde(
+        rename = "PeakIncomingFDs",
+        with = "optional",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub(crate) peak_incoming_fds: Option<u32>,
-    #[serde(with = "optional", skip_serializing_if = "Option::is_none")]
+    // `PascalCase` would give `PeakOutgoingFds`, where the specification has `PeakOutgoingFDs`.
+    #[serde(
+        rename = "PeakOutgoingFDs",
+        with = "optional",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub(crate) peak_outgoing_fds: Option<u32>,
     #[serde(flatten)]
     pub(crate) rest: HashMap<String, OwnedVariant>,
@@ -203,66 +223,67 @@ impl ConnectionStats {
         self.peak_bus_names
     }
 
-    /// The total number of messages received by this connection.
+    /// The number of messages queued in the message bus that have been received from this
+    /// connection and not yet dispatched.
     pub fn incoming_messages(&self) -> Option<u32> {
         self.incoming_messages
     }
 
-    /// The total number of messages sent by this connection.
+    /// The number of messages queued in the message bus to be delivered to this connection.
     pub fn outgoing_messages(&self) -> Option<u32> {
         self.outgoing_messages
     }
 
-    /// The total number of bytes received by this connection.
+    /// The number of bytes in the incoming messages, those of [`Self::incoming_messages`].
     pub fn incoming_bytes(&self) -> Option<u32> {
         self.incoming_bytes
     }
 
-    /// The total number of bytes sent by this connection.
+    /// The number of bytes in the outgoing messages, those of [`Self::outgoing_messages`].
     pub fn outgoing_bytes(&self) -> Option<u32> {
         self.outgoing_bytes
     }
 
-    /// The total number of file descriptors received by this connection.
+    /// The number of Unix file descriptors attached to the incoming messages.
     pub fn incoming_fds(&self) -> Option<u32> {
         self.incoming_fds
     }
 
-    /// The total number of file descriptors sent by this connection.
+    /// The number of Unix file descriptors attached to the outgoing messages.
     pub fn outgoing_fds(&self) -> Option<u32> {
         self.outgoing_fds
     }
 
-    /// The largest total number of messages that have been in use by this connection at any one
-    /// time.
+    /// The value of a `PeakIncomingMessages` entry. The specification doesn't define this entry: it
+    /// defines peaks of bytes and file descriptors only.
     pub fn peak_incoming_messages(&self) -> Option<u32> {
         self.peak_incoming_messages
     }
 
-    /// The largest total number of messages that have been in use by this connection at any one
-    /// time.
+    /// The value of a `PeakOutgoingMessages` entry. The specification doesn't define this entry: it
+    /// defines peaks of bytes and file descriptors only.
     pub fn peak_outgoing_messages(&self) -> Option<u32> {
         self.peak_outgoing_messages
     }
 
-    /// The largest total number of bytes that have been in use by this connection at any one time.
+    /// The highest number of bytes in the incoming messages at any one time.
     pub fn peak_incoming_bytes(&self) -> Option<u32> {
         self.peak_incoming_bytes
     }
 
-    /// The largest total number of bytes that have been in use by this connection at any one time.
+    /// The highest number of bytes in the outgoing messages at any one time.
     pub fn peak_outgoing_bytes(&self) -> Option<u32> {
         self.peak_outgoing_bytes
     }
 
-    /// The largest total number of file descriptors that have been in use by this connection at any
-    /// one time.
+    /// The highest number of Unix file descriptors attached to the incoming messages at any one
+    /// time.
     pub fn peak_incoming_fds(&self) -> Option<u32> {
         self.peak_incoming_fds
     }
 
-    /// The largest total number of file descriptors that have been in use by this connection at any
-    /// one time.
+    /// The highest number of Unix file descriptors attached to the outgoing messages at any one
+    /// time.
     pub fn peak_outgoing_fds(&self) -> Option<u32> {
         self.peak_outgoing_fds
     }
@@ -271,5 +292,91 @@ impl ConnectionStats {
     /// specific to individual D-Bus broker implementations.
     pub fn rest(&self) -> &HashMap<String, OwnedVariant> {
         &self.rest
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::ConnectionStats;
+    use crate::{
+        Variant,
+        wire::{LE, serialized::Context, to_bytes},
+    };
+
+    #[test]
+    fn connection_stats_read_the_entries_of_the_specification() {
+        let ctxt = Context::new(LE, 0);
+        let encoded = to_bytes(ctxt, &reply()).unwrap();
+        let stats: ConnectionStats = encoded.deserialize().unwrap().0;
+
+        assert_eq!(stats.serial(), Some(7));
+        assert_eq!(stats.unique_name().unwrap().as_str(), ":1.42");
+        assert_eq!(stats.incoming_messages(), Some(10));
+        assert_eq!(stats.incoming_bytes(), Some(11));
+        assert_eq!(stats.incoming_fds(), Some(12));
+        assert_eq!(stats.peak_incoming_bytes(), Some(13));
+        assert_eq!(stats.peak_incoming_fds(), Some(14));
+        assert_eq!(stats.outgoing_messages(), Some(20));
+        assert_eq!(stats.outgoing_bytes(), Some(21));
+        assert_eq!(stats.outgoing_fds(), Some(22));
+        assert_eq!(stats.peak_outgoing_bytes(), Some(23));
+        assert_eq!(stats.peak_outgoing_fds(), Some(24));
+        // Every entry of the specification has its own field.
+        assert!(stats.rest().is_empty(), "{:?}", stats.rest());
+    }
+
+    #[test]
+    fn connection_stats_write_the_entries_of_the_specification() {
+        let stats = ConnectionStats {
+            incoming_fds: Some(1),
+            outgoing_fds: Some(2),
+            peak_incoming_fds: Some(3),
+            peak_outgoing_fds: Some(4),
+            ..Default::default()
+        };
+
+        let ctxt = Context::new(LE, 0);
+        let encoded = to_bytes(ctxt, &stats).unwrap();
+        let entries: HashMap<String, u32> = encoded
+            .deserialize::<HashMap<String, Variant<'_>>>()
+            .unwrap()
+            .0
+            .into_iter()
+            .map(|(name, value)| (name, u32::try_from(value).unwrap()))
+            .collect();
+        assert_eq!(
+            entries,
+            HashMap::from([
+                ("IncomingFDs".to_string(), 1),
+                ("OutgoingFDs".to_string(), 2),
+                ("PeakIncomingFDs".to_string(), 3),
+                ("PeakOutgoingFDs".to_string(), 4),
+            ])
+        );
+    }
+
+    /// The entries of a `GetConnectionStats` reply, with the names that the specification and
+    /// dbus-daemon give them.
+    fn reply() -> HashMap<&'static str, Variant<'static>> {
+        HashMap::from([
+            ("Serial", Variant::from(7u32)),
+            ("UniqueName", Variant::from(":1.42")),
+            ("MatchRules", Variant::from(3u32)),
+            ("PeakMatchRules", Variant::from(4u32)),
+            ("BusNames", Variant::from(1u32)),
+            ("PeakBusNames", Variant::from(2u32)),
+            ("IncomingMessages", Variant::from(10u32)),
+            ("IncomingBytes", Variant::from(11u32)),
+            ("IncomingFDs", Variant::from(12u32)),
+            ("PeakIncomingBytes", Variant::from(13u32)),
+            ("PeakIncomingFDs", Variant::from(14u32)),
+            ("OutgoingMessages", Variant::from(20u32)),
+            ("OutgoingBytes", Variant::from(21u32)),
+            ("OutgoingFDs", Variant::from(22u32)),
+            ("PeakOutgoingBytes", Variant::from(23u32)),
+            ("PeakOutgoingFDs", Variant::from(24u32)),
+        ])
     }
 }
