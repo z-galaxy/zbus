@@ -246,3 +246,41 @@ impl std::fmt::Display for OwnedFd {
         self.inner.fmt(f)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::os::fd::{AsFd, AsRawFd};
+
+    use super::Fd;
+    use crate::wire::{Array, Variant};
+
+    #[test]
+    fn a_slice_of_fds_converts_to_an_array_that_borrows_them() {
+        let file = std::fs::File::open("/dev/null").unwrap();
+        let owned = file.as_fd().try_clone_to_owned().unwrap();
+        let fds = [Fd::from(file.as_fd()), Fd::from(owned)];
+
+        let check = |array: &Array<'_>| {
+            assert_eq!(array.signature().to_string(), "ah");
+            let raw: Vec<_> = array
+                .iter()
+                .map(|value| match value {
+                    Variant::Fd(Fd::Borrowed(fd)) => fd.as_raw_fd(),
+                    other => panic!("expected a borrowed FD, got {other:?}"),
+                })
+                .collect();
+            assert_eq!(raw, [fds[0].as_raw_fd(), fds[1].as_raw_fd()]);
+        };
+
+        check(&Array::from(fds.as_slice()));
+        let fds_vec = fds
+            .iter()
+            .map(|fd| Fd::from(fd.as_fd()))
+            .collect::<Vec<_>>();
+        check(&Array::from(&fds_vec));
+        match Variant::from(fds.as_slice()) {
+            Variant::Array(array) => check(&array),
+            other => panic!("expected an array, got {other:?}"),
+        }
+    }
+}

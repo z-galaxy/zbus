@@ -4,7 +4,11 @@ use serde::{
     ser::{Serialize, SerializeSeq, Serializer},
 };
 use std::fmt::{Display, Write};
+#[cfg(unix)]
+use std::os::fd::AsFd;
 
+#[cfg(unix)]
+use crate::wire::Fd;
 use crate::{
     Error, Result,
     wire::{
@@ -298,6 +302,30 @@ where
 {
     fn from(values: &Vec<T>) -> Self {
         Self::from(&values[..])
+    }
+}
+
+/// An [`Fd`] can't be cloned infallibly, so the array borrows the file descriptors of `values`.
+#[cfg(unix)]
+impl<'a> From<&'a Vec<Fd<'_>>> for Array<'a> {
+    fn from(values: &'a Vec<Fd<'_>>) -> Self {
+        Self::from(&values[..])
+    }
+}
+
+/// An [`Fd`] can't be cloned infallibly, so the array borrows the file descriptors of `values`.
+#[cfg(unix)]
+impl<'a> From<&'a [Fd<'_>]> for Array<'a> {
+    fn from(values: &'a [Fd<'_>]) -> Self {
+        let elements = values
+            .iter()
+            .map(|fd| Variant::Fd(Fd::Borrowed(fd.as_fd())))
+            .collect();
+
+        Self {
+            elements,
+            signature: Signature::array(Fd::SIGNATURE.clone()),
+        }
     }
 }
 
