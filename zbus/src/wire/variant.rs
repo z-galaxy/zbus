@@ -1082,6 +1082,17 @@ mod tests {
                 [0x48, 0x00, 0x65, 0x6c, 0x6c, 0x6f, 0x00], \
                 b\"Hello\", b\"\", b\" \", b\"'\", b\"\\n'\\\"\", b\"\\\\\"]"
         );
+        // Bytes that aren't printable ASCII are escaped, rather than replaced with U+FFFD as
+        // decoding them as UTF-8 would, so that the bytes can be told apart.
+        assert_eq!(
+            Variant::new(vec![
+                b"\x80\xa0\xd0\xff\0".to_vec(),
+                "\u{3042}\0".as_bytes().to_vec(),
+                b"\x01\t\x7f\0".to_vec(),
+            ])
+            .to_string(),
+            "[b\"\\x80\\xa0\\xd0\\xff\", b\"\\xe3\\x81\\x82\", b\"\\x01\\t\\x7f\"]"
+        );
 
         assert_eq!(
             Variant::new(HashMap::<bool, bool>::new()).to_string(),
