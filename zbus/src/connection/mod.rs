@@ -46,9 +46,7 @@ pub mod handover;
 #[cfg(all(target_os = "linux", feature = "handover"))]
 pub use handover::Handover;
 #[cfg(all(target_os = "linux", feature = "handover"))]
-use handover::SocketKind;
-#[cfg(all(target_os = "linux", feature = "handover"))]
-use handover::StopStatus;
+use handover::{Had, SocketKind, StopStatus};
 
 mod socket_reader;
 use socket_reader::{SocketReader, SocketStatus};
@@ -97,6 +95,10 @@ pub(crate) struct ConnectionInner {
     object_server: OnceLock<ObjectServer>,
     #[cfg(feature = "service")]
     object_server_dispatch_task: OnceLock<Task<()>>,
+    /// The method calls that the connection took over and that no object server had, for its
+    /// object server alone.
+    #[cfg(all(target_os = "linux", feature = "handover", feature = "service"))]
+    handed_calls: handover::HandedCalls,
 
     // The runtime that runs our tasks and times our calls out. Declared after the task handles
     // so that it outlives them.
@@ -1202,6 +1204,9 @@ impl Connection {
         self.inner.object_server_dispatch_task.get_or_init(|| {
             trace!("starting ObjectServer task");
             let weak_conn = WeakConnection::from(self);
+            // The calls that the connection took over, which the task takes first.
+            #[cfg(all(target_os = "linux", feature = "handover"))]
+            let mut handed = self.inner.handed_calls.take();
 
             self.inner.runtime.spawn(
                 "obj_server_task",
@@ -1231,6 +1236,8 @@ impl Connection {
                             return;
                         }
                     };
+                    #[cfg(all(target_os = "linux", feature = "handover"))]
+                    let mut stream = handover::HandedFirst::new(&mut handed, &mut stream);
                     if let Some(started_event) = started_event {
                         started_event.notify(1);
                     }
@@ -1480,6 +1487,8 @@ impl Connection {
                 object_server: OnceLock::new(),
                 #[cfg(feature = "service")]
                 object_server_dispatch_task: OnceLock::new(),
+                #[cfg(all(target_os = "linux", feature = "handover", feature = "service"))]
+                handed_calls: Default::default(),
                 socket_reader_task: OnceLock::new(),
                 msg_senders,
                 pending_method_calls,
@@ -1677,7 +1686,7 @@ impl Connection {
         already_read: Vec<u8>,
         #[cfg(unix)] already_received_fds: Vec<std::os::fd::OwnedFd>,
         #[cfg(feature = "bus-impl")] validate_bodies: bool,
-        #[cfg(all(target_os = "linux", feature = "handover"))] taken_over: Vec<Message>,
+        #[cfg(all(target_os = "linux", feature = "handover"))] taken_over: Vec<(Message, Had)>,
     ) {
         let inner = &self.inner;
         #[cfg(all(target_os = "linux", feature = "handover"))]
