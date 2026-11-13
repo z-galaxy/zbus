@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 6.3.0 - 2026-11-13
+
+### ♻️ Changed
+- Generate object and plain property getters in separate code paths.
+
+### 🐛 Fixed
+- Prefix the interface dispatch locals. #208
+- Support raw identifiers as names of `object` properties.
+- Report an invalid `object` proxy type as an error, not a panic.
+- Give proxies from `object` methods the caller's destination.
+
 ## 6.2.1 - 2026-11-01
 
 No changes since 6.2.0: released alongside zbus 6.2.1, as the two are kept at the same version.

@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 6.0.1 - 2026-11-13
+
+### ⚙️ Other
+- 🚨 Convert argument names to snake case. #167
+- 🚨 Allow the fixture lints in the compile test. #1943
+
 ## 6.0.0 - 2026-10-16
 
 The book's [Upgrading to zbus 6.0](https://z-galaxy.github.io/zbus/upgrading-to-6.html) chapter

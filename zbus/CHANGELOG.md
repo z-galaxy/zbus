@@ -5,6 +5,53 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 6.3.0 - 2026-11-13
+
+### ✨ Added
+- Hand a connection over with MessageStream::hand_over, with the new handover feature, on Linux.
+- Take a connection over with Builder::take_over.
+- Save and restore a Handover through zoter's traits.
+- Add Connection::prepare_hand_over, for sends that don't wait.
+- Add ReadHalf::can_take_unread and ReadHalf::take_unread.
+- Add WriteHalf::can_resume_writes, for halves of your own.
+- Resume cut-off sends, adding Connection::flush and unwritten_len.
+- Look up the credentials of the peer of a unix socket.
+- Add fallback interfaces to the object server. #2112
+- Support jiff as an alternate time crate.
+
+### ♻️ Changed
+- Write the sockets that zbus drives from the connection itself.
+- Make Builder::build_message_stream available with the handover feature too.
+- Keep a long message that Reader reads in the reader itself.
+
+### 📝 Documentation
+- Describe the ConnectionStats counters as the specification does.
+- Document when a lazily started object server misses calls.
+
+### 🐛 Fixed
+- Convert a slice of Fds into an Array. #1730
+- Escape the bytes of a displayed byte string. #1813
+- Use the specified names of the ConnectionStats FD entries. #2126
+- Close a connection before its streams end.
+- End a connection over a unix socket or a channel on UnexpectedEof.
+- Fail MessageStream::for_match_rule if the reader ends meanwhile.
+- Fail a method call before it is sent once the reader ended.
+- Make the default receive_message cancel-safe and count its fds.
+- Leave the process descriptor out where the kernel has none.
+- Look up all of the groups of a user, however many.
+- Give each group of the peer of a unix socket once.
+- Take the credentials of a peer in another PID namespace.
+- Send a message with fds in a write of its own.
+
+### ⚡️ Performance
+- Keep the credentials that the server handshake looked up.
+- Take the groups of a peer from its socket on Linux.
+
+### ✅ Testing
+- Speed up the tests of big sends through a half of your own.
+- Subscribe before registering the fallback in a fallback test.
+- Keep ReadinessFirst's readiness waits across polls.
+
 ## 6.2.1 - 2026-11-01
 
 ### 🐛 Fixed
