@@ -129,6 +129,7 @@ use std::{
     io, iter, mem,
     net::TcpStream,
     num::NonZeroU32,
+    ops::BitOr,
     os::{
         fd::{AsFd, BorrowedFd, OwnedFd},
         unix::net::UnixStream,
@@ -150,7 +151,7 @@ use zruntime::{
 
 use super::socket_write::Unwritten;
 use crate::{
-    Connection, Error, Guid, Message, OwnedGuid, Result,
+    Connection, Error, Guid, MatchRule, Message, OwnedGuid, Result,
     connection::socket::{BoxedSplit, ReadHalf, Split, read_primary_header},
     message::{self, header::MIN_MESSAGE_SIZE},
     names::OwnedUniqueName,
@@ -219,9 +220,10 @@ pub struct Handover {
     /// connection that goes on gives its messages from on, so that a reply to a method call made
     /// before the hand-over isn't taken for the reply to one made after it.
     pub(super) next_serial: NonZeroU32,
-    /// The messages that were queued on the stream and that it didn't yield, oldest first, with
-    /// their file descriptors.
-    pub(super) queued: Vec<Message>,
+    /// The messages that the connection read and that its stream, its object server or both are
+    /// yet to get, oldest first, with their file descriptors, each with those of the two that had
+    /// it.
+    pub(super) queued: Vec<(Message, Had)>,
     /// What was read off the socket after them and made no message of yet, from the start of a
     /// message: the tail of what was read.
     pub(super) tail: Vec<u8>,
@@ -233,10 +235,11 @@ pub struct Handover {
 }
 
 impl Handover {
-    /// How many bytes were read off the socket and not yielded as messages: those of the messages
-    /// that were queued on the stream and that it didn't yield, then whatever was read after them.
+    /// How many bytes were read off the socket and are handed over: those of the messages that the
+    /// stream of the connection didn't yield, or that its object server didn't take, then whatever
+    /// was read after them.
     pub fn unread_len(&self) -> usize {
-        len_of(&self.queued) + self.tail.len()
+        len_of(self.queued()) + self.tail.len()
     }
 
     /// How many bytes the connection took to send and didn't write: the rest of a message that a
@@ -304,15 +307,14 @@ impl zoter::Save for Handover {
         }
         let kept = &self.unwritten.kept;
         let counts = [
-            fd_count_of(&self.queued) + self.tail_fds.len() + fd_count_of(kept),
+            fd_count_of(self.queued()) + self.tail_fds.len() + fd_count_of(kept),
             self.queued.len(),
             self.tail_fds.len(),
             kept.len(),
         ];
         // Each count of the record takes 4 bytes, and so does each of those in its table.
         let mut table = self
-            .queued
-            .iter()
+            .queued()
             .chain(kept)
             .flat_map(|msg| [msg.data().len(), msg.data().fds().len()]);
         if counts
@@ -348,8 +350,9 @@ impl zoter::Save for Handover {
         record.put(&MAJOR.to_le_bytes());
         // 104 bytes and those of a unique name, which has 255 at most.
         record.put(&(layout.header_len as u16).to_le_bytes());
-        // The record needs no feature of its format that some version of zbus doesn't know.
-        record.put(&0u32.to_le_bytes());
+        // A record that tells who had none of its messages needs no feature of its format, so
+        // every version of zbus restores it.
+        record.put(&layout.features.to_le_bytes());
         record.put(&(layout.len as u64).to_le_bytes());
         record.put(&[kind, flags, name.len() as u8, 0]);
         record.put(&self.next_serial.get().to_le_bytes());
@@ -362,11 +365,17 @@ impl zoter::Save for Handover {
         record.put(&guid);
         record.put(name.as_bytes());
         record.zeros(layout.header_len - NAME - name.len());
-        for msg in self.queued.iter().chain(kept) {
+        for msg in self.queued().chain(kept) {
             record.put(&(msg.data().len() as u32).to_le_bytes());
             record.put(&(msg.data().fds().len() as u32).to_le_bytes());
         }
-        for msg in &self.queued {
+        if layout.features & HAD != 0 {
+            for (_, had) in &self.queued {
+                record.put(&[had.0]);
+            }
+            record.zeros(layout.had_len - self.queued.len());
+        }
+        for msg in self.queued() {
             record.put(msg.data());
         }
         record.put(&self.tail);
@@ -385,10 +394,10 @@ impl zoter::Save for Handover {
     }
 
     /// The file descriptors to pass on with the record, in the order that [`Restore::restore`]
-    /// takes them: that of the socket, then those of the messages that were queued on the stream,
-    /// in their order, those that came in with what was read after them, and those of the messages
-    /// that the connection took to send and didn't write, in their order. There are none for a
-    /// hand-over whose [`Save::saved_len`] is `None`.
+    /// takes them: that of the socket, then those of the messages that the connection read and
+    /// hands over, in their order, those that came in with what was read after them, and those of
+    /// the messages that the connection took to send and didn't write, in their order. There are
+    /// none for a hand-over whose [`Save::saved_len`] is `None`.
     ///
     /// They are borrowed, so none is duplicated, and this can't fail on the limit of descriptors
     /// that a process may have open. That of the socket is close-on-exec in a hand-over that
@@ -407,7 +416,7 @@ impl zoter::Save for Handover {
         let kept = &self.unwritten.kept;
 
         iter::once(socket)
-            .chain(fds_of(&self.queued))
+            .chain(fds_of(self.queued()))
             .chain(self.tail_fds.iter().map(AsFd::as_fd))
             .chain(fds_of(kept))
             .collect()
@@ -446,7 +455,8 @@ impl zoter::Restore for Handover {
             major if major > MAJOR => return Err(Error::Unsupported),
             _ => return Err(malformed()),
         }
-        if u32::from_le_bytes(field(record, 12)?) & !KNOWN_FEATURES != 0 {
+        let features = u32::from_le_bytes(field(record, 12)?);
+        if features & !KNOWN_FEATURES != 0 {
             return Err(Error::Unsupported);
         }
         let [kind, flags, name_len, _] = field(record, 24)?;
@@ -487,14 +497,24 @@ impl zoter::Restore for Handover {
             }
         };
 
-        // The table, the inbound bytes and the outbound ones, each of those padded to a multiple of
+        // The table, who had each of the messages that were queued, if the record tells, the
+        // inbound bytes and the outbound ones, each of those but the table padded to a multiple of
         // 8, up to the end of the record.
         let table_len = queued
             .checked_add(kept)
             .and_then(|entries| entries.checked_mul(8))
             .ok_or_else(malformed)?;
         let table = bytes(record, header_len, table_len)?;
-        let (mut inbound, inbound_end) = section(record, header_len + table_len, inbound)?;
+        let table_end = header_len + table_len;
+        let (had, had_end) = match features & HAD {
+            0 => (None, table_end),
+            _ => {
+                let (had, end) = section(record, table_end, queued)?;
+
+                (Some(had), end)
+            }
+        };
+        let (mut inbound, inbound_end) = section(record, had_end, inbound)?;
         let (outbound, end) = section(record, inbound_end, outbound)?;
         if end != record.len() {
             return Err(malformed());
@@ -509,11 +529,17 @@ impl zoter::Restore for Handover {
             TCP_STREAM => HandoverSocket::TcpStream(TcpStream::from(socket)),
             _ => return Err(malformed()),
         };
+        // A record that doesn't tell who had its messages is one whose messages nobody had.
+        let mut had = had.unwrap_or_default().iter().copied();
         let queued = queued_table
             .as_chunks::<8>()
             .0
             .iter()
-            .map(|entry| framed(entry, &mut inbound, &mut fds))
+            .map(|entry| {
+                let had = Had::from_record(had.next().unwrap_or(0))?;
+
+                Ok((framed(entry, &mut inbound, &mut fds)?, had))
+            })
             .collect::<Result<Vec<_>>>()?;
         let tail = inbound.to_vec();
         let tail_fds: Vec<_> = fds.by_ref().take(tail_fds).collect();
@@ -550,6 +576,11 @@ impl zoter::Restore for Handover {
 }
 
 impl Handover {
+    /// The messages that the connection read and hands over, oldest first.
+    fn queued(&self) -> impl Iterator<Item = &Message> {
+        self.queued.iter().map(|(msg, _)| msg)
+    }
+
     /// How the record of the hand-over is laid out.
     fn layout(&self) -> Layout {
         let name = self
@@ -559,13 +590,23 @@ impl Handover {
         let header_len = (NAME + name).next_multiple_of(8);
         let kept = &self.unwritten.kept;
         let table_len = 8 * (self.queued.len() + kept.len());
-        let inbound = len_of(&self.queued) + self.tail.len();
+        // Who had each message only takes room in a record if someone had one of them.
+        let (features, had_len) = match self.queued.iter().any(|(_, had)| *had != Had::NONE) {
+            true => (HAD, self.queued.len().next_multiple_of(8)),
+            false => (0, 0),
+        };
+        let inbound = len_of(self.queued()) + self.tail.len();
         let outbound = self.unwritten.rest().len() + len_of(kept);
-        let len =
-            header_len + table_len + inbound.next_multiple_of(8) + outbound.next_multiple_of(8);
+        let len = header_len
+            + table_len
+            + had_len
+            + inbound.next_multiple_of(8)
+            + outbound.next_multiple_of(8);
 
         Layout {
             header_len,
+            features,
+            had_len,
             inbound,
             outbound,
             len,
@@ -586,7 +627,7 @@ impl fmt::Debug for Handover {
             .field("unread_len", &self.unread_len())
             .field(
                 "unread_fds",
-                &(fd_count_of(&self.queued) + self.tail_fds.len()),
+                &(fd_count_of(self.queued()) + self.tail_fds.len()),
             )
             .field("unwritten_len", &self.unwritten_len())
             .field("unwritten_fds", &fd_count_of(kept))
@@ -798,8 +839,12 @@ impl Connection {
         } = parts;
         // The error that the reader ended on, if any, is no message to hand over. The messages that
         // the reader was yet to yield, of those that the connection took over, come after those
-        // that it yielded.
-        let mut queued: Vec<Message> = taken.drain(..).flatten().collect();
+        // that it yielded, and those had them who had them before.
+        let mut queued: Vec<_> = taken
+            .drain(..)
+            .flatten()
+            .map(|msg| (msg, Had::NONE))
+            .collect();
         queued.extend(taken_over);
         let socket = match duplicate {
             Some((socket, kind)) => {
@@ -1033,8 +1078,8 @@ pub(super) struct ReadParts {
     /// The read half of the socket.
     pub half: Box<dyn ReadHalf>,
     /// The messages that a connection that this one took over left unread, which the reader was
-    /// yet to yield, ahead of what it read off the socket, oldest first.
-    pub queued: VecDeque<Message>,
+    /// yet to yield, ahead of what it read off the socket, oldest first, each with who had it.
+    pub queued: VecDeque<(Message, Had)>,
     /// What was read off the socket and is yet to make a message, from the start of a message.
     pub unread_bytes: Vec<u8>,
     /// The file descriptors that came in with what was read, and that no message took, in the
@@ -1051,7 +1096,7 @@ impl ReadParts {
     /// has all that it read in hand.
     pub(super) fn new(
         mut half: Box<dyn ReadHalf>,
-        queued: VecDeque<Message>,
+        queued: VecDeque<(Message, Had)>,
         mut unread_bytes: Vec<u8>,
         mut unread_fds: Vec<OwnedFd>,
     ) -> Self {
@@ -1063,6 +1108,62 @@ impl ReadParts {
             unread_bytes,
             unread_fds,
         }
+    }
+}
+
+/// Which consumers of a connection that was handed over had a message that it hands over: the
+/// stream that it was handed over through, its object server, both or neither.
+///
+/// The connection that takes over hands the message to those of its own consumers that are yet to
+/// get it: its streams of every message, unless a stream had it, and its object server, if it is a
+/// method call, unless an object server had it. Nothing else gets it, such as a call that waits for
+/// its reply, or the stream of a proxy: those of the connection that was handed over got every
+/// message that it read.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Had(u8);
+
+impl Had {
+    /// Neither had the message.
+    pub(crate) const NONE: Self = Self(0);
+    /// The stream that the connection was handed over through yielded the message.
+    pub(crate) const STREAM: Self = Self(1);
+    /// The object server took the message, to answer it.
+    pub(crate) const SERVER: Self = Self(2);
+
+    /// Whether a connection that takes `msg` over, which these had, queues it for the streams of
+    /// `rule`, where no rule stands for the streams of every message.
+    pub(crate) fn leaves(self, msg: &Message, rule: Option<&MatchRule<'_>>) -> bool {
+        match rule {
+            None => !self.has(Self::STREAM),
+            // The object server takes its method calls off a stream for a rule for method calls.
+            Some(rule) => {
+                !self.has(Self::SERVER)
+                    && rule.msg_type() == Some(message::Type::MethodCall)
+                    && msg.message_type() == message::Type::MethodCall
+            }
+        }
+    }
+
+    /// Whether `other` are among these.
+    fn has(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    /// Those that a byte of a record tells of.
+    fn from_record(byte: u8) -> Result<Self> {
+        if byte & !(Self::STREAM.0 | Self::SERVER.0) != 0 {
+            return Err(malformed());
+        }
+
+        Ok(Self(byte))
+    }
+}
+
+impl BitOr for Had {
+    type Output = Self;
+
+    fn bitor(self, other: Self) -> Self {
+        Self(self.0 | other.0)
     }
 }
 
@@ -1114,7 +1215,7 @@ fn fds_of<'m>(msgs: impl IntoIterator<Item = &'m Message>) -> impl Iterator<Item
 //     10  2 bytes  how long the header is, a multiple of 8: a later minor version of the format
 //                  adds fields at its end, which an earlier one skips
 //     12  4 bytes  the features of the format that the record needs, as bits, which a version of
-//                  zbus that doesn't know one of refuses: none yet (`KNOWN_FEATURES`)
+//                  zbus that doesn't know one of refuses: `HAD`
 //     16  8 bytes  how long the record is
 //     24  1 byte   the kind of socket: `UNIX_STREAM` or `TCP_STREAM`
 //     25  1 byte   flags: `FD_PASSING` and `P2P`
@@ -1122,7 +1223,7 @@ fn fds_of<'m>(msgs: impl IntoIterator<Item = &'m Message>) -> impl Iterator<Item
 //     27  1 byte   0
 //     28  4 bytes  the serial number of the next message
 //     32  4 bytes  how many file descriptors come after that of the socket
-//     36  4 bytes  how many messages were queued, `Q`
+//     36  4 bytes  how many messages were read and are handed over, `Q`
 //     40  4 bytes  how many file descriptors came in with what was read after them, the tail
 //     44  4 bytes  how many whole messages were left to write, `W`
 //     48  8 bytes  how long the inbound bytes are: those of the `Q` messages, then the tail
@@ -1133,8 +1234,10 @@ fn fds_of<'m>(msgs: impl IntoIterator<Item = &'m Message>) -> impl Iterator<Item
 //    104  N bytes  the unique name (`NAME`), then zeros up to the end of the header
 //
 // Then comes a table, of the length and the number of file descriptors, in 4 bytes each, of each
-// of the `Q` messages, then of each of the `W` ones. Then the inbound bytes, and zeros up to a
-// multiple of 8, then the outbound bytes, and zeros up to a multiple of 8, which ends the record.
+// of the `Q` messages, then of each of the `W` ones. Then, in a record with the `HAD` feature
+// only, a byte for each of the `Q` messages, which tells who had it (`Had`), and zeros up to a
+// multiple of 8. Then the inbound bytes, and zeros up to a multiple of 8, then the outbound bytes,
+// and zeros up to a multiple of 8, which ends the record.
 //
 // The file descriptors that go with the record are that of the socket, then those of the `Q`
 // messages, in their order, then those of the tail, then those of the `W` messages, in their order.
@@ -1143,6 +1246,11 @@ fn fds_of<'m>(msgs: impl IntoIterator<Item = &'m Message>) -> impl Iterator<Item
 struct Layout {
     /// How long the header is, with the unique name and the zeros after it.
     header_len: usize,
+    /// The features of the format that the record needs.
+    features: u32,
+    /// How long what tells who had each of the messages is, with the zeros after it: nothing in a
+    /// record without the `HAD` feature.
+    had_len: usize,
     /// How long the bytes that were read off the socket are.
     inbound: usize,
     /// How long the bytes left to write are.
@@ -1260,8 +1368,11 @@ const MAGIC: &[u8; 8] = b"zbus-hov";
 /// later one of, as it can't read it.
 const MAJOR: u16 = 1;
 /// The features of the format of the record that this version of zbus knows, as the bits of those
-/// that a record needs: none yet.
-const KNOWN_FEATURES: u32 = 0;
+/// that a record needs.
+const KNOWN_FEATURES: u32 = HAD;
+/// The feature of a record that tells who had each of the messages that it hands over. A record of
+/// messages that nobody had does without it, so that every version of zbus restores it.
+const HAD: u32 = 1;
 /// Where the unique name starts in a record, after the fields that every header has.
 const NAME: usize = 104;
 /// The kind of socket of a record of a unix-domain stream.
@@ -1314,7 +1425,9 @@ mod tests {
 
     use zoter::{Restore, Save};
 
-    use super::{Handover, HandoverSocket, MAJOR, NAME, ReaderEnd, TCP_STREAM, UNIX_STREAM};
+    use super::{
+        HAD, Had, Handover, HandoverSocket, MAJOR, NAME, ReaderEnd, TCP_STREAM, UNIX_STREAM,
+    };
     use crate::{
         Address, Connection, Error, Guid, MatchRule, Message, MessageStream, Result,
         address::transport::{Transport, Unix, UnixSocket},
@@ -1754,7 +1867,7 @@ mod tests {
 
             let bytes = |msg: &Message| msg.data().as_ptr();
             assert_eq!(
-                handover.queued.iter().map(bytes).collect::<Vec<_>>(),
+                handover.queued().map(bytes).collect::<Vec<_>>(),
                 queued.iter().map(bytes).collect::<Vec<_>>(),
             );
             let mut stream = on(Builder::take_over(handover), &runtime)
@@ -1778,8 +1891,8 @@ mod tests {
 
     /// A connection that took over is handed over in turn with the messages that it was handed
     /// and has yet to yield: those that its stream had queued, then those that its reader had yet
-    /// to queue, then what was read after them. A connection that takes over from that hand-over
-    /// yields all of them, in order.
+    /// to queue, which those had who had them before, then what was read after them. A connection
+    /// that takes over from that hand-over yields all of them, in order.
     #[test]
     #[timeout(15000)]
     fn a_connection_that_took_over_hands_over_what_it_is_yet_to_yield() {
@@ -1788,7 +1901,8 @@ mod tests {
             let tail = &msgs[3].data()[..10];
             let (ours, peer) = UnixStream::pair().unwrap();
             let mut handover = handover(HandoverSocket::UnixStream(ours), true);
-            handover.queued = msgs[..3].to_vec();
+            handover.queued = nobody_had(&msgs[..3]);
+            handover.queued[2].1 = Had::SERVER;
             handover.tail = tail.to_vec();
             // The stream of the connection that takes over has room for one message, so its
             // reader waits for room for the second, with the third still to queue.
@@ -1802,7 +1916,8 @@ mod tests {
 
             let handover = stream.hand_over().await.unwrap();
 
-            assert_eq!(handover.queued.len(), 3);
+            let had: Vec<_> = handover.queued.iter().map(|(_, had)| *had).collect();
+            assert_eq!(had, [Had::NONE, Had::NONE, Had::SERVER]);
             assert_eq!(
                 unread(&handover),
                 [concat(&msgs[..3]), tail.to_vec()].concat()
@@ -2695,7 +2810,7 @@ mod tests {
                     .unwrap();
                 let mut handover = handover(HandoverSocket::UnixStream(ours), true);
                 if queued {
-                    handover.queued = vec![call.clone()];
+                    handover.queued = nobody_had(std::slice::from_ref(&call));
                 } else {
                     handover.tail = call.data().to_vec();
                 }
@@ -2717,6 +2832,65 @@ mod tests {
         });
     }
 
+    /// A connection that takes over hands each message of the hand-over, whether it comes as it
+    /// is or through its record, to those that are yet to get it, and to no other: its stream
+    /// yields those that no stream had, and its object server answers the method calls that no
+    /// object server had, each once.
+    #[cfg(feature = "service")]
+    #[test]
+    #[timeout(15000)]
+    fn a_message_taken_over_goes_to_those_that_are_yet_to_get_it() {
+        under_every_runtime(|runtime| async move {
+            for record in [false, true] {
+                let (mut peer_stream, ours) = over_a_socket_pair(&runtime).await;
+                let peer = Connection::from(&peer_stream);
+                let mut handover = handover(HandoverSocket::UnixStream(ours), true);
+                handover.queued = vec![
+                    (echo("an object server had"), Had::SERVER),
+                    (signal(1), Had::STREAM),
+                    (echo("a stream had"), Had::STREAM),
+                    (echo("both had"), Had::STREAM | Had::SERVER),
+                    (echo("nobody had"), Had::NONE),
+                ];
+                let handover = if record {
+                    through_a_record(handover, 5)
+                } else {
+                    handover
+                };
+
+                let mut stream = on(Builder::take_over(handover), &runtime)
+                    .serve_at(PATH, Echo)
+                    .build_message_stream()
+                    .await
+                    .unwrap();
+
+                // What the peer sends next comes right after what the stream yields of them.
+                peer.send(&signal(2)).await.unwrap();
+                let mut yielded = Vec::new();
+                for _ in 0..3 {
+                    let msg = stream.next().await.unwrap().unwrap();
+                    yielded.push(match msg.message_type() {
+                        Type::MethodCall => msg.body().deserialize::<String>().unwrap(),
+                        _ => msg.body().deserialize::<u32>().unwrap().to_string(),
+                    });
+                }
+                assert_eq!(
+                    yielded,
+                    ["an object server had", "nobody had", "2"],
+                    "record: {record}"
+                );
+                // A call that the peer makes next is answered along with those of them that the
+                // object server answers, each in a task of its own.
+                peer.send(&echo("after")).await.unwrap();
+                assert_eq!(
+                    replies(&mut peer_stream, 3).await,
+                    ["a stream had", "after", "nobody had"],
+                    "record: {record}"
+                );
+            }
+        });
+    }
+
     /// A connection that checks the bodies of the messages that it receives checks those that it
     /// takes over too, whether they were queued on the stream of the connection that was handed
     /// over or in what it read after them.
@@ -2734,7 +2908,7 @@ mod tests {
                 let valid = signal(1);
                 let mut handover = handover(HandoverSocket::UnixStream(ours), true);
                 if queued {
-                    handover.queued = vec![valid.clone(), invalid];
+                    handover.queued = nobody_had(&[valid.clone(), invalid]);
                 } else {
                     handover.tail = concat(&[valid.clone(), invalid]);
                 }
@@ -2943,8 +3117,9 @@ mod tests {
     /// record.
     #[test]
     fn a_record_of_a_later_format_is_refused() {
-        // A later major version, and the first feature that a record can need.
-        for (at, value) in [(8, &(MAJOR + 1).to_le_bytes()[..]), (12, &[1][..])] {
+        // A later major version, and the first feature that this version doesn't know.
+        let unknown = (HAD << 1).to_le_bytes();
+        for (at, value) in [(8, &(MAJOR + 1).to_le_bytes()[..]), (12, &unknown[..])] {
             let (record, fds) =
                 changed(|record| record[at..at + value.len()].copy_from_slice(value));
 
@@ -2954,6 +3129,41 @@ mod tests {
         }
         let (record, fds) = changed(|record| record[8..10].copy_from_slice(&[0, 0]));
         assert_invalid_data(Handover::restore(&record, fds));
+    }
+
+    /// The record of a hand-over tells who had each of its messages if anyone had one of them, and
+    /// the hand-over that it restores has them as they were had. A record of messages that nobody
+    /// had needs no feature of the format, and is as long as before, so that a version of zbus
+    /// that knows nothing of who had a message restores it. A record that tells of someone that
+    /// this version doesn't know, or that has anything but zeros after what it tells, is not one.
+    #[test]
+    fn a_record_tells_who_had_its_messages() {
+        let (mut handover, _peer) = every_part();
+        let (plain, _) = saved(&handover);
+        assert_eq!(plain[12..16], [0; 4], "the record needs a feature");
+        let had = [Had::SERVER, Had::STREAM];
+        for ((_, slot), had) in handover.queued.iter_mut().zip(had) {
+            *slot = had;
+        }
+
+        let (record, fds) = saved(&handover);
+
+        assert_eq!(record[12..16], HAD.to_le_bytes());
+        assert_eq!(record.len(), plain.len() + 8);
+        let restored = Handover::restore(&record, fds).unwrap();
+        let restored_had: Vec<_> = restored.queued.iter().map(|(_, had)| *had).collect();
+        assert_eq!(restored_had, had);
+        assert_eq!(saved(&restored).0, record);
+
+        // Who had the messages comes after the table, of two queued messages and two left to
+        // write: a byte for each queued message, then zeros.
+        let header_len = usize::from(u16::from_le_bytes([record[10], record[11]]));
+        let told = header_len + 4 * 8;
+        for (at, value) in [(told, 4), (told + 2, 1)] {
+            let mut record = record.clone();
+            record[at] = value;
+            assert_invalid_data(Handover::restore(&record, duplicates(&handover)));
+        }
     }
 
     /// A record that a later minor version of the format saved, with more fields at the end of its
@@ -3070,7 +3280,7 @@ mod tests {
     fn a_socket_of_your_own_has_no_record() {
         let (ours, _theirs) = Channel::pair();
         let mut handover = handover(HandoverSocket::Socket(ours.into()), true);
-        handover.queued = vec![with_fd(1)];
+        handover.queued = nobody_had(&[with_fd(1)]);
 
         let saved = handover.save(&mut []);
 
@@ -3336,7 +3546,7 @@ mod tests {
         handover.unique_name = Some(UNIQUE_NAME.try_into().unwrap());
         handover.unix_fd_passing = true;
         handover.next_serial = NonZeroU32::new(42).unwrap();
-        handover.queued = vec![with_fd(1), signal(2)];
+        handover.queued = nobody_had(&[with_fd(1), signal(2)]);
         handover.tail = with_fd(3).data()[..10].to_vec();
         handover.tail_fds = vec![pipe()];
         let cut = signal(4);
@@ -3398,7 +3608,15 @@ mod tests {
     /// The bytes that `handover` left unread: those of the messages that were queued, then those
     /// that were read after them.
     fn unread(handover: &Handover) -> Vec<u8> {
-        [concat(&handover.queued), handover.tail.clone()].concat()
+        let queued: Vec<_> = handover.queued().cloned().collect();
+
+        [concat(&queued), handover.tail.clone()].concat()
+    }
+
+    /// `msgs`, as a hand-over holds the messages that neither the stream nor the object server
+    /// of its connection had.
+    fn nobody_had(msgs: &[Message]) -> Vec<(Message, Had)> {
+        msgs.iter().map(|msg| (msg.clone(), Had::NONE)).collect()
     }
 
     /// The bytes of `msgs`, one after the other.
@@ -3560,6 +3778,30 @@ mod tests {
             panic!("expected the error of what is not a record: {result:?}");
         };
         assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{e}");
+    }
+
+    /// What the next `count` messages of `stream` answer calls of `Echo` with, sorted, as an
+    /// interface with a task for each call answers them in any order.
+    #[cfg(feature = "service")]
+    async fn replies(stream: &mut MessageStream, count: usize) -> Vec<String> {
+        let mut replies = Vec::new();
+        for _ in 0..count {
+            let reply = stream.next().await.unwrap().unwrap();
+            assert_eq!(reply.message_type(), Type::MethodReturn, "{reply:?}");
+            replies.push(reply.body().deserialize::<String>().unwrap());
+        }
+        replies.sort();
+
+        replies
+    }
+
+    /// A call to the `Echo` method of the interfaces of the tests, with `text`.
+    #[cfg(feature = "service")]
+    fn echo(text: &str) -> Message {
+        Message::method_call(PATH, "Echo")
+            .interface(INTERFACE)
+            .build(&text)
+            .unwrap()
     }
 
     /// A match rule for every signal.

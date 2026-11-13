@@ -46,9 +46,7 @@ pub mod handover;
 #[cfg(all(target_os = "linux", feature = "handover"))]
 pub use handover::Handover;
 #[cfg(all(target_os = "linux", feature = "handover"))]
-use handover::SocketKind;
-#[cfg(all(target_os = "linux", feature = "handover"))]
-use handover::StopStatus;
+use handover::{Had, SocketKind, StopStatus};
 
 mod socket_reader;
 use socket_reader::{SocketReader, SocketStatus};
@@ -1677,7 +1675,7 @@ impl Connection {
         already_read: Vec<u8>,
         #[cfg(unix)] already_received_fds: Vec<std::os::fd::OwnedFd>,
         #[cfg(feature = "bus-impl")] validate_bodies: bool,
-        #[cfg(all(target_os = "linux", feature = "handover"))] taken_over: Vec<Message>,
+        #[cfg(all(target_os = "linux", feature = "handover"))] taken_over: Vec<(Message, Had)>,
     ) {
         let inner = &self.inner;
         #[cfg(all(target_os = "linux", feature = "handover"))]

@@ -29,7 +29,7 @@ use crate::{
 };
 
 #[cfg(all(target_os = "linux", feature = "handover"))]
-use super::handover::{ReadParts, ReaderEnd, StopStatus, ends_input, stopped_error};
+use super::handover::{Had, ReadParts, ReaderEnd, StopStatus, ends_input, stopped_error};
 use super::socket::ReadHalf;
 #[cfg(all(target_os = "linux", feature = "handover"))]
 use super::socket_write::Prepared;
@@ -49,9 +49,10 @@ pub(crate) struct SocketReader {
     #[cfg(feature = "bus-impl")]
     validate_bodies: bool,
     /// The messages that a connection that this one took over left unread, oldest first, which
-    /// the reader yields ahead of what it reads off the socket.
+    /// the reader yields ahead of what it reads off the socket, each to those that are yet to get
+    /// it, which who had it tells.
     #[cfg(all(target_os = "linux", feature = "handover"))]
-    taken_over: VecDeque<Message>,
+    taken_over: VecDeque<(Message, Had)>,
 }
 
 impl SocketReader {
@@ -81,9 +82,9 @@ impl SocketReader {
     }
 
     /// The reader, to yield `msgs`, which a connection that this one took over left unread, ahead
-    /// of what it reads off the socket.
+    /// of what it reads off the socket, each to those that are yet to get it.
     #[cfg(all(target_os = "linux", feature = "handover"))]
-    pub fn yielding_first(mut self, msgs: Vec<Message>) -> Self {
+    pub fn yielding_first(mut self, msgs: Vec<(Message, Had)>) -> Self {
         self.taken_over = msgs.into();
 
         self
@@ -106,6 +107,10 @@ impl SocketReader {
         let mut stop = self.socket_status.stop.listener();
         loop {
             trace!("Waiting for message on the socket..");
+            // The next message is one that the connection took over, if any is left, and who had
+            // it then tells whom it is for. What comes off the socket is for everyone.
+            #[cfg(all(target_os = "linux", feature = "handover"))]
+            let had = self.taken_over.front().map(|(_, had)| *had);
             #[cfg(all(target_os = "linux", feature = "handover"))]
             let Some(msg) = self.read_unless_stopped(&mut stop).await else {
                 return self.stop().await;
@@ -115,7 +120,14 @@ impl SocketReader {
             match &msg {
                 Ok(msg) => {
                     trace!("Message received on the socket: {:?}", msg);
-                    if matches!(msg.message_type(), Type::MethodReturn | Type::Error) {
+                    // A reply that the connection took over answers a call of the connection that
+                    // was handed over, which it went to there.
+                    #[cfg(all(target_os = "linux", feature = "handover"))]
+                    let taken_over = had.is_some();
+                    #[cfg(not(all(target_os = "linux", feature = "handover")))]
+                    let taken_over = false;
+                    if !taken_over && matches!(msg.message_type(), Type::MethodReturn | Type::Error)
+                    {
                         self.dispatch_pending_reply(msg);
                     }
                 }
@@ -127,6 +139,12 @@ impl SocketReader {
 
             let mut senders = self.senders.lock().await;
             for (rule, sender) in &*senders {
+                #[cfg(all(target_os = "linux", feature = "handover"))]
+                if let (Ok(msg), Some(had)) = (&msg, had)
+                    && !had.leaves(msg, rule.as_deref())
+                {
+                    continue;
+                }
                 if let Ok(msg) = &msg
                     && let Some(rule) = rule.as_ref()
                 {
@@ -274,7 +292,10 @@ impl SocketReader {
         // The messages that a connection that this one took over left unread come first, each at
         // its position among those of this connection.
         #[cfg(all(target_os = "linux", feature = "handover"))]
-        let taken_over = self.taken_over.pop_front().map(|msg| msg.at_position(seq));
+        let taken_over = self
+            .taken_over
+            .pop_front()
+            .map(|(msg, _)| msg.at_position(seq));
         #[cfg(not(all(target_os = "linux", feature = "handover")))]
         let taken_over = None;
         let msg = match taken_over {

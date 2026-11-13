@@ -51,7 +51,11 @@ use super::{
     socket::{BoxedSplit, ReadHalf, Split, WriteHalf, Writes},
 };
 #[cfg(all(target_os = "linux", feature = "handover"))]
-use super::{Handover, handover::HandoverSocket, socket_write::Unwritten};
+use super::{
+    Handover,
+    handover::{Had, HandoverSocket},
+    socket_write::Unwritten,
+};
 
 #[derive(Debug)]
 enum Target {
@@ -1060,7 +1064,7 @@ struct TakenOver {
     #[cfg(feature = "p2p")]
     p2p: bool,
     next_serial: NonZeroU32,
-    queued: Vec<Message>,
+    queued: Vec<(Message, Had)>,
     tail: Vec<u8>,
     tail_fds: Vec<OwnedFd>,
     unwritten: Unwritten,
@@ -1099,9 +1103,9 @@ impl TakenOver {
     }
 
     /// What is left of the hand-over for the connection that goes on from it, once it is
-    /// authenticated: the messages that were queued, which it yields first, and what was left
-    /// unwritten, which it writes first.
-    fn left(self) -> (Vec<Message>, Unwritten) {
+    /// authenticated: the messages that were handed over, which it yields first, each with who
+    /// had it, and what was left unwritten, which it writes first.
+    fn left(self) -> (Vec<(Message, Had)>, Unwritten) {
         (self.queued, self.unwritten)
     }
 }
