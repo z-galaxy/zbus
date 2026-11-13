@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "rust";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-fb408b48.js";
+            window.path_to_searchindex_js = "searchindex-b101d842.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-0eac0ed4.js"></script>
@@ -316,6 +316,8 @@ async fn main() -&gt; Result&lt;()&gt; {
         std::future::pending::&lt;()&gt;().await;
     }
 }</code></pre>
+<p>For objects whose paths are not known in advance, such as one per ID, an interface can also be
+registered as a fallback that serves a whole subtree of paths: see <a href="https://docs.rs/zbus/latest/zbus/object_server/struct.ObjectServer.html#method.at_fallback"><code>ObjectServer::at_fallback</code></a>.</p>
 <h3 id="-service-activation-pitfalls"><a class="header" href="#-service-activation-pitfalls">⚠ Service activation pitfalls</a></h3>
 <p>A possible footgun here is that you must request the service name <strong>after</strong> you setup the handlers,
 otherwise incoming messages may be lost. Activated services may receive calls (or messages) right
