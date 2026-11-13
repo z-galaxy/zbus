@@ -2033,7 +2033,7 @@ dependencies = [
 
 [[package]]
 name = "zbus"
-version = "6.2.1"
+version = "6.3.0"
 dependencies = [
  "arrayvec",
  "async-executor",
@@ -2084,7 +2084,7 @@ dependencies = [
 
 [[package]]
 name = "zbus_macros"
-version = "6.2.1"
+version = "6.3.0"
 dependencies = [
  "futures-util",
  "proc-macro2",
@@ -2127,7 +2127,7 @@ dependencies = [
 
 [[package]]
 name = "zbus_xmlgen"
-version = "6.0.0"
+version = "6.0.1"
 dependencies = [
  "clap",
  "pretty_assertions",
