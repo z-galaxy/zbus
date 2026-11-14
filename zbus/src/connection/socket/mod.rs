@@ -5,6 +5,8 @@
 
 #[cfg(feature = "p2p")]
 pub mod channel;
+#[cfg(all(target_os = "linux", feature = "handover", feature = "p2p"))]
+pub use super::handover::ChannelHandover;
 #[cfg(feature = "p2p")]
 pub use channel::Channel;
 

@@ -139,7 +139,7 @@ impl SocketWrite {
                 return Ok(());
             }
             #[cfg(all(target_os = "linux", feature = "handover", feature = "p2p"))]
-            Some(Writes::Whole) => {
+            Some(Writes::Whole { .. }) => {
                 let half = self.half.as_deref_mut().ok_or_else(handed_over)?;
 
                 return queue(half, msgs, &mut self.rest).await;
@@ -151,7 +151,7 @@ impl SocketWrite {
         let torn = match self.writes {
             // The channel queues the message whole or not at all.
             #[cfg(feature = "p2p")]
-            Some(Writes::Whole) => self.torn,
+            Some(Writes::Whole { .. }) => self.torn,
             // Until the message is through, the socket may hold a part of it.
             _ => mem::replace(&mut self.torn, true),
         };
@@ -192,7 +192,7 @@ impl SocketWrite {
                 return Ok(());
             }
             #[cfg(all(target_os = "linux", feature = "handover", feature = "p2p"))]
-            Some(Writes::Whole) => {
+            Some(Writes::Whole { .. }) => {
                 let half = self.half.as_deref_mut().ok_or_else(handed_over)?;
 
                 return queue(half, msgs, &mut self.rest).await;
@@ -204,7 +204,7 @@ impl SocketWrite {
         let torn = match self.writes {
             // The channel queues each message whole or not at all.
             #[cfg(feature = "p2p")]
-            Some(Writes::Whole) => self.torn,
+            Some(Writes::Whole { .. }) => self.torn,
             // Until the messages are through, the socket may hold a part of one.
             _ => mem::replace(&mut self.torn, true),
         };
@@ -302,7 +302,7 @@ impl SocketWrite {
                 write_unwritten_through(half, &mut writing).await?;
             }
             #[cfg(all(target_os = "linux", feature = "handover", feature = "p2p"))]
-            Some(Writes::Whole) => {
+            Some(Writes::Whole { .. }) => {
                 let half = self.half.as_deref_mut().ok_or_else(handed_over)?;
                 queue_kept(half, &mut writing).await?;
             }
