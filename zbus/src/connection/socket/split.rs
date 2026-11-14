@@ -60,6 +60,12 @@ impl<R: ReadHalf, W: WriteHalf> Split<R, W> {
         }
     }
 
+    /// How a connection over the halves writes the socket, if zbus made it.
+    #[cfg(all(target_os = "linux", feature = "handover", feature = "p2p"))]
+    pub(crate) fn writes(&self) -> Option<&Writes> {
+        self.writes.as_ref()
+    }
+
     /// Take out how a connection over the halves writes the socket, if zbus made it, for the
     /// connection to keep, as the halves themselves go their own ways.
     pub(crate) fn take_writes(&mut self) -> Option<Writes> {
@@ -96,7 +102,12 @@ pub(crate) enum Writes {
     /// half. That queues each message whole or not at all, even where the send is dropped, so no
     /// send leaves a message cut off.
     #[cfg(feature = "p2p")]
-    Whole,
+    Whole {
+        /// What the two ends of one pair of channels share, which tells them from the ends of any
+        /// other, as the hand-overs of the connections over them are taken off the pair.
+        #[cfg(all(target_os = "linux", feature = "handover"))]
+        pair: Arc<()>,
+    },
 }
 
 // A `Split` is as unwind safe as its halves: the socket that `Writes::Driven` holds is the one

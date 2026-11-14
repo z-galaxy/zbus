@@ -5,9 +5,9 @@
 //!
 //! [`Socket`]: super::Socket
 
-use std::io;
-
-use std::num::NonZeroUsize;
+#[cfg(all(target_os = "linux", feature = "handover"))]
+use std::sync::Arc;
+use std::{io, num::NonZeroUsize};
 
 use zruntime::broadcast::{Receiver, RecvError, Sender, channel};
 
@@ -26,6 +26,9 @@ use crate::{
 pub struct Channel {
     writer: Writer,
     reader: Reader,
+    /// What the two ends of a pair share, and no other channel has.
+    #[cfg(all(target_os = "linux", feature = "handover"))]
+    pair: Arc<()>,
 }
 
 impl Channel {
@@ -34,17 +37,52 @@ impl Channel {
     /// Use [`crate::connection::Builder::authenticated_socket`] to create `Connection` instances
     /// from each channel.
     pub fn pair() -> (Self, Self) {
-        let (tx1, rx1) = channel(CHANNEL_CAPACITY);
-        let (tx2, rx2) = channel(CHANNEL_CAPACITY);
+        Self::pair_of(CHANNEL_CAPACITY, CHANNEL_CAPACITY)
+    }
+
+    /// A pair of cross-wired channels, as [`Channel::pair`] creates, whose first end receives
+    /// `for_first` first, and its second one `for_second`: what a channel held for each of its
+    /// ends, in the order that the other end sent it.
+    #[cfg(all(target_os = "linux", feature = "handover"))]
+    pub(crate) fn pair_holding(for_first: Vec<Message>, for_second: Vec<Message>) -> (Self, Self) {
+        // Each channel has room for what it holds from the start, at least.
+        let capacity = |held: &[Message]| {
+            NonZeroUsize::new(held.len()).map_or(CHANNEL_CAPACITY, |len| len.max(CHANNEL_CAPACITY))
+        };
+        let (first, second) = Self::pair_of(capacity(&for_second), capacity(&for_first));
+        for (end, held) in [(&first, for_second), (&second, for_first)] {
+            for msg in held {
+                let queued = end.writer.0.try_broadcast(msg);
+                debug_assert!(
+                    matches!(queued, Ok(None)),
+                    "a new channel has room for what it is to hold"
+                );
+            }
+        }
+
+        (first, second)
+    }
+
+    /// A pair of cross-wired channels, the one that the first end writes with room for
+    /// `from_first` messages, and the other one for `from_second`.
+    fn pair_of(from_first: NonZeroUsize, from_second: NonZeroUsize) -> (Self, Self) {
+        let (tx1, rx1) = channel(from_first);
+        let (tx2, rx2) = channel(from_second);
+        #[cfg(all(target_os = "linux", feature = "handover"))]
+        let pair = Arc::new(());
 
         (
             Self {
                 writer: Writer(tx1),
                 reader: Reader(rx2),
+                #[cfg(all(target_os = "linux", feature = "handover"))]
+                pair: pair.clone(),
             },
             Self {
                 writer: Writer(tx2),
                 reader: Reader(rx1),
+                #[cfg(all(target_os = "linux", feature = "handover"))]
+                pair,
             },
         )
     }
@@ -57,7 +95,12 @@ impl super::Socket for Channel {
     // A connection over the channel knows that its sends are whole or nothing, as
     // `Writer::send_message` tells.
     fn split(self) -> super::Split<Self::ReadHalf, Self::WriteHalf> {
-        super::Split::with_writes(self.reader, self.writer, Some(super::Writes::Whole))
+        let writes = super::Writes::Whole {
+            #[cfg(all(target_os = "linux", feature = "handover"))]
+            pair: self.pair,
+        };
+
+        super::Split::with_writes(self.reader, self.writer, Some(writes))
     }
 }
 

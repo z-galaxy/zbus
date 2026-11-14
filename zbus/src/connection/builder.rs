@@ -375,6 +375,12 @@ impl<'a> Builder<'a> {
             HandoverSocket::UnixStream(stream) => Target::UnixStream(stream),
             HandoverSocket::TcpStream(stream) => Target::TcpStream(stream),
             HandoverSocket::Socket(split) => Target::AuthenticatedSocket(split),
+            // Only a `ChannelHandover` holds a hand-over that is off its channel, and it puts it on
+            // a new one before it hands it out.
+            #[cfg(feature = "p2p")]
+            HandoverSocket::Unpaired(_) => {
+                unreachable!("a hand-over off its channel was handed out")
+            }
         };
         let mut builder = Self::new(target);
         #[cfg(feature = "p2p")]

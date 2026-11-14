@@ -167,11 +167,13 @@
 //! [`Save::fds`]: zoter::Save::fds
 //! [`Restore::restore`]: zoter::Restore::restore
 
+#[cfg(feature = "p2p")]
+use std::task;
 use std::{
     collections::VecDeque,
     fmt,
     future::{Future, poll_fn},
-    io, iter, mem,
+    io, mem,
     net::TcpStream,
     num::NonZeroU32,
     ops::BitOr,
@@ -195,6 +197,8 @@ use zruntime::{
 };
 
 use super::socket_write::Unwritten;
+#[cfg(feature = "p2p")]
+use crate::connection::socket::{Channel, Writes};
 use crate::{
     Connection, Error, Guid, MatchRule, Message, OwnedGuid, Result,
     connection::socket::{BoxedSplit, ReadHalf, Split, read_primary_header},
@@ -227,7 +231,8 @@ use crate::{
 ///
 /// The hand-over of a connection over a socket of your own, such as a `Channel`, or over the pipes
 /// of a `unixexec:` address, has no record: its halves can only go on in this process, which
-/// [`Save::saved_len`] tells.
+/// [`Save::saved_len`] tells. With the `p2p` feature, the hand-overs of the connections at the two
+/// ends of one `Channel` go to another process together, as a `ChannelHandover`, which has one.
 ///
 /// What the hand-over holds of what the peer sent is the messages that the stream that the
 /// connection was handed over through didn't yield, and the method calls that its object server
@@ -286,7 +291,7 @@ impl Handover {
     /// stream of the connection didn't yield, or that its object server didn't take, then whatever
     /// was read after them.
     pub fn unread_len(&self) -> usize {
-        len_of(self.queued()) + self.tail.len()
+        len_of(self.queued()) + self.tail.len() + len_of(self.held())
     }
 
     /// How many bytes the connection took to send and didn't write: the rest of a message that a
@@ -341,6 +346,8 @@ impl zoter::Save for Handover {
         let kind = match &self.socket {
             HandoverSocket::UnixStream(_) => UNIX_STREAM,
             HandoverSocket::TcpStream(_) => TCP_STREAM,
+            #[cfg(feature = "p2p")]
+            HandoverSocket::Unpaired(_) => CHANNEL,
             HandoverSocket::Socket(_) => {
                 return Err(io::Error::new(
                     io::ErrorKind::Unsupported,
@@ -353,27 +360,8 @@ impl zoter::Save for Handover {
             return Err(invalid_input("the memory is not as long as the record"));
         }
         let kept = &self.unwritten.kept;
-        let counts = [
-            fd_count_of(self.queued()) + self.tail_fds.len() + fd_count_of(kept),
-            self.queued.len(),
-            self.tail_fds.len(),
-            kept.len(),
-        ];
-        // Each count of the record takes 4 bytes, and so does each of those in its table.
-        let mut table = self
-            .queued()
-            .chain(kept)
-            .flat_map(|msg| [msg.data().len(), msg.data().fds().len()]);
-        if counts
-            .iter()
-            .copied()
-            .chain(&mut table)
-            .any(|count| u32::try_from(count).is_err())
-        {
-            return Err(invalid_input(
-                "too many messages or file descriptors for a record",
-            ));
-        }
+        let held = self.held();
+        let counts = self.counts()?;
         let name = self.unique_name.as_ref().map_or("", |name| name.as_str());
         let mut flags = 0;
         if self.unix_fd_passing {
@@ -426,6 +414,9 @@ impl zoter::Save for Handover {
             record.put(msg.data());
         }
         record.put(&self.tail);
+        for msg in held {
+            record.put(msg.data());
+        }
         record.zeros(layout.inbound.next_multiple_of(8) - layout.inbound);
         record.put(rest);
         for msg in kept {
@@ -456,15 +447,19 @@ impl zoter::Save for Handover {
     /// [`Restore::restore`]: zoter::Restore::restore
     fn fds(&self) -> Vec<BorrowedFd<'_>> {
         let socket = match &self.socket {
-            HandoverSocket::UnixStream(socket) => socket.as_fd(),
-            HandoverSocket::TcpStream(socket) => socket.as_fd(),
+            HandoverSocket::UnixStream(socket) => Some(socket.as_fd()),
+            HandoverSocket::TcpStream(socket) => Some(socket.as_fd()),
+            #[cfg(feature = "p2p")]
+            HandoverSocket::Unpaired(_) => None,
             HandoverSocket::Socket(_) => return Vec::new(),
         };
         let kept = &self.unwritten.kept;
 
-        iter::once(socket)
+        socket
+            .into_iter()
             .chain(fds_of(self.queued()))
             .chain(self.tail_fds.iter().map(AsFd::as_fd))
+            .chain(fds_of(self.held()))
             .chain(fds_of(kept))
             .collect()
     }
@@ -494,6 +489,299 @@ impl zoter::Restore for Handover {
     /// [`Save::save`]: zoter::Save::save
     /// [`Save::fds`]: zoter::Save::fds
     fn restore(record: &[u8], fds: Vec<OwnedFd>) -> Result<Handover> {
+        Handover::from_record(
+            record,
+            fds,
+            #[cfg(feature = "p2p")]
+            false,
+        )
+    }
+}
+
+/// The hand-overs of the connections at the two ends of one `Channel`, together, as they go to
+/// another process.
+///
+/// A [`Channel`] is in this process alone, so the hand-over of a connection over one has no record
+/// ([`Save::saved_len`]): it only goes on in this process. A program that talks to itself over a
+/// channel, as a bus that serves the D-Bus API as a peer of its own does, and that restarts under
+/// systemd, hands the connections at both ends over, and puts the two hand-overs together in this,
+/// which has a record. That takes them off the channel: each gets what the channel held for its
+/// connection, the messages that the other end sent and that the connection didn't read, and the
+/// channel goes. Pass the record and the file descriptors ([`Save::fds`]) on, to the next instance
+/// of the program, as those of a [`Handover`] are, and [`Restore::restore`] gives this back from
+/// them there. Then [`ChannelHandover::into_ends`] puts the two hand-overs at the ends of a new
+/// channel, for [`Builder::take_over`] to build the connections that go on, with nothing lost of
+/// what was on its way between them.
+///
+/// This type is only available on Linux, with the `handover` and `p2p` features.
+///
+/// # Example
+///
+/// ```
+/// use std::os::fd::OwnedFd;
+///
+/// use zbus::{
+///     Guid, block_on,
+///     connection::{
+///         Builder,
+///         socket::{Channel, ChannelHandover},
+///     },
+/// };
+/// use zoter::{Restore, Save};
+///
+/// # fn main() -> zbus::Result<()> {
+/// block_on(async {
+///     let guid = Guid::generate();
+///     let (first, second) = Channel::pair();
+///     let first = Builder::authenticated_socket(first, &guid)
+///         .p2p()
+///         .build()
+///         .await?;
+///     let second = Builder::authenticated_socket(second, &guid)
+///         .p2p()
+///         .build()
+///         .await?;
+///     // The two connections talk to each other, until it is time to hand them over.
+///
+///     let channel = ChannelHandover::new(first.hand_over().await?, second.hand_over().await?)?;
+///     let (record, fds) = {
+///         let mut record = vec![0; channel.saved_len().expect("it has a record")];
+///         channel.save(&mut record)?;
+///         // Pass `record` and the descriptors on, such as to the file descriptor store of
+///         // systemd, and get them back, such as in the next instance of the program. Duplicates
+///         // stand for that here.
+///         let fds = channel
+///             .fds()
+///             .iter()
+///             .map(|fd| fd.try_clone_to_owned())
+///             .collect::<std::io::Result<Vec<OwnedFd>>>()?;
+///
+///         (record, fds)
+///     };
+///     let channel = ChannelHandover::restore(&record, fds)?;
+///
+///     // The two connections go on, over a new channel.
+///     let (first, second) = channel.into_ends();
+///     let first = Builder::take_over(first).build().await?;
+///     let second = Builder::take_over(second).build().await?;
+///     first.flush().await?;
+///     second.flush().await?;
+///
+///     Ok(())
+/// })
+/// # }
+/// ```
+///
+/// [`Builder::take_over`]: super::Builder::take_over
+/// [`Channel`]: super::socket::Channel
+/// [`Save::fds`]: zoter::Save::fds
+/// [`Save::saved_len`]: zoter::Save::saved_len
+/// [`Restore::restore`]: zoter::Restore::restore
+#[cfg(feature = "p2p")]
+#[derive(Debug)]
+#[must_use = "dropping a `ChannelHandover` closes the descriptors that it holds"]
+pub struct ChannelHandover {
+    /// The hand-over of the first end, off its channel.
+    first: Handover,
+    /// The hand-over of the second end, off its channel.
+    second: Handover,
+}
+
+#[cfg(feature = "p2p")]
+impl ChannelHandover {
+    /// Put the hand-overs of the connections at the two ends of one [`Channel`] together, and take
+    /// them off the channel, for them to go to another process.
+    ///
+    /// Each gets what the channel held for its connection, the messages that the other end sent
+    /// and that the connection didn't read, and the channel goes. Nothing is sent over a channel
+    /// whose two ends were handed over, which is what lets it go.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Unsupported`] unless `first` and `second` are the hand-overs of the connections at
+    /// the two ends of one channel, both still on it. It takes both by value, and drops them then,
+    /// which closes the descriptors that they hold, as dropping a [`Handover`] does.
+    ///
+    /// [`Channel`]: super::socket::Channel
+    pub fn new(mut first: Handover, mut second: Handover) -> Result<Self> {
+        match (first.channel_pair(), second.channel_pair()) {
+            (Some(first), Some(second)) if Arc::ptr_eq(first, second) => (),
+            _ => return Err(Error::Unsupported),
+        }
+        for handover in [&mut first, &mut second] {
+            handover.take_off_channel();
+        }
+
+        Ok(Self { first, second })
+    }
+
+    /// The hand-overs of the two ends, in the order that they were given in, joined by a new
+    /// [`Channel`], which holds what the old one held for each, for [`Builder::take_over`] to build
+    /// the connections that go on over it.
+    ///
+    /// Each end first reads what the channel that the two were taken off held for it.
+    ///
+    /// [`Builder::take_over`]: super::Builder::take_over
+    /// [`Channel`]: super::socket::Channel
+    pub fn into_ends(self) -> (Handover, Handover) {
+        let Self {
+            mut first,
+            mut second,
+        } = self;
+        let (first_end, second_end) = Channel::pair_holding(first.take_held(), second.take_held());
+        first.socket = HandoverSocket::Socket(first_end.into());
+        second.socket = HandoverSocket::Socket(second_end.into());
+
+        (first, second)
+    }
+}
+
+/// The record of the hand-overs of the two ends of a channel, and their file descriptors, to pass
+/// on to another process, which [`ChannelHandover`]'s [`zoter::Restore`] impl gives them back from.
+#[cfg(feature = "p2p")]
+impl zoter::Save for ChannelHandover {
+    /// The exact length of the record that [`Save::save`] writes, a multiple of 8. It is never
+    /// `None`.
+    ///
+    /// [`Save::save`]: zoter::Save::save
+    fn saved_len(&self) -> Option<usize> {
+        Some(CHANNEL_HEADER + self.first.layout().len + self.second.layout().len)
+    }
+
+    /// Copy the record of the two hand-overs into `dest`, which can be any memory, at any address,
+    /// as [`Handover`]'s [`Save::save`] does.
+    ///
+    /// `dest` is to be exactly [`Save::saved_len`] bytes long. The hand-overs are left as they
+    /// were.
+    ///
+    /// # Errors
+    ///
+    /// Nothing is written on an error, which is [`io::ErrorKind::InvalidInput`] for a `dest` that
+    /// is not `saved_len` bytes long, or for a hand-over with more messages or file descriptors
+    /// than a record can count (4 billion).
+    ///
+    /// [`Save::save`]: zoter::Save::save
+    /// [`Save::saved_len`]: zoter::Save::saved_len
+    fn save(&self, dest: &mut [u8]) -> io::Result<()> {
+        let (first, second) = (self.first.layout().len, self.second.layout().len);
+        if dest.len() != CHANNEL_HEADER + first + second {
+            return Err(invalid_input("the memory is not as long as the record"));
+        }
+        // The first count is that of all the file descriptors of a hand-over that is off its
+        // channel, as it has no socket.
+        let [first_fds, ..] = self.first.counts()?;
+        let [second_fds, ..] = self.second.counts()?;
+
+        // Nothing fails from here on: the parts are as long as their records, which count what
+        // they hold.
+        let (header, parts) = dest.split_at_mut(CHANNEL_HEADER);
+        let (first_part, second_part) = parts.split_at_mut(first);
+        self.first.save(first_part)?;
+        self.second.save(second_part)?;
+        let mut header = Record(header);
+        header.put(CHANNEL_MAGIC);
+        header.put(&CHANNEL_VERSION.to_le_bytes());
+        header.zeros(2);
+        for count in [first_fds, second_fds] {
+            header.put(&(count as u32).to_le_bytes());
+        }
+        header.zeros(4);
+        for len in [first, second] {
+            header.put(&(len as u64).to_le_bytes());
+        }
+        debug_assert!(
+            header.0.is_empty(),
+            "the header is longer than what was copied into it"
+        );
+
+        Ok(())
+    }
+
+    /// The file descriptors to pass on with the record, in the order that [`Restore::restore`]
+    /// takes them: those of the first end, then those of the second one, each in the order that
+    /// [`Handover`]'s [`Save::fds`] gives them, with no socket.
+    ///
+    /// They are borrowed, so none is duplicated.
+    ///
+    /// [`Save::fds`]: zoter::Save::fds
+    /// [`Restore::restore`]: zoter::Restore::restore
+    fn fds(&self) -> Vec<BorrowedFd<'_>> {
+        let mut fds = self.first.fds();
+        fds.extend(self.second.fds());
+
+        fds
+    }
+}
+
+/// The hand-overs of the two ends of a channel that [`zoter::Save`] saved, out of their record and
+/// their file descriptors.
+#[cfg(feature = "p2p")]
+impl zoter::Restore for ChannelHandover {
+    type Error = Error;
+
+    /// The hand-overs that [`Save::save`] copied into `record`, given exactly those bytes, at any
+    /// address, with the file descriptors that [`Save::fds`] gave, in their order, in this process
+    /// or in another one.
+    ///
+    /// This copies what it needs out of `record` before it returns.
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`Handover`]'s [`Restore::restore`], for the record of the two and for that
+    /// of each end:
+    ///
+    /// * [`Error::Unsupported`] for a record that this version of zbus can't read, as one that a
+    ///   later version saved may be.
+    /// * An I/O error ([`Error::InputOutput`]) of kind `InvalidData` for anything else that is not
+    ///   a record that `save` copied, and for a number of file descriptors other than the one that
+    ///   it counts.
+    ///
+    /// The file descriptors are closed on an error.
+    ///
+    /// [`Save::save`]: zoter::Save::save
+    /// [`Save::fds`]: zoter::Save::fds
+    /// [`Restore::restore`]: zoter::Restore::restore
+    fn restore(record: &[u8], mut fds: Vec<OwnedFd>) -> Result<ChannelHandover> {
+        if record.get(..CHANNEL_MAGIC.len()) != Some(CHANNEL_MAGIC) {
+            return Err(malformed());
+        }
+        match u16::from_le_bytes(field(record, 8)?) {
+            CHANNEL_VERSION => (),
+            version if version > CHANNEL_VERSION => return Err(Error::Unsupported),
+            _ => return Err(malformed()),
+        }
+        let count_at = |at| field(record, at).map(|count| u32::from_le_bytes(count) as usize);
+        let (first_fds, second_fds) = (count_at(12)?, count_at(16)?);
+        let (first, second) = (len_at(record, 24)?, len_at(record, 32)?);
+        if field::<2>(record, 10)? != [0; 2] || field::<4>(record, 20)? != [0; 4] {
+            return Err(malformed());
+        }
+        let (first, first_end) = section(record, CHANNEL_HEADER, first)?;
+        let (second, end) = section(record, first_end, second)?;
+        // Counted without adding the two counts, which can overflow on a 32-bit target.
+        if end != record.len() || fds.len().checked_sub(first_fds) != Some(second_fds) {
+            return Err(malformed());
+        }
+        let second_fds = fds.split_off(first_fds);
+
+        Ok(ChannelHandover {
+            first: Handover::from_record(first, fds, true)?,
+            second: Handover::from_record(second, second_fds, true)?,
+        })
+    }
+}
+
+impl Handover {
+    /// The hand-over that `record` holds, with `fds`, as [`zoter::Restore::restore`] documents.
+    ///
+    /// With the `p2p` feature, `end_of_channel` tells whether it is to be that of one end of a
+    /// [`ChannelHandover`], off its channel, which only the record of the two holds, and no
+    /// other. Those are the only hand-overs whose records have no socket.
+    fn from_record(
+        record: &[u8],
+        fds: Vec<OwnedFd>,
+        #[cfg(feature = "p2p")] end_of_channel: bool,
+    ) -> Result<Handover> {
         if record.get(..MAGIC.len()) != Some(MAGIC) {
             return Err(malformed());
         }
@@ -528,9 +816,15 @@ impl zoter::Restore for Handover {
             (count_at(32)?, count_at(36)?, count_at(40)?, count_at(44)?);
         let (inbound, outbound) = (len_at(record, 48)?, len_at(record, 56)?);
         let rest = len_at(record, 64)?;
-        // The socket's descriptor comes first. Counted without adding to `fd_count`, which can
-        // overflow on a 32-bit target.
-        if fds.len().checked_sub(1) != Some(fd_count) {
+        // A record has no socket if, and only if, it says so, and is that of one end of a channel.
+        #[cfg(feature = "p2p")]
+        if (kind == CHANNEL) != (features & UNPAIRED != 0) || (kind == CHANNEL) != end_of_channel {
+            return Err(malformed());
+        }
+        // The socket's descriptor comes first, in a record that has one. Counted without adding
+        // to `fd_count`, which can overflow on a 32-bit target.
+        let socket_fds = usize::from(kind != CHANNEL);
+        if fds.len().checked_sub(socket_fds) != Some(fd_count) {
             return Err(malformed());
         }
         let server_guid = str::from_utf8(bytes(record, 72, 32)?).map_err(|_| malformed())?;
@@ -570,10 +864,14 @@ impl zoter::Restore for Handover {
         let (queued_table, kept_table) = table.split_at(8 * queued);
 
         let mut fds = fds.into_iter();
-        let socket = fds.next().expect("the descriptors were counted");
+        let mut socket = || fds.next().expect("the descriptors were counted");
         let socket = match kind {
-            UNIX_STREAM => HandoverSocket::UnixStream(UnixStream::from(socket)),
-            TCP_STREAM => HandoverSocket::TcpStream(TcpStream::from(socket)),
+            UNIX_STREAM => HandoverSocket::UnixStream(UnixStream::from(socket())),
+            TCP_STREAM => HandoverSocket::TcpStream(TcpStream::from(socket())),
+            // What the channel held is the end of the tail, which the connection that takes over
+            // reads off it.
+            #[cfg(feature = "p2p")]
+            CHANNEL => HandoverSocket::Unpaired(Vec::new()),
             _ => return Err(malformed()),
         };
         // A record that doesn't tell who had its messages is one whose messages nobody had.
@@ -620,9 +918,43 @@ impl zoter::Restore for Handover {
             unwritten: Unwritten { cut, kept },
         })
     }
-}
 
-impl Handover {
+    /// The counts of the record of the hand-over: of the file descriptors that come after that of
+    /// the socket, of the messages that were read and are handed over, of the file descriptors of
+    /// the tail, and of the whole messages that were left to write.
+    ///
+    /// It fails with [`io::ErrorKind::InvalidInput`] where one of those, or of the lengths and the
+    /// counts of the messages in its table, is more than a record can count.
+    fn counts(&self) -> io::Result<[usize; 4]> {
+        let kept = &self.unwritten.kept;
+        // What the channel held for the connection goes as the end of the tail, which the
+        // connection that takes over reads as such.
+        let tail_fds = self.tail_fds.len() + fd_count_of(self.held());
+        let counts = [
+            fd_count_of(self.queued()) + tail_fds + fd_count_of(kept),
+            self.queued.len(),
+            tail_fds,
+            kept.len(),
+        ];
+        // Each count of the record takes 4 bytes, and so does each of those in its table.
+        let mut table = self
+            .queued()
+            .chain(kept)
+            .flat_map(|msg| [msg.data().len(), msg.data().fds().len()]);
+        if counts
+            .iter()
+            .copied()
+            .chain(&mut table)
+            .any(|count| u32::try_from(count).is_err())
+        {
+            return Err(invalid_input(
+                "too many messages or file descriptors for a record",
+            ));
+        }
+
+        Ok(counts)
+    }
+
     /// The messages that the connection read and hands over, oldest first.
     fn queued(&self) -> impl Iterator<Item = &Message> {
         self.queued.iter().map(|(msg, _)| msg)
@@ -637,12 +969,17 @@ impl Handover {
         let header_len = (NAME + name).next_multiple_of(8);
         let kept = &self.unwritten.kept;
         let table_len = 8 * (self.queued.len() + kept.len());
+        let unpaired = match self.socket {
+            #[cfg(feature = "p2p")]
+            HandoverSocket::Unpaired(_) => UNPAIRED,
+            _ => 0,
+        };
         // Who had each message only takes room in a record if someone had one of them.
         let (features, had_len) = match self.queued.iter().any(|(_, had)| *had != Had::NONE) {
-            true => (HAD, self.queued.len().next_multiple_of(8)),
-            false => (0, 0),
+            true => (HAD | unpaired, self.queued.len().next_multiple_of(8)),
+            false => (unpaired, 0),
         };
-        let inbound = len_of(self.queued()) + self.tail.len();
+        let inbound = len_of(self.queued()) + self.tail.len() + len_of(self.held());
         let outbound = self.unwritten.rest().len() + len_of(kept);
         let len = header_len
             + table_len
@@ -657,6 +994,62 @@ impl Handover {
             inbound,
             outbound,
             len,
+        }
+    }
+
+    /// What tells the pair of channels that the hand-over holds an end of, if it holds one.
+    #[cfg(feature = "p2p")]
+    fn channel_pair(&self) -> Option<&Arc<()>> {
+        match &self.socket {
+            HandoverSocket::Socket(split) => match split.writes() {
+                Some(Writes::Whole { pair }) => Some(pair),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Take the hand-over off the channel that it holds an end of: what the channel holds for it
+    /// goes with it, after the tail of what its connection read, and the end of the channel goes.
+    #[cfg(feature = "p2p")]
+    fn take_off_channel(&mut self) {
+        let HandoverSocket::Socket(split) = &mut self.socket else {
+            return;
+        };
+        let mut held = Vec::new();
+        let mut cx = task::Context::from_waker(task::Waker::noop());
+        loop {
+            // The read half gives the whole messages of the tail first, then those of the channel,
+            // and loses none where it has none to give yet. It fails on a tail that holds part of
+            // a message, which stays where it is, as it would for the connection that takes over.
+            let mut receiving =
+                split
+                    .read_mut()
+                    .receive_message(0, &mut self.tail, &mut self.tail_fds);
+            match receiving.as_mut().poll(&mut cx) {
+                Poll::Ready(Ok(msg)) => held.push(msg),
+                Poll::Ready(Err(_)) | Poll::Pending => break,
+            }
+        }
+        self.socket = HandoverSocket::Unpaired(held);
+    }
+
+    /// The whole messages that the channel that the hand-over was taken off held for it.
+    fn held(&self) -> &[Message] {
+        match &self.socket {
+            #[cfg(feature = "p2p")]
+            HandoverSocket::Unpaired(held) => held,
+            _ => &[],
+        }
+    }
+
+    /// Take the whole messages that the channel that the hand-over was taken off held for it, for
+    /// a new channel to hold them.
+    #[cfg(feature = "p2p")]
+    fn take_held(&mut self) -> Vec<Message> {
+        match &mut self.socket {
+            HandoverSocket::Unpaired(held) => mem::take(held),
+            _ => Vec::new(),
         }
     }
 }
@@ -674,7 +1067,7 @@ impl fmt::Debug for Handover {
             .field("unread_len", &self.unread_len())
             .field(
                 "unread_fds",
-                &(fd_count_of(self.queued()) + self.tail_fds.len()),
+                &(fd_count_of(self.queued()) + self.tail_fds.len() + fd_count_of(self.held())),
             )
             .field("unwritten_len", &self.unwritten_len())
             .field("unwritten_fds", &fd_count_of(kept))
@@ -692,6 +1085,14 @@ pub(super) enum HandoverSocket {
     /// The halves of any other socket, which can only go on in this process. Those that zbus made
     /// run on the runtime of the connection that they came from, so they need it to keep running.
     Socket(BoxedSplit),
+    /// No socket: that of a connection over a channel, which the hand-over was taken off, along
+    /// with that of the other end, or which it was restored without, as one end of a
+    /// [`ChannelHandover`], until the two go on over a new channel
+    /// ([`ChannelHandover::into_ends`]). It holds the whole messages that the channel held for the
+    /// connection, which the connection is to read after the tail of what it read. No hand-over
+    /// that is handed out has it.
+    #[cfg(feature = "p2p")]
+    Unpaired(Vec<Message>),
 }
 
 /// Shows the kind of socket, and its descriptor if any, rather than the halves of a socket of your
@@ -702,6 +1103,8 @@ impl fmt::Debug for HandoverSocket {
             Self::UnixStream(socket) => f.debug_tuple("UnixStream").field(socket).finish(),
             Self::TcpStream(socket) => f.debug_tuple("TcpStream").field(socket).finish(),
             Self::Socket(_) => f.write_str("Socket"),
+            #[cfg(feature = "p2p")]
+            Self::Unpaired(held) => f.debug_tuple("Unpaired").field(&held.len()).finish(),
         }
     }
 }
@@ -1635,14 +2038,15 @@ fn fds_of<'m>(msgs: impl IntoIterator<Item = &'m Message>) -> impl Iterator<Item
 //     10  2 bytes  how long the header is, a multiple of 8: a later minor version of the format
 //                  adds fields at its end, which an earlier one skips
 //     12  4 bytes  the features of the format that the record needs, as bits, which a version of
-//                  zbus that doesn't know one of refuses: `HAD`
+//                  zbus that doesn't know one of refuses: `HAD` and `UNPAIRED`
 //     16  8 bytes  how long the record is
-//     24  1 byte   the kind of socket: `UNIX_STREAM` or `TCP_STREAM`
+//     24  1 byte   the kind of socket: `UNIX_STREAM`, `TCP_STREAM` or, in a record with the
+//                  `UNPAIRED` feature only, `CHANNEL`
 //     25  1 byte   flags: `FD_PASSING` and `P2P`
 //     26  1 byte   how long the unique name is, `N`, 0 for none
 //     27  1 byte   0
 //     28  4 bytes  the serial number of the next message
-//     32  4 bytes  how many file descriptors come after that of the socket
+//     32  4 bytes  how many file descriptors come after that of the socket, if there is one
 //     36  4 bytes  how many messages were read and are handed over, `Q`
 //     40  4 bytes  how many file descriptors came in with what was read after them, the tail
 //     44  4 bytes  how many whole messages were left to write, `W`
@@ -1661,6 +2065,25 @@ fn fds_of<'m>(msgs: impl IntoIterator<Item = &'m Message>) -> impl Iterator<Item
 //
 // The file descriptors that go with the record are that of the socket, then those of the `Q`
 // messages, in their order, then those of the tail, then those of the `W` messages, in their order.
+//
+// A record of the `CHANNEL` kind has no socket, and no file descriptor of one: the whole messages
+// that the channel held for the connection are the end of its tail. Such a record is only ever
+// that of one end of a channel, inside the record of a `ChannelHandover`, which is, little-endian:
+//
+//   offset  size     field
+//      0  8 bytes  `CHANNEL_MAGIC`
+//      8  2 bytes  the version of the format, `CHANNEL_VERSION`
+//     10  2 bytes  0
+//     12  4 bytes  how many file descriptors the record of the first end has, `F1`
+//     16  4 bytes  how many file descriptors the record of the second end has, `F2`
+//     20  4 bytes  0
+//     24  8 bytes  how long the record of the first end is, `L1`, a multiple of 8
+//     32  8 bytes  how long the record of the second end is, `L2`, a multiple of 8
+//     40  L1       the record of the first end
+//          L2       the record of the second end
+//
+// The file descriptors that go with it are the `F1` of the first end, then the `F2` of the second
+// one.
 
 /// How the record of a hand-over is laid out: the lengths that its header gives.
 struct Layout {
@@ -1787,18 +2210,40 @@ const MAGIC: &[u8; 8] = b"zbus-hov";
 /// The major version of the format of the record, which a version of zbus refuses a record of a
 /// later one of, as it can't read it.
 const MAJOR: u16 = 1;
+/// What the record of a `ChannelHandover` starts with.
+#[cfg(feature = "p2p")]
+const CHANNEL_MAGIC: &[u8; 8] = b"zbus-chn";
+/// The version of the format of the record of a `ChannelHandover`, which a version of zbus refuses
+/// a record of a later one of, as it can't read it.
+#[cfg(feature = "p2p")]
+const CHANNEL_VERSION: u16 = 1;
+/// How long the header of the record of a `ChannelHandover` is, which the records of its two ends
+/// come after.
+#[cfg(feature = "p2p")]
+const CHANNEL_HEADER: usize = 40;
 /// The features of the format of the record that this version of zbus knows, as the bits of those
 /// that a record needs.
+#[cfg(feature = "p2p")]
+const KNOWN_FEATURES: u32 = HAD | UNPAIRED;
+/// The features of the format of the record that this version of zbus knows, as the bits of those
+/// that a record needs: without the `p2p` feature, there is no channel for a hand-over to go on
+/// over.
+#[cfg(not(feature = "p2p"))]
 const KNOWN_FEATURES: u32 = HAD;
 /// The feature of a record that tells who had each of the messages that it hands over. A record of
 /// messages that nobody had does without it, so that every version of zbus restores it.
 const HAD: u32 = 1;
+/// The feature of the record of a hand-over that is off its channel, which has no socket.
+#[cfg(feature = "p2p")]
+const UNPAIRED: u32 = 2;
 /// Where the unique name starts in a record, after the fields that every header has.
 const NAME: usize = 104;
 /// The kind of socket of a record of a unix-domain stream.
 const UNIX_STREAM: u8 = 0;
 /// The kind of socket of a record of a TCP stream.
 const TCP_STREAM: u8 = 1;
+/// The kind of socket of the record of a hand-over that is off its channel.
+const CHANNEL: u8 = 2;
 /// The flag of a record of a connection whose two ends agreed to pass file descriptors.
 const FD_PASSING: u8 = 1;
 /// The flag of a record of a peer-to-peer connection.
@@ -1846,7 +2291,9 @@ mod tests {
     use zoter::{Restore, Save};
 
     use super::{
-        HAD, Had, Handover, HandoverSocket, MAJOR, NAME, ReaderEnd, TCP_STREAM, UNIX_STREAM,
+        CHANNEL, CHANNEL_HEADER, CHANNEL_MAGIC, CHANNEL_VERSION, ChannelHandover, HAD, Had,
+        Handover, HandoverSocket, KNOWN_FEATURES, MAJOR, NAME, ReaderEnd, TCP_STREAM, UNIX_STREAM,
+        UNPAIRED,
     };
     use crate::{
         Address, Connection, Error, Guid, MatchRule, Message, MessageStream, Result,
@@ -3584,6 +4031,270 @@ mod tests {
         });
     }
 
+    /// Both ends of a channel are handed over, the one that serves an interface first, and taken
+    /// over, with all that was on its way between them: a call that the object server didn't
+    /// take, calls that the channel held, calls that a send kept, and a reply that the stream of
+    /// the other end didn't yield. Each call is answered once, and the stream of the connection
+    /// that takes over yields the replies in the order of their calls.
+    #[cfg(feature = "service")]
+    #[test]
+    #[timeout(15000)]
+    fn both_ends_of_a_channel_are_handed_over_with_what_is_on_its_way() {
+        for carry in [Carry::AsTheyAre, Carry::Together, Carry::Records] {
+            both_ends_of_a_channel_are_handed_over(carry);
+        }
+    }
+
+    /// Hands both ends of a channel over, with all that is on its way between them, to connections
+    /// that take over what `carry` makes of the two hand-overs.
+    #[cfg(feature = "service")]
+    fn both_ends_of_a_channel_are_handed_over(carry: Carry) {
+        under_every_runtime(move |runtime| async move {
+            let guid = Guid::generate();
+            let (ours, theirs) = Channel::pair();
+            let (service, mut stream) = futures_util::try_join!(
+                on(Builder::authenticated_socket(ours, guid.clone()), &runtime)
+                    .p2p()
+                    .serve_at(PATH, InlineAsker)
+                    .build(),
+                on(Builder::authenticated_socket(theirs, guid), &runtime)
+                    .p2p()
+                    .build_message_stream(),
+            )
+            .unwrap();
+            let caller = Connection::from(&stream);
+
+            // The object server runs the method of the first call itself, which waits to be told,
+            // so it leaves the second one.
+            caller
+                .send(
+                    &Message::method_call(PATH, "Ask")
+                        .interface(INTERFACE)
+                        .build(&())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let question = stream.next().await.unwrap().unwrap();
+            assert_eq!(question.header().member().unwrap(), "Tell");
+            caller.send(&echo("left")).await.unwrap();
+            let service_handover = {
+                let mut handing_over = pin!(service.hand_over());
+                let handed_over = futures_lite::future::poll_once(handing_over.as_mut()).await;
+                assert!(
+                    handed_over.is_none(),
+                    "handed over with a call under way: {handed_over:?}"
+                );
+                caller.reply(&question.header(), &"told").await.unwrap();
+
+                handing_over.await.unwrap()
+            };
+            assert_eq!(who_had(&service_handover), [(Type::MethodCall, Had::NONE)]);
+            // Nobody reads the channel now: it holds the calls that it has room for, and the sends
+            // keep the others, as the hand-over of the caller is prepared.
+            assert!(caller.prepare_hand_over());
+            let texts: Vec<_> = (0..40).map(|n| format!("{n:02}")).collect();
+            for text in &texts {
+                caller.send(&echo(text)).await.unwrap();
+            }
+            assert_ne!(caller.unwritten_len(), 0);
+            // The stream is yet to yield the answer to the first call.
+            let caller_handover = stream.hand_over().await.unwrap();
+            assert_eq!(who_had(&caller_handover), [(Type::MethodReturn, Had::NONE)]);
+            assert_ne!(caller_handover.unwritten_len(), 0);
+            let (service_handover, caller_handover) =
+                carry.carried(service_handover, caller_handover);
+
+            let _service = on(Builder::take_over(service_handover), &runtime)
+                .serve_at(PATH, InlineAsker)
+                .build()
+                .await
+                .unwrap();
+            let mut stream = on(Builder::take_over(caller_handover), &runtime)
+                .build_message_stream()
+                .await
+                .unwrap();
+            let caller = Connection::from(&stream);
+            // The calls that the sends kept go out as the channel has room for them.
+            runtime
+                .timeout(caller.flush(), Duration::from_secs(10))
+                .await
+                .unwrap();
+            caller.send(&echo("after")).await.unwrap();
+
+            let mut answers = Vec::new();
+            for _ in 0..texts.len() + 3 {
+                let reply = stream.next().await.unwrap().unwrap();
+                assert_eq!(reply.message_type(), Type::MethodReturn, "{reply:?}");
+                answers.push(reply.body().deserialize::<String>().unwrap());
+            }
+            let expected: Vec<_> = ["told", "left"]
+                .into_iter()
+                .chain(texts.iter().map(String::as_str))
+                .chain(["after"])
+                .collect();
+            assert_eq!(answers, expected, "{carry:?}");
+        });
+    }
+
+    /// What a channel held for the hand-overs of its two ends goes through the record of the two,
+    /// file descriptors included, which are those of the messages alone: an end that is off its
+    /// channel has no socket. A message that came in before it comes first.
+    #[test]
+    #[timeout(15000)]
+    fn what_a_channel_held_goes_through_the_records() {
+        under_every_runtime(|runtime| async move {
+            let (sent, with_fd, unread, channel) = holding_a_message(&runtime).await;
+
+            assert_eq!(channel.first.unread_len(), unread + with_fd.data().len());
+            assert_eq!(channel.second.unread_len(), 0);
+            let inodes: Vec<_> = channel.fds().iter().map(inode).collect();
+            assert_eq!(inodes, [inode(&sent)]);
+            assert!(channel.second.fds().is_empty());
+            // The record of each end is of the kind of a channel, and says that it has no socket.
+            let (record, _) = saved(&channel);
+            for at in parts_of(&record) {
+                assert_eq!(record[at + 24], CHANNEL);
+                assert_eq!(
+                    u32::from_le_bytes(record[at + 12..at + 16].try_into().unwrap()),
+                    UNPAIRED
+                );
+            }
+            let channel = through_a_record(channel, 5);
+            assert_eq!(channel.first.unread_len(), unread + with_fd.data().len());
+            let (handover, peer_handover) = channel.into_ends();
+            assert_eq!(handover.saved_len(), None);
+
+            let mut stream = on(Builder::take_over(handover), &runtime)
+                .build_message_stream()
+                .await
+                .unwrap();
+            let peer = on(Builder::take_over(peer_handover), &runtime)
+                .build()
+                .await
+                .unwrap();
+            peer.send(&signal(3)).await.unwrap();
+            let mut received = Vec::new();
+            for _ in 0..3 {
+                received.push(stream.next().await.unwrap().unwrap());
+            }
+            assert_eq!(members(&received), ["Test", "WithFd", "Test"]);
+            let inodes: Vec<_> = received[1].data().fds().iter().map(inode).collect();
+            assert_eq!(inodes, [inode(&sent)]);
+        });
+    }
+
+    /// Only the hand-overs of the two ends of one channel go together: anything else is refused.
+    /// The record of an end is one only inside the record of the two: alone, it is none, and so is
+    /// one of the kind of a channel that doesn't say that it has no socket, or one that says so and
+    /// is of another kind.
+    #[test]
+    #[timeout(15000)]
+    fn hand_overs_that_do_not_go_together_are_not_paired() {
+        under_every_runtime(|runtime| async move {
+            let (mut first, first_peer) = channel_pair(&runtime).await;
+            let (mut second, second_peer) = channel_pair(&runtime).await;
+            let (mut over_a_socket, _socket_peer) = over_a_socket_pair(&runtime).await;
+            let (mut over_another, _another_peer) = over_a_socket_pair(&runtime).await;
+
+            // The ends of two channels, a socket and an end, and an end and a socket.
+            for (one, other) in [
+                (
+                    first.hand_over().await.unwrap(),
+                    second_peer.hand_over().await.unwrap(),
+                ),
+                (
+                    over_a_socket.hand_over().await.unwrap(),
+                    first_peer.hand_over().await.unwrap(),
+                ),
+                (
+                    second.hand_over().await.unwrap(),
+                    over_another.hand_over().await.unwrap(),
+                ),
+            ] {
+                let refused = ChannelHandover::new(one, other);
+                assert!(matches!(refused, Err(Error::Unsupported)), "{refused:?}");
+            }
+
+            let (_, _, _, channel) = holding_a_message(&runtime).await;
+            let (record, _) = saved(&channel);
+            let [first_at, second_at] = parts_of(&record);
+            let parts = [
+                (&record[first_at..second_at], &channel.first),
+                (&record[second_at..], &channel.second),
+            ];
+            for (part, end) in parts {
+                assert_invalid_data(Handover::restore(part, duplicates(end)));
+            }
+            for at in [first_at, second_at] {
+                let (mut record, fds) = saved(&channel);
+                record[at + 12] &= !(UNPAIRED as u8);
+                assert_invalid_data(ChannelHandover::restore(&record, fds));
+                let (mut record, fds) = saved(&channel);
+                record[at + 24] = UNIX_STREAM;
+                assert_invalid_data(ChannelHandover::restore(&record, fds));
+            }
+            let (record, fds) = saved(&channel);
+            let restored = ChannelHandover::restore(&record, fds).unwrap();
+            assert_eq!(restored.saved_len(), Some(record.len()));
+        });
+    }
+
+    /// The record of the hand-overs of the two ends of a channel is refused where its header is not
+    /// one that `save` wrote: of another version, a later one of which this version of zbus can't
+    /// read, cut short, too long, or with file descriptors other than those that it counts for
+    /// each end.
+    #[test]
+    #[timeout(15000)]
+    fn a_record_of_a_channel_that_is_not_as_saved_is_refused() {
+        under_every_runtime(|runtime| async move {
+            let (_, _, _, channel) = holding_a_message(&runtime).await;
+            let (record, _) = saved(&channel);
+            let len = record.len();
+            assert_eq!(&record[..8], CHANNEL_MAGIC);
+
+            let later = ChannelHandover::restore(
+                &changed_at(&record, 8, &(CHANNEL_VERSION + 1).to_le_bytes()),
+                duplicates(&channel),
+            );
+            assert!(matches!(later, Err(Error::Unsupported)), "{later:?}");
+            let malformed = [
+                changed_at(&record, 0, b"zbus-hov"),
+                changed_at(&record, 8, &0u16.to_le_bytes()),
+                changed_at(&record, 10, &[1]),
+                changed_at(&record, 20, &[1]),
+                // The lengths of the parts.
+                changed_at(&record, 24, &(len as u64).to_le_bytes()),
+                changed_at(&record, 32, &8u64.to_le_bytes()),
+                // Cut short, inside the header and after it, and too long.
+                record[..CHANNEL_HEADER - 8].to_vec(),
+                record[..len - 8].to_vec(),
+                [&record[..], &[0; 8]].concat(),
+                // The counts of the file descriptors, which come with the first end.
+                changed_at(&record, 12, &0u32.to_le_bytes()),
+                changed_at(&record, 16, &1u32.to_le_bytes()),
+                [
+                    &record[..12],
+                    &0u32.to_le_bytes(),
+                    &1u32.to_le_bytes(),
+                    &record[20..],
+                ]
+                .concat(),
+            ];
+            for record in malformed {
+                assert_invalid_data(ChannelHandover::restore(&record, duplicates(&channel)));
+            }
+            // As many file descriptors as counted, and no other number.
+            let mut more = duplicates(&channel);
+            more.push(pipe());
+            for fds in [Vec::new(), more] {
+                assert_invalid_data(ChannelHandover::restore(&record, fds));
+            }
+            let restored = ChannelHandover::restore(&record, duplicates(&channel)).unwrap();
+            assert_eq!(restored.saved_len(), Some(record.len()));
+        });
+    }
+
     /// The streams of a connection that is handed over through none of them, one for a match rule
     /// among them, as the stream of a proxy is, yield what the connection read, then end, with no
     /// error before their end, and a call that waits for its reply fails. The hand-over holds none
@@ -3914,7 +4625,7 @@ mod tests {
     #[test]
     fn a_record_of_a_later_format_is_refused() {
         // A later major version, and the first feature that this version doesn't know.
-        let unknown = (HAD << 1).to_le_bytes();
+        let unknown = (KNOWN_FEATURES + 1).to_le_bytes();
         for (at, value) in [(8, &(MAJOR + 1).to_le_bytes()[..]), (12, &unknown[..])] {
             let (record, fds) =
                 changed(|record| record[at..at + value.len()].copy_from_slice(value));
@@ -4358,7 +5069,10 @@ mod tests {
     /// `handover`, passed on through its record, which `save` copies into memory `at` bytes into
     /// a buffer, and its file descriptors, duplicated, as passing them on does: what `restore`
     /// gives back of them.
-    fn through_a_record(handover: Handover, at: usize) -> Handover {
+    fn through_a_record<H>(handover: H, at: usize) -> H
+    where
+        H: Save + Restore<Error = Error>,
+    {
         let len = handover
             .saved_len()
             .expect("the hand-over of a socket that zbus drives");
@@ -4368,11 +5082,14 @@ mod tests {
         let fds = duplicates(&handover);
         drop(handover);
 
-        Handover::restore(&memory[at..][..len], fds).unwrap()
+        H::restore(&memory[at..][..len], fds).unwrap()
     }
 
     /// The record of `handover`, and duplicates of its file descriptors.
-    fn saved(handover: &Handover) -> (Vec<u8>, Vec<OwnedFd>) {
+    fn saved<H>(handover: &H) -> (Vec<u8>, Vec<OwnedFd>)
+    where
+        H: Save,
+    {
         let mut record = vec![0; handover.saved_len().unwrap()];
         handover.save(&mut record).unwrap();
 
@@ -4393,7 +5110,10 @@ mod tests {
     type Change = fn(&mut Vec<u8>);
 
     /// Duplicates of the file descriptors of `handover`, as passing them on makes.
-    fn duplicates(handover: &Handover) -> Vec<OwnedFd> {
+    fn duplicates<H>(handover: &H) -> Vec<OwnedFd>
+    where
+        H: Save,
+    {
         handover
             .fds()
             .into_iter()
@@ -4509,6 +5229,86 @@ mod tests {
         let mut received = vec![0; msg.data().len()];
         (&socket).read_exact(&mut received).unwrap();
         assert_eq!(received, &msg.data()[..]);
+    }
+
+    /// How the hand-overs of the connections at the two ends of a channel get to the connections
+    /// that take over.
+    #[derive(Clone, Copy, Debug)]
+    enum Carry {
+        /// As they are, with the ends of the channel.
+        AsTheyAre,
+        /// Put together, which takes them off the channel, and put at the ends of a new one.
+        Together,
+        /// Put together, passed on through their record, and put at the ends of a new one.
+        Records,
+    }
+
+    impl Carry {
+        /// What this makes of `first` and `second`, the hand-overs of the two ends of a channel.
+        fn carried(self, first: Handover, second: Handover) -> (Handover, Handover) {
+            if matches!(self, Self::AsTheyAre) {
+                return (first, second);
+            }
+            assert_eq!(first.saved_len(), None);
+            assert_eq!(second.saved_len(), None);
+            let mut channel = ChannelHandover::new(first, second).unwrap();
+            if matches!(self, Self::Records) {
+                channel = through_a_record(channel, 3);
+            }
+
+            channel.into_ends()
+        }
+    }
+
+    /// The hand-overs of the two ends of a channel, put together, with a signal that the stream of
+    /// the first end is yet to yield, and a message that carries `sent`, a file descriptor, which
+    /// the channel held for it, with how many bytes the first end left unread before it was taken
+    /// off the channel.
+    async fn holding_a_message(runtime: &Runtime) -> (OwnedFd, Message, usize, ChannelHandover) {
+        let (mut stream, peer) = channel_pair(runtime).await;
+        let conn = Connection::from(&stream);
+        let sent = pipe();
+        let with_fd = Message::signal(PATH, INTERFACE, "WithFd")
+            .build(&crate::Fd::from(&sent))
+            .unwrap();
+
+        // The stream is yet to yield the first signal, and the channel holds the second one,
+        // which nothing reads any more.
+        peer.send(&signal(1)).await.unwrap();
+        queued(&conn).await;
+        let handover = stream.hand_over().await.unwrap();
+        peer.send(&with_fd).await.unwrap();
+        let peer_handover = peer.hand_over().await.unwrap();
+        assert_eq!(handover.saved_len(), None);
+        assert!(handover.fds().is_empty());
+        let unread = handover.unread_len();
+        let channel = ChannelHandover::new(handover, peer_handover).unwrap();
+
+        (sent, with_fd, unread, channel)
+    }
+
+    /// Where the records of the two ends start in `record`, that of the hand-overs of the two ends
+    /// of a channel.
+    fn parts_of(record: &[u8]) -> [usize; 2] {
+        let first = u64::from_le_bytes(record[24..32].try_into().unwrap()) as usize;
+
+        [CHANNEL_HEADER, CHANNEL_HEADER + first]
+    }
+
+    /// A copy of `record` with `bytes` at `at`.
+    fn changed_at(record: &[u8], at: usize, bytes: &[u8]) -> Vec<u8> {
+        let mut record = record.to_vec();
+        record[at..at + bytes.len()].copy_from_slice(bytes);
+
+        record
+    }
+
+    /// Waits for `conn` to have queued a message for its streams, which its reader does in a task
+    /// of its own, as it reads one.
+    async fn queued(conn: &Connection) {
+        while conn.inner.msg_receiver.is_empty() {
+            futures_lite::future::yield_now().await;
+        }
     }
 
     /// The stream of a connection and its peer, over a channel, both on `runtime`.
