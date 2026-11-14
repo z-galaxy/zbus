@@ -7,7 +7,7 @@
 use std::{
     collections::VecDeque,
     sync::{
-        Arc, Mutex, MutexGuard, PoisonError,
+        Arc, Mutex, MutexGuard, OnceLock, PoisonError,
         atomic::{AtomicUsize, Ordering},
     },
 };
@@ -18,6 +18,54 @@ use zruntime::{
 };
 
 use crate::{Message, Result};
+
+/// The [`Calls`] of a connection, which it only makes once it has an object server, so that a
+/// connection with none spends nothing on them, and a hand-over of it skips the steps of an object
+/// server.
+#[derive(Debug, Default)]
+pub(crate) struct CallsSlot {
+    /// Who came first, decided once: `Some`, the calls of an object server that the connection got
+    /// before any hand-over of it looked, or `None`, as a hand-over found it with none.
+    ///
+    /// A hand-over and the object server can't miss each other, as `OnceLock::get_or_init` decides
+    /// which of the two sets this, once, and both go by what it holds from then on: either the
+    /// hand-over gets the calls, and holds them, or the object server finds that a hand-over came
+    /// first, and gets calls held from the start.
+    first: OnceLock<Option<Arc<Calls>>>,
+    /// The calls of an object server that the connection got after a hand-over found it with
+    /// none, which take no calls, as if the hand-over had held them.
+    late: OnceLock<Arc<Calls>>,
+}
+
+impl CallsSlot {
+    /// The calls of the object server of the connection, made the first time, which the connection
+    /// keeps from then on. They take no calls if a hand-over found the connection with none.
+    pub(crate) fn get_or_create(&self) -> &Arc<Calls> {
+        match self.first.get_or_init(|| Some(Arc::default())) {
+            Some(calls) => calls,
+            None => self.late.get_or_init(|| {
+                let calls = Arc::<Calls>::default();
+                calls.hold();
+
+                calls
+            }),
+        }
+    }
+
+    /// The calls of the object server of the connection, as a hand-over of it needs them, if it has
+    /// one. Once this found none, an object server that the connection gets takes no calls.
+    ///
+    /// Where the first look of a hand-over found none, a later one gets the calls of an object
+    /// server that came into being since, if any, to wait for its task and take the calls that it
+    /// left, which it gets until the reader stops. Calls made after the last look of the hand-over
+    /// have none to leave, as the reader has stopped by then.
+    pub(crate) fn existing(&self) -> Option<&Arc<Calls>> {
+        match self.first.get_or_init(|| None) {
+            Some(calls) => Some(calls),
+            None => self.late.get(),
+        }
+    }
+}
 
 /// The method calls that the object server of a connection takes: how many it has under way, and,
 /// once a hand-over of the connection has it take no more, those that it leaves for the object
@@ -238,7 +286,7 @@ mod tests {
     use ntest::timeout;
     use test_log::test;
 
-    use super::{Arc, CALL, Calls, Ordering};
+    use super::{Arc, CALL, Calls, CallsSlot, Ordering};
     use crate::{Message, block_on};
 
     /// A wait for no call to be under way ends once the last call is done with, on another
@@ -266,5 +314,54 @@ mod tests {
             assert!(calls.under_way.load(Ordering::Acquire) < CALL);
             done.join().unwrap();
         }
+    }
+
+    /// An object server that the connection gets once a hand-over found it with none takes no
+    /// calls, and the later looks of the hand-over find its calls, with the call that it left.
+    #[test]
+    fn calls_made_after_a_hand_over_found_none_take_no_calls() {
+        let call = Message::method_call("/org/zbus/Test", "Call")
+            .build(&())
+            .unwrap();
+        let slot = CallsSlot::default();
+        assert!(slot.existing().is_none());
+
+        let calls = slot.get_or_create();
+        let _taking = calls.start();
+
+        assert!(calls.take(&call).is_none());
+        let found = slot.existing().unwrap();
+        assert!(Arc::ptr_eq(found, calls));
+        assert_eq!(found.take_left().len(), 1);
+        assert!(Arc::ptr_eq(calls, slot.get_or_create()));
+    }
+
+    /// The calls of an object server that the connection had before a hand-over looked are those
+    /// that the hand-over gets: they take calls until it holds them, and it waits for those under
+    /// way.
+    #[test]
+    #[timeout(15000)]
+    fn calls_made_before_a_hand_over_looked_are_held_and_waited_for() {
+        let call = Message::method_call("/org/zbus/Test", "Call")
+            .build(&())
+            .unwrap();
+        let slot = CallsSlot::default();
+        let calls = slot.get_or_create();
+        let _taking = calls.start();
+        let under_way = calls.take(&call);
+        assert!(under_way.is_some());
+
+        let found = slot.existing().unwrap();
+        assert!(Arc::ptr_eq(found, calls));
+        found.hold();
+
+        assert!(calls.take(&call).is_none());
+        let mut idle = std::pin::pin!(found.idle());
+        assert!(block_on(futures_lite::future::poll_once(idle.as_mut())).is_none());
+        {
+            // The call is done with as it is dropped here.
+            let _done = under_way;
+        }
+        block_on(idle);
     }
 }

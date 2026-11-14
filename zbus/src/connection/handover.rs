@@ -167,8 +167,6 @@
 //! [`Save::fds`]: zoter::Save::fds
 //! [`Restore::restore`]: zoter::Restore::restore
 
-#[cfg(feature = "p2p")]
-use std::task;
 use std::{
     collections::VecDeque,
     fmt,
@@ -184,11 +182,13 @@ use std::{
     pin::{Pin, pin},
     str,
     sync::{
-        Arc, Mutex, OnceLock, PoisonError,
+        Mutex, OnceLock, PoisonError,
         atomic::{AtomicBool, Ordering},
     },
     task::Poll,
 };
+#[cfg(feature = "p2p")]
+use std::{sync::Arc, task};
 
 use futures_core::Stream;
 use zruntime::{
@@ -1322,7 +1322,7 @@ impl Connection {
         self.ensure_whole().await?;
         let mut through = match stream {
             Some((queue, backlog)) => {
-                self.claim(Some(backlog.stream.get_or_insert_with(Default::default)))?;
+                self.claim(Some(&mut backlog.stream))?;
 
                 Some(Through {
                     queue,
@@ -1356,8 +1356,10 @@ impl Connection {
         // connection, so the task of the object server ends, once it got the calls that were
         // queued for it, all of which it leaves.
         #[cfg(feature = "service")]
-        if self.inner.socket_status.stop.ended_streams() {
-            self.inner.calls.ended().await;
+        if self.inner.socket_status.stop.ended_streams()
+            && let Some(calls) = self.inner.calls.existing()
+        {
+            calls.ended().await;
         }
 
         self.take_apart(through.map(|through| through.taken)).await
@@ -1370,7 +1372,11 @@ impl Connection {
     /// so that the connection never waits for room to queue a message.
     #[cfg(feature = "service")]
     async fn finish_calls(&self, through: &mut Option<Through<'_>>) {
-        let calls = &self.inner.calls;
+        // A connection with no object server has no calls to wait for, and one that it gets from
+        // now on takes none.
+        let Some(calls) = self.inner.calls.existing() else {
+            return;
+        };
         calls.hold();
         taking(through, calls.idle()).await;
     }
@@ -1388,10 +1394,10 @@ impl Connection {
         Ok(())
     }
 
-    /// Claim the connection for the hand-overs through the stream that `stream` stands for, if
+    /// Claim the connection for the hand-overs through the stream that `stream` tells apart, if
     /// any, unless its reader can't stop, or a hand-over through another stream claimed it first,
-    /// which this hand-over then fails on.
-    fn claim(&self, stream: Option<&Arc<()>>) -> Result<()> {
+    /// which this hand-over then fails on. A stream that has no id yet gets one.
+    fn claim(&self, stream: Option<&mut Option<StreamId>>) -> Result<()> {
         let stop = &self.inner.socket_status.stop;
         if !stop.can_stop.load(Ordering::Acquire) {
             return Err(Error::Unsupported);
@@ -1507,12 +1513,24 @@ impl Connection {
         } = parts;
         // The error that the reader ended on, if any, is no message to hand over. An object server
         // that ever took calls had every method call that it doesn't leave.
-        let unyielded = taken.map(|taken| taken.drain(..).flatten());
         #[cfg(feature = "service")]
-        let left = inner.calls.started().then(|| inner.calls.take_left());
+        let left = inner
+            .calls
+            .existing()
+            .filter(|calls| calls.started())
+            .map(|calls| calls.take_left());
         #[cfg(not(feature = "service"))]
         let left = None;
-        let mut queued = unread(unyielded, left, |msg| stop.had_before(msg));
+        // Most connections have nothing of either here, and so nothing to sort out.
+        let mut queued = if taken.as_ref().is_none_or(|taken| taken.is_empty())
+            && left.as_ref().is_none_or(VecDeque::is_empty)
+        {
+            Vec::new()
+        } else {
+            let unyielded = taken.map(|taken| taken.drain(..).flatten());
+
+            unread(unyielded, left, |msg| stop.had_before(msg))
+        };
         // The messages that the reader was yet to yield, of those that the connection took over,
         // come after those that it yielded, and those had them who had them before.
         queued.extend(taken_over);
@@ -1670,7 +1688,7 @@ pub(crate) struct Backlog {
     items: VecDeque<Result<Message>>,
     /// What tells the stream apart from the other streams of its connection, from its first
     /// hand-over on.
-    stream: Option<Arc<()>>,
+    stream: Option<StreamId>,
 }
 
 impl Backlog {
@@ -1724,9 +1742,9 @@ pub(super) struct StopStatus {
     /// Notified when the connection is asked to stop reading.
     asked_event: Event,
     /// The stream of the first hand-over that asked the connection to stop reading, and which may
-    /// have taken messages off that stream since. A hand-over through another stream would miss
-    /// those, and fails.
-    stream: Mutex<Option<Arc<()>>>,
+    /// have taken messages off that stream since, and the ids that tell its streams apart. A
+    /// hand-over through another stream would miss those messages, and fails.
+    stream: Mutex<Claim>,
     /// Whether the reader still reads, and how it ended if not.
     reader_end: Mutex<ReaderEnd>,
     /// Notified when the reader ends.
@@ -1743,7 +1761,7 @@ impl StopStatus {
             can_stop: AtomicBool::new(false),
             asked: AtomicBool::new(false),
             asked_event: Event::new(),
-            stream: Mutex::new(None),
+            stream: Mutex::default(),
             reader_end: Mutex::new(ReaderEnd::Reading),
             reader_end_event: Event::new(),
             had_before: OnceLock::new(),
@@ -1795,17 +1813,18 @@ impl StopStatus {
     /// Claim the connection for the hand-overs through the stream that `stream` stands for, if
     /// any, unless a hand-over through another stream claimed it first. A hand-over through no
     /// stream claims nothing.
-    fn claim(&self, stream: Option<&Arc<()>>) -> Result<()> {
-        let mut claimed = self.stream.lock().unwrap_or_else(PoisonError::into_inner);
-        match (&*claimed, stream) {
-            (Some(claimed), Some(stream)) if Arc::ptr_eq(claimed, stream) => Ok(()),
+    fn claim(&self, stream: Option<&mut Option<StreamId>>) -> Result<()> {
+        let mut claim = self.stream.lock().unwrap_or_else(PoisonError::into_inner);
+        let stream = stream.map(|id| *id.get_or_insert_with(|| claim.new_id()));
+        match (claim.by, stream) {
+            (Some(by), Some(stream)) if by == stream => Ok(()),
             (Some(_), _) => Err(not_connected(
                 "a hand-over through another stream of the connection may have taken messages off \
                  that stream",
             )
             .into()),
             (None, Some(stream)) => {
-                *claimed = Some(stream.clone());
+                claim.by = Some(stream);
 
                 Ok(())
             }
@@ -1850,6 +1869,31 @@ impl StopStatus {
         )
     }
 }
+
+/// Which stream of a connection claimed it for its hand-overs, if any, and the next id that tells
+/// a stream of the connection apart from the others.
+#[derive(Debug, Default)]
+struct Claim {
+    /// The stream of the hand-overs that claimed the connection.
+    by: Option<StreamId>,
+    /// The id that the next stream to be handed over gets.
+    next: u64,
+}
+
+impl Claim {
+    /// An id that no other stream of the connection has.
+    fn new_id(&mut self) -> StreamId {
+        let id = StreamId(self.next);
+        self.next += 1;
+
+        id
+    }
+}
+
+/// What tells a stream of a connection apart from the other streams of the same connection, which
+/// [`Claim::new_id`] hands out the first time that it is handed over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct StreamId(u64);
 
 /// Whether the reader of a connection still reads its socket, and how it ended if not.
 pub(super) enum ReaderEnd {

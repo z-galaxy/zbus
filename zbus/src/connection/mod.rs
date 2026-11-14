@@ -21,7 +21,7 @@ use crate::ObjectServer;
 #[cfg(feature = "service")]
 use crate::log::debug;
 #[cfg(all(target_os = "linux", feature = "handover", feature = "service"))]
-use crate::object_server::Calls;
+use crate::object_server::{Calls, CallsSlot};
 #[cfg(all(target_os = "linux", feature = "handover"))]
 use crate::runtime::IoSource;
 use crate::{
@@ -100,7 +100,7 @@ pub(crate) struct ConnectionInner {
     /// The method calls that the object server has under way, and those that it leaves as the
     /// connection is handed over.
     #[cfg(all(target_os = "linux", feature = "handover", feature = "service"))]
-    calls: Arc<Calls>,
+    calls: CallsSlot,
 
     // The runtime that runs our tasks and times our calls out. Declared after the task handles
     // so that it outlives them.
@@ -1187,7 +1187,7 @@ impl Connection {
     /// connection is handed over.
     #[cfg(all(target_os = "linux", feature = "handover", feature = "service"))]
     pub(crate) fn calls(&self) -> &Arc<Calls> {
-        &self.inner.calls
+        self.inner.calls.get_or_create()
     }
 
     #[cfg(feature = "service")]
@@ -1215,7 +1215,7 @@ impl Connection {
             // The task takes the method calls from here on, and has ended once `taking` is
             // dropped, whether it ever ran or not.
             #[cfg(all(target_os = "linux", feature = "handover"))]
-            let (calls, mut taking) = (self.inner.calls.clone(), self.inner.calls.start());
+            let (calls, mut taking) = (self.calls().clone(), self.calls().start());
 
             self.inner.runtime.spawn(
                 "obj_server_task",
@@ -1514,7 +1514,7 @@ impl Connection {
                 #[cfg(feature = "service")]
                 object_server_dispatch_task: OnceLock::new(),
                 #[cfg(all(target_os = "linux", feature = "handover", feature = "service"))]
-                calls: Arc::default(),
+                calls: CallsSlot::default(),
                 socket_reader_task: OnceLock::new(),
                 msg_senders,
                 pending_method_calls,
@@ -1734,8 +1734,11 @@ impl Connection {
         );
         #[cfg(all(target_os = "linux", feature = "handover"))]
         let reader = {
-            let stop = &inner.socket_status.stop;
-            stop.take_over(taken_over.iter().map(|(_, had)| *had));
+            // With no message taken over, nobody had any before.
+            if !taken_over.is_empty() {
+                let stop = &inner.socket_status.stop;
+                stop.take_over(taken_over.iter().map(|(_, had)| *had));
+            }
 
             reader.yielding_first(taken_over)
         };
