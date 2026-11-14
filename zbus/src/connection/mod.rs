@@ -1183,6 +1183,13 @@ impl Connection {
         self.ensure_object_server(true)
     }
 
+    /// The method calls that the object server has under way, and those that it leaves as the
+    /// connection is handed over.
+    #[cfg(all(target_os = "linux", feature = "handover", feature = "service"))]
+    pub(crate) fn calls(&self) -> &Arc<Calls> {
+        &self.inner.calls
+    }
+
     #[cfg(feature = "service")]
     pub(crate) fn ensure_object_server(&self, start: bool) -> &ObjectServer {
         self.inner

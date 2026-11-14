@@ -10,7 +10,10 @@
 //!    builds along with it, which has had every one of them, from the first.
 //! 2. Once it is time to hand the connection over, stop taking messages off that stream, if you
 //!    take them yourself, and finish what you do with those that you took. The replies and the
-//!    other messages that you send go out until the hand-over commits.
+//!    other messages that you send go out until the hand-over commits. If the methods of your
+//!    interfaces leave work to be done once they returned, await `ObjectServer::prepare_hand_over`,
+//!    which has the object server take no more calls and waits for it to have answered those that
+//!    it took, and finish that work too.
 //! 3. Call [`Connection::hand_over`], or [`MessageStream::hand_over`] on that stream, which hands
 //!    the connection over with what the stream didn't yield. It prepares the hand-over, so that no
 //!    send waits for the peer from then on, as [`Connection::prepare_hand_over`] does, which you
@@ -767,6 +770,12 @@ impl Connection {
     ///   elsewhere.
     /// * The method calls that come in meanwhile are left for the object server of the connection
     ///   that takes over, and nothing bounds how many they are but the time that this waits.
+    ///
+    /// The connection sends nothing more once it is handed over, so what a method left to be done
+    /// once it returned, such as a task that sends a signal once its call is answered, sends
+    /// nothing either from then on. To have that work done first, await
+    /// `ObjectServer::prepare_hand_over`, which has the object server take no more calls and waits
+    /// for those under way, as the hand-over would, and then that work, before you call this.
     ///
     /// A stream of the connection that is full, and that nobody polls, holds all of this up, as
     /// the connection waits for room in it to queue a message there, and reads nothing
@@ -3523,6 +3532,50 @@ mod tests {
             assert_eq!(answer.body().deserialize::<&str>().unwrap(), "told");
             let _conn = on(Builder::take_over(handover), &runtime)
                 .serve_at(PATH, Asker)
+                .build()
+                .await
+                .unwrap();
+            peer.send(&echo("after")).await.unwrap();
+            assert_eq!(replies(&mut peer_stream, 2).await, ["after", "left"]);
+        });
+    }
+
+    /// An object server that is prepared for the hand-over of its connection takes no more calls,
+    /// while the connection still sends: a call that comes in then is left, and the object server
+    /// of the connection that takes over answers it, once.
+    #[cfg(feature = "service")]
+    #[test]
+    #[timeout(15000)]
+    fn an_object_server_prepared_for_a_hand_over_takes_no_more_calls() {
+        under_every_runtime(|runtime| async move {
+            let (mut stream, peer) = serving(&runtime, Echo).await;
+            let conn = Connection::from(&stream);
+            let server = conn.object_server();
+            let mut peer_stream = MessageStream::from(&peer);
+            peer.send(&echo("before")).await.unwrap();
+            assert_eq!(replies(&mut peer_stream, 1).await, ["before"]);
+
+            server.prepare_hand_over().await;
+            peer.send(&echo("left")).await.unwrap();
+            // The connection read the call, and still sends.
+            for expected in ["before", "left"] {
+                let call = stream.next().await.unwrap().unwrap();
+                assert_eq!(call.body().deserialize::<&str>().unwrap(), expected);
+            }
+            conn.send(&signal(1)).await.unwrap();
+            // The object server took no call since, so the second time resolves at once.
+            assert!(
+                futures_lite::future::poll_once(server.prepare_hand_over())
+                    .await
+                    .is_some()
+            );
+            let handover = conn.hand_over().await.unwrap();
+
+            assert_eq!(who_had(&handover), [(Type::MethodCall, Had::NONE)]);
+            let signal = peer_stream.next().await.unwrap().unwrap();
+            assert_eq!(signal.message_type(), Type::Signal, "{signal:?}");
+            let _conn = on(Builder::take_over(handover), &runtime)
+                .serve_at(PATH, Echo)
                 .build()
                 .await
                 .unwrap();

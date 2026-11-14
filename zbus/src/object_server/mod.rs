@@ -561,6 +561,43 @@ impl ObjectServer {
         })
     }
 
+    /// Take no more method calls, for good, and wait until the calls being handled are answered.
+    ///
+    /// This is for a service whose methods leave work to be done once they returned, such as a
+    /// task that sends a signal once its call is answered. A hand-over of the connection
+    /// ([`Connection::hand_over`]) does all of this itself, but knows nothing of that work, which
+    /// it doesn't wait for, and the connection sends nothing more once it is handed over. Await
+    /// this, finish that work, whose messages the connection still sends, and then hand the
+    /// connection over.
+    ///
+    /// The object server goes on with the calls that it has under way until they are answered, as
+    /// the section "The calls under way" of [`Connection::hand_over`] tells.
+    /// It leaves every call that it was yet to take, those that its connection read already and
+    /// those that it reads from then on, in their order, for the object server of the connection
+    /// that takes over, which the hand-over holds them for. They go unanswered unless the
+    /// connection is handed over.
+    ///
+    /// This can't be undone. It resolves at once where no call is under way, the second time too,
+    /// as the object server takes no more calls.
+    ///
+    /// Nothing happens until the future is polled. Once it was polled, the object server takes no
+    /// more method calls, even if the future is dropped before it resolves, such as by a timeout,
+    /// which bounds the wait for the methods of the calls under way.
+    ///
+    /// Don't await this from a method of an interface of the connection: the call of that method
+    /// is under way, so this never resolves.
+    ///
+    /// This method is only available on Linux, with the `handover` feature.
+    ///
+    /// [`Connection::hand_over`]: crate::Connection::hand_over
+    #[cfg(all(target_os = "linux", feature = "handover"))]
+    pub async fn prepare_hand_over(&self) {
+        let calls = self.connection().calls().clone();
+        calls.hold();
+
+        calls.idle().await
+    }
+
     async fn dispatch_call_to_iface(
         &self,
         iface: Arc<RwLock<dyn Interface>>,
