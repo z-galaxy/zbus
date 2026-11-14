@@ -5,21 +5,22 @@
 //!
 //! # How it goes
 //!
-//! A connection is handed over through the stream that has had every one of its messages, from the
-//! first: the one that [`Builder::build_message_stream`] builds along with the connection.
-//!
-//! 1. Take the messages of the connection off that stream, and deal with them, for as long as the
-//!    connection is yours.
-//! 2. Once it is time to hand the connection over, stop taking messages off the stream, and finish
-//!    what you do with those that you took. The replies and the other messages that you send go out
-//!    until the hand-over commits.
-//! 3. Call [`MessageStream::hand_over`]. It prepares the hand-over, so that no send waits for the
-//!    peer from then on, as [`Connection::prepare_hand_over`] does, which you can call yourself as
-//!    early as you like for the sends meanwhile not to wait either. Then it stops the connection
-//!    reading, wherever the peer is in sending a message, and takes the connection apart, without
-//!    waiting for the peer to take what was sent to it. The [`Handover`] that it gives holds the
-//!    socket, the messages that were queued on the stream and that it did not yield, what the
-//!    connection read off the socket after them and made no message of yet, what the connection
+//! 1. Use the connection as any other, for as long as it is yours: serve interfaces on it, make
+//!    calls through it, or take its messages off the stream that [`Builder::build_message_stream`]
+//!    builds along with it, which has had every one of them, from the first.
+//! 2. Once it is time to hand the connection over, stop taking messages off that stream, if you
+//!    take them yourself, and finish what you do with those that you took. The replies and the
+//!    other messages that you send go out until the hand-over commits.
+//! 3. Call [`Connection::hand_over`], or [`MessageStream::hand_over`] on that stream, which hands
+//!    the connection over with what the stream didn't yield. It prepares the hand-over, so that no
+//!    send waits for the peer from then on, as [`Connection::prepare_hand_over`] does, which you
+//!    can call yourself as early as you like for the sends meanwhile not to wait either. It has the
+//!    object server take no more method calls, and waits for those that it has under way to be
+//!    answered. Then it stops the connection reading, wherever the peer is in sending a message,
+//!    and takes the connection apart, without waiting for the peer to take what was sent to it. The
+//!    [`Handover`] that it gives holds the socket, the messages that the connection read and that
+//!    are yet to be dealt with ([Who gets each message](#who-gets-each-message) tells which), what
+//!    the connection read off the socket after them and made no message of yet, what the connection
 //!    took to send and didn't write, the file descriptors that came with all of those, and what a
 //!    connection that goes on needs to know of this one.
 //! 4. To pass the hand-over to another process, or to keep it while this one restarts, such as in
@@ -27,9 +28,10 @@
 //!    pass the record on, with the file descriptors that [`Save::fds`] gives. Then drop the
 //!    hand-over. [`Restore::restore`] gives it back from them, in the process that they go to.
 //! 5. Build the connection that goes on, in this process or in another one that the hand-over is
-//!    passed to, with [`Builder::take_over`], and its stream with `build_message_stream`. It yields
-//!    the messages of the hand-over first, then goes on reading the socket where the other one
-//!    stopped, and it can be handed over in turn.
+//!    passed to, with [`Builder::take_over`], with the interfaces (`Builder::serve_at`) and the
+//!    stream (`build_message_stream`) that the one that was handed over had. It hands each message
+//!    of the hand-over to those that are yet to get it first, then goes on reading the socket where
+//!    the other one stopped, and it can be handed over in turn.
 //! 6. Call [`Connection::flush`] on it, bounded by a timeout, as the flush waits for the peer to
 //!    read: the connection writes what the other one left unwritten ahead of its own sends, and
 //!    nothing else does, while the peer may be waiting for the rest of a message
@@ -39,26 +41,65 @@
 //! written to the socket from the commit of the hand-over until the connection that goes on sends,
 //! so the peer sees nothing but a pause. A peer that doesn't read holds no hand-over up, unless a
 //! [`Connection::flush`] to it is under way, or the connection runs over a write half of your own
-//! that can't resume writes ([`MessageStream::hand_over`] tells more): what it doesn't take goes on
+//! that can't resume writes ([`Connection::hand_over`] tells more): what it doesn't take goes on
 //! with the hand-over. A peer that closed its end of the connection, such as one that sent a last
 //! message and went, is no exception, even once a send to it failed: what it sent is handed over,
 //! and the connection that goes on comes to its end. For that, the connection keeps what it read of
 //! such a peer and made no message of, the file descriptors that came with it included, until it is
 //! handed over or dropped.
 //!
-//! A hand-over that fails, or that is given up on, such as by a timeout, loses nothing either: the
-//! stream keeps the messages that the hand-over took off it, and yields them before the rest. The
-//! connection has stopped reading by then, for good. Hand it over again through the same stream, or
-//! take the messages off the stream, deal with them, and close the connection.
-//! [`MessageStream::hand_over`] tells more.
+//! A hand-over does wait for the method calls that the object server has under way, though, for
+//! as long as their methods take, so bound it by a timeout. A hand-over that fails, or that is
+//! given up on, such as by that timeout, loses none of the messages of the stream that it goes
+//! through: the stream keeps those that the hand-over took off it, and yields them before the
+//! rest. The connection has stopped reading by then, for good, and its object server takes no more
+//! method calls. Hand it over again, the same way, or take the messages off the stream, deal with
+//! them, and close the connection, which leaves the method calls that the object server didn't
+//! take unanswered. [`Connection::hand_over`] and [`MessageStream::hand_over`] tell more.
 //!
-//! # Other consumers of the messages
+//! # Who gets each message
 //!
-//! The object server, proxies, other [`MessageStream`]s of the connection and its method calls
-//! that wait for their replies take its messages too. A message that one of them took, and that
-//! the stream did not yield, is handled twice: by them, and again by the connection that goes on.
-//! The stream that `build_message_stream` gives, on a connection with no object server and no other
-//! stream, is what a hand-over is for.
+//! Each message that the connection read is dealt with in this process, or handed over for the
+//! connection that goes on to deal with it, and never both. Which it is depends on who takes the
+//! message:
+//!
+//! * The stream that the connection is handed over through, if it is handed over through one, has
+//!   had every message of the connection. Those that it yielded are yours, and those that it is yet
+//!   to yield are handed over, for the stream that `build_message_stream` builds along with the
+//!   connection that goes on.
+//! * The object server answers the method calls that it took, and the others are handed over, for
+//!   the object server of the connection that goes on, which answers them through the interfaces
+//!   that `Builder::serve_at` adds. It takes the method calls one after the other, waits for the
+//!   method of a call before it takes the next one where the interface says so (`spawn = false`),
+//!   and takes none from when the hand-over starts, so there can be calls that it didn't take.
+//! * Everything else gets each message that the connection read until it stopped, and none of those
+//!   is handed over for it. The other streams of the connection, those for match rules among them,
+//!   as the streams of proxies are, yield what was queued for them, and then end. A method call
+//!   that waits for its reply gets it if it came in by then, and fails otherwise, so wait for the
+//!   calls that matter before you hand the connection over.
+//!
+//! A message that the stream and the object server both take, as each method call is, is handed
+//! over for the one that is yet to get it only, or for both. So a method call that the object
+//! server answered, and that the stream didn't yield, is one that the stream of the connection
+//! that goes on yields, and that its object server doesn't answer again.
+//!
+//! # What a bus keeps
+//!
+//! A bus has the connection that goes on as the one that was handed over: under its unique name,
+//! which [`Builder::take_over`] gives the connection, with the well-known names that it owns or
+//! queues for, and with the match rules that it added. The connection that goes on knows nothing
+//! of those names and rules, so:
+//!
+//! * Give it the well-known names again (`Builder::name`): it requests them, and the bus answers
+//!   that it has them already.
+//! * Its match rules add up with each hand-over. The rules that the connection that was handed over
+//!   added stay with the bus, and the connection that goes on adds its own, as any connection does:
+//!   those of its streams for match rules, those of its proxies, and two for each of its well-known
+//!   names. A message that several rules ask for still comes once, but a bus only lets a connection
+//!   have so many rules, 512 by default on the system bus of the reference implementation, which a
+//!   connection that is handed over time and again comes to. [`AsyncDrop::async_drop`] removes the
+//!   rule of a stream before it returns, so do that before the hand-over. Nothing removes the rules
+//!   of the proxies and of the names.
 //!
 //! # Example
 //!
@@ -112,11 +153,12 @@
 //! # }
 //! ```
 //!
+//! [`AsyncDrop::async_drop`]: crate::AsyncDrop::async_drop
 //! [`Builder::build_message_stream`]: super::Builder::build_message_stream
 //! [`Builder::take_over`]: super::Builder::take_over
+//! [`Connection::hand_over`]: crate::Connection::hand_over
 //! [`Connection::flush`]: crate::Connection::flush
 //! [`Connection::prepare_hand_over`]: crate::Connection::prepare_hand_over
-//! [`MessageStream`]: crate::MessageStream
 //! [`MessageStream::hand_over`]: crate::MessageStream::hand_over
 //! [`Save::save`]: zoter::Save::save
 //! [`Save::fds`]: zoter::Save::fds
@@ -137,7 +179,7 @@ use std::{
     pin::{Pin, pin},
     str,
     sync::{
-        Arc, Mutex, PoisonError,
+        Arc, Mutex, OnceLock, PoisonError,
         atomic::{AtomicBool, Ordering},
     },
     task::Poll,
@@ -162,9 +204,9 @@ use crate::{
     },
 };
 
-/// A connection taken apart by [`MessageStream::hand_over`], or put back together by
-/// [`Restore::restore`], for [`Builder::take_over`] to build a connection that goes on from where
-/// it stopped, in this process or in another one.
+/// A connection taken apart by [`Connection::hand_over`] or [`MessageStream::hand_over`], or put
+/// back together by [`Restore::restore`], for [`Builder::take_over`] to build a connection that
+/// goes on from where it stopped, in this process or in another one.
 ///
 /// The other process can be the next instance of a service that restarts, or a helper process.
 /// Nothing in a hand-over changes once it exists.
@@ -184,16 +226,18 @@ use crate::{
 /// of a `unixexec:` address, has no record: its halves can only go on in this process, which
 /// [`Save::saved_len`] tells.
 ///
-/// What the hand-over holds of what the peer sent is the messages that were queued on the stream,
-/// then what was read after them and made no message of yet: whole messages, and the start of one
-/// that the peer was in the middle of sending, which can be as long as the longest message that
-/// D-Bus allows (128 MiB).
+/// What the hand-over holds of what the peer sent is the messages that the stream that the
+/// connection was handed over through didn't yield, and the method calls that its object server
+/// didn't take, each with whether the other of the two had it, then what was read after them and
+/// made no message of yet: whole messages, and the start of one that the peer was in the middle of
+/// sending, which can be as long as the longest message that D-Bus allows (128 MiB).
 ///
 /// What the hand-over holds of what was sent to the peer is the rest of a message that a send was
 /// cut off in the middle of, and the messages that sends kept once the hand-over was prepared
 /// ([`Connection::prepare_hand_over`]), which nothing bounds but how much the peer didn't take.
 ///
 /// [`Builder::take_over`]: super::Builder::take_over
+/// [`Connection::hand_over`]: crate::Connection::hand_over
 /// [`Connection::prepare_hand_over`]: crate::Connection::prepare_hand_over
 /// [`MessageStream::hand_over`]: crate::MessageStream::hand_over
 /// [`Save::save`]: zoter::Save::save
@@ -401,7 +445,7 @@ impl zoter::Save for Handover {
     ///
     /// They are borrowed, so none is duplicated, and this can't fail on the limit of descriptors
     /// that a process may have open. That of the socket is close-on-exec in a hand-over that
-    /// [`MessageStream::hand_over`](crate::MessageStream::hand_over) gave. The others, and all
+    /// [`Connection::hand_over`](crate::Connection::hand_over) gave. The others, and all
     /// those of a restored hand-over, are as they came in, and zbus receives descriptors without
     /// close-on-exec.
     ///
@@ -660,31 +704,263 @@ impl fmt::Debug for HandoverSocket {
 }
 
 impl Connection {
-    /// Hand this connection over, through the stream whose queue is `queue` and whose backlog is
-    /// `backlog`: the steps that [`MessageStream::hand_over`] documents.
+    /// Hand this connection over, for a connection in this process or in another one to go on from
+    /// where it stopped, through [`Builder::take_over`].
+    ///
+    /// [The module of the hand-over](crate::connection::handover) tells how it goes, and who gets
+    /// each message that the connection read. This is for a connection whose messages its object
+    /// server, its proxies and its method calls take, as those of a service. A connection whose
+    /// messages you take off the stream that [`Builder::build_message_stream`] built along with
+    /// it, as a bus does, is handed over through that stream instead, with what the stream is yet
+    /// to yield ([`MessageStream::hand_over`]). What is said here goes for both.
+    ///
+    /// This method is only available on Linux, with the `handover` feature.
+    ///
+    /// This proceeds in order, once the checks that fail before anything is done to the
+    /// connection, which the errors below tell, have passed:
+    ///
+    /// 1. It prepares the hand-over, as [`Connection::prepare_hand_over`] does: from then on, for
+    ///    good, no send waits for the peer to take what it sends, a send under way included. Over a
+    ///    write half of your own that can't resume writes ([`WriteHalf::can_resume_writes`]), there
+    ///    is nothing to prepare, and sends go on waiting for the half.
+    /// 2. With the `service` feature, it has the object server take no more method calls, for good,
+    ///    and waits for it to be done with those that it has under way, while the connection reads
+    ///    on. [The calls under way](#the-calls-under-way) tells more.
+    /// 3. It stops the connection reading, wherever it is, even in the middle of a message.
+    /// 4. It waits for the connection to have stopped.
+    /// 5. It commits, once the socket is free: a send under way over a write half that can't resume
+    ///    writes holds it until it is through, and so does a flush under way
+    ///    ([`Connection::flush`]), which waits for the peer to take what the connection has left to
+    ///    write. Nothing else here waits for the peer to take anything. From then on nothing is
+    ///    written to the socket through the connection or any clone of it: sends and flushes fail,
+    ///    and [`Connection::close`] does nothing to the socket. The connection is closed, as
+    ///    [`Connection::is_closed`] and [`Connection::closed`] tell. The socket is neither shut
+    ///    down nor closed, so the peer sees nothing but a pause.
+    ///
+    /// The [`Handover`] that it gives holds the method calls that the object server didn't take,
+    /// oldest first, as they are, then what the connection read off the socket after them and made
+    /// no message of yet, with the file descriptors of all of those. It also holds what the
+    /// connection took to send and didn't write, which the connection that takes over writes ahead
+    /// of its own sends: the rest of a message that a send was dropped, or failed, in the middle of
+    /// ([`Connection::send`] tells more), then the messages that sends kept once the hand-over was
+    /// prepared.
+    ///
+    /// # The calls under way
+    ///
+    /// The object server takes the method calls that the connection reads one after the other, in
+    /// the order that they came in. A call is under way from then until it is answered: until its
+    /// reply is sent, or, if it expects none, until its method returned. The object server runs
+    /// the methods of an interface that says `spawn = false` (see `#[interface]`) itself, so it
+    /// only takes the call after such a call once it is done with that one. It hands every other
+    /// call to a task of its own, and goes on to the next one, so any number of those can be under
+    /// way at once.
+    ///
+    /// The hand-over waits for those calls, so that each is answered as at any other time: the
+    /// connection reads on meanwhile, for the replies to the calls that their methods make to come
+    /// in, and the signals that their proxies wait for. It doesn't wait for what a method left to
+    /// be done once it returned, such as a task that it spawned.
+    ///
+    /// * It waits for as long as the methods take, which is up to them, and to whoever is to answer
+    ///   the calls that they make: bound it by a timeout ([Cancellation](#cancellation)).
+    /// * It waits for ever if you await it from a method of an interface of the connection, whose
+    ///   call is under way. Have the method return first, and hand the connection over from
+    ///   elsewhere.
+    /// * The method calls that come in meanwhile are left for the object server of the connection
+    ///   that takes over, and nothing bounds how many they are but the time that this waits.
+    ///
+    /// A stream of the connection that is full, and that nobody polls, holds all of this up, as
+    /// the connection waits for room in it to queue a message there, and reads nothing
+    /// meanwhile: the replies that the methods of the calls under way wait for don't come in,
+    /// and the connection doesn't get to stop either. Take the messages off the other streams of
+    /// the connection until they end, or let go of them.
+    ///
+    /// # A peer that closes its end
+    ///
+    /// The end of what the peer sends, as the peer closes its end of the connection, such as once
+    /// it sent a last message, fails no hand-over, whether the connection comes to it before the
+    /// hand-over starts or while the hand-over stops the connection reading, and whether or not a
+    /// send to the peer failed since, as sends do once the peer receives nothing more. The
+    /// hand-over then hands over what the connection read, part of a message included, with the
+    /// socket. The connection that takes over deals with the messages of what was read, then comes
+    /// to the same end of the socket, and ends as this one would have. A connection that ended on
+    /// anything else isn't handed over: see the errors below.
+    ///
+    /// For that, a connection that comes to that end keeps the part of a message that it read, if
+    /// any, and the file descriptors that came in that no message took, until it is handed over or
+    /// dropped, whether or not a hand-over is to come. Closing it doesn't let go of them.
+    ///
+    /// # While the connection is stopped
+    ///
+    /// From the third step on, the connection receives no more messages. Its streams yield what
+    /// was queued for them and then end, with no error before their `None`, and so do the streams
+    /// of proxies. The method calls that wait for their replies fail with an I/O error
+    /// ([`Error::InputOutput`]) of kind [`NotConnected`](std::io::ErrorKind::NotConnected), as no
+    /// reply comes in any more. Those made since fail the same way before they are sent, and so
+    /// does [`MessageStream::for_match_rule`]. Messages that expect no reply, such as replies and
+    /// signals, are sent until the hand-over commits, as far as the socket takes them, and the
+    /// hand-over holds the rest.
+    ///
+    /// # Cancellation
+    ///
+    /// The future can be dropped before it resolves, such as to bound the hand-over by a timeout:
+    /// the method of a call under way takes as long as it likes, and a peer that doesn't read can
+    /// hold a flush under way, or a send under way over a write half of your own that can't resume
+    /// writes, up for as long as it likes. If the future was polled by then, the hand-over is
+    /// prepared, the object server takes no more method calls, and the connection has stopped
+    /// reading, for good, even where the hand-over was still waiting for the calls under way: hand
+    /// the connection over again, or close it. The method calls that the object server didn't take
+    /// stay with the connection for a later hand-over, and go unanswered without one. A future
+    /// dropped before it was ever polled does nothing to the connection, which reads on.
+    ///
+    /// # Errors
+    ///
+    /// * [`Error::Unsupported`], before anything is done to the connection, which reads on, for a
+    ///   connection over a socket of your own whose read half can't hand over what it read
+    ///   ([`ReadHalf::can_take_unread`]).
+    /// * [`Error::InputOutput`], with nothing taken out of the connection, if:
+    ///   * the connection ended before it stopped reading, otherwise than at the end of what the
+    ///     peer sent: reading the socket failed, a message was invalid, or the runtime dropped the
+    ///     task that reads it;
+    ///   * it was closed with [`Connection::close`], or it was handed over already;
+    ///   * a hand-over through a stream of the connection stopped it reading before
+    ///     ([`MessageStream::hand_over`] tells why);
+    ///   * a send over a socket of your own whose write half can't resume writes
+    ///     ([`WriteHalf::can_resume_writes`]) was cut off midway, by an error or by its future
+    ///     being dropped. The socket may then hold part of a message, and the peer can make no
+    ///     sense of what follows it. If no send is under way as the hand-over starts, it fails on
+    ///     this before anything is done to the connection, which reads on. A send that failed with
+    ///     an I/O error of kind `BrokenPipe`, `ConnectionReset` or `ConnectionAborted`, as one to a
+    ///     peer that closed its end does, doesn't count: the peer receives nothing that follows it;
+    ///   * the socket fails to be duplicated, as when the process has too many file descriptors
+    ///     open.
+    ///
+    ///   The hand-over is then prepared, the object server takes no more method calls, and the
+    ///   connection has stopped reading, unless it ended before, or the hand-over failed before
+    ///   anything was done to it.
+    ///
+    /// # Example
+    ///
+    /// A service hands its connection to the bus over, and the connection that takes over, in
+    /// the same process here, goes on serving its name:
+    ///
+    /// ```
+    /// # #[cfg(feature = "service")]
+    /// use zbus::{block_on, connection::Builder, interface};
+    ///
+    /// # #[cfg(feature = "service")]
+    /// struct Greeter;
+    ///
+    /// # #[cfg(feature = "service")]
+    /// #[interface(name = "org.zbus.HandOverExample")]
+    /// impl Greeter {
+    ///     fn greet(&self, name: &str) -> String {
+    ///         format!("Hello {name}!")
+    ///     }
+    /// }
+    ///
+    /// # // The example serves an interface, which needs the `service` feature.
+    /// # #[cfg(not(feature = "service"))]
+    /// # fn main() {}
+    /// # #[cfg(feature = "service")]
+    /// # fn main() -> zbus::Result<()> {
+    /// block_on(async {
+    ///     let conn = Builder::session()
+    ///         .name("org.zbus.HandOverExample")
+    ///         .serve_at("/org/zbus/HandOverExample", Greeter)
+    ///         .build()
+    ///         .await?;
+    ///     // The object server answers the calls to `Greeter`, until it is time to hand the
+    ///     // connection over, such as to restart.
+    ///
+    ///     let handover = conn.hand_over().await?;
+    ///     // Pass `handover` on, as the example of the module does. The bus has the connection
+    ///     // that takes over as the owner of the name already, and the connection is given the
+    ///     // name again, to know of it.
+    ///     let conn = Builder::take_over(handover)
+    ///         .name("org.zbus.HandOverExample")
+    ///         .serve_at("/org/zbus/HandOverExample", Greeter)
+    ///         .build()
+    ///         .await?;
+    ///     conn.flush().await?;
+    ///
+    ///     Ok(())
+    /// })
+    /// # }
+    /// ```
+    ///
+    /// [`Builder::build_message_stream`]: super::Builder::build_message_stream
+    /// [`Builder::take_over`]: super::Builder::take_over
+    /// [`MessageStream::for_match_rule`]: crate::MessageStream::for_match_rule
+    /// [`MessageStream::hand_over`]: crate::MessageStream::hand_over
+    /// [`ReadHalf::can_take_unread`]: super::socket::ReadHalf::can_take_unread
+    /// [`WriteHalf::can_resume_writes`]: super::socket::WriteHalf::can_resume_writes
+    pub async fn hand_over(&self) -> Result<Handover> {
+        self.hand_over_through(None).await
+    }
+
+    /// Hand this connection over, through `stream`, if any: the queue of a stream and its backlog.
+    /// These are the steps that [`Connection::hand_over`] documents.
     ///
     /// What the hand-over takes off the queue goes to the backlog, which the stream yields before
     /// its queue, so that a hand-over that fails, or whose future is dropped, loses none of it.
-    ///
-    /// [`MessageStream::hand_over`]: crate::MessageStream::hand_over
-    pub(crate) async fn hand_over(
+    pub(crate) async fn hand_over_through(
         &self,
-        queue: &mut Receiver<Result<Message>>,
-        backlog: &mut Backlog,
+        stream: Option<(&mut Receiver<Result<Message>>, &mut Backlog)>,
     ) -> Result<Handover> {
         self.ensure_whole().await?;
-        let stream = backlog.stream.get_or_insert_with(Default::default);
-        self.claim(stream)?;
+        let mut through = match stream {
+            Some((queue, backlog)) => {
+                self.claim(Some(backlog.stream.get_or_insert_with(Default::default)))?;
+
+                Some(Through {
+                    queue,
+                    taken: &mut backlog.items,
+                })
+            }
+            None => {
+                self.claim(None)?;
+
+                None
+            }
+        };
         // From here on, for good, no send waits for the peer, a send under way included, which
         // lets go of the socket at once, so that the hand-over doesn't wait for the peer either.
         // There is nothing to prepare over a write half of your own that can't resume writes, as
         // sends over it wait for the half, and so does the hand-over, for a send under way.
         self.prepare_hand_over();
-        self.stop_reading();
-        self.take_queue_until_stopped(queue, &mut backlog.items)
-            .await;
+        {
+            // The connection stops reading once the object server is done with the calls that it
+            // has under way, or as soon as the hand-over is given up on, whichever comes first.
+            let _stop = StopReading(self);
+            #[cfg(feature = "service")]
+            self.finish_calls(&mut through).await;
+        }
+        taking(&mut through, self.stopped()).await;
+        // Nothing more is queued once the reader ended.
+        if let Some(through) = &mut through {
+            through.take_rest();
+        }
+        // A reader that stopped, or came to the end of the input, ended the streams of the
+        // connection, so the task of the object server ends, once it got the calls that were
+        // queued for it, all of which it leaves.
+        #[cfg(feature = "service")]
+        if self.inner.socket_status.stop.ended_streams() {
+            self.inner.calls.ended().await;
+        }
 
-        self.take_apart(&mut backlog.items).await
+        self.take_apart(through.map(|through| through.taken)).await
+    }
+
+    /// Have the object server take no more method calls, for good, and wait for it to be done with
+    /// those that it has under way, while the connection reads on, for the replies to the calls
+    /// that their methods wait for to come in. The object server leaves the method calls that come
+    /// in meanwhile, and the hand-over takes what is queued on its stream, if it goes through one,
+    /// so that the connection never waits for room to queue a message.
+    #[cfg(feature = "service")]
+    async fn finish_calls(&self, through: &mut Option<Through<'_>>) {
+        let calls = &self.inner.calls;
+        calls.hold();
+        taking(through, calls.idle()).await;
     }
 
     /// Fail if a send that was cut off midway left part of a message in the socket, as `take_apart`
@@ -700,10 +976,10 @@ impl Connection {
         Ok(())
     }
 
-    /// Claim the connection for the hand-overs through the stream that `stream` stands for,
-    /// unless its reader can't stop, or a hand-over through another stream claimed it first,
-    /// which a hand-over through this one then fails on.
-    fn claim(&self, stream: &Arc<()>) -> Result<()> {
+    /// Claim the connection for the hand-overs through the stream that `stream` stands for, if
+    /// any, unless its reader can't stop, or a hand-over through another stream claimed it first,
+    /// which this hand-over then fails on.
+    fn claim(&self, stream: Option<&Arc<()>>) -> Result<()> {
         let stop = &self.inner.socket_status.stop;
         if !stop.can_stop.load(Ordering::Acquire) {
             return Err(Error::Unsupported);
@@ -727,29 +1003,17 @@ impl Connection {
         }
     }
 
-    /// Wait for the reader to have stopped, or for the connection to have ended, while taking what
-    /// is queued on `queue` off it, oldest first, to the end of `taken`. Then take the rest.
-    ///
-    /// Each message taken off makes room for one that the reader waits to queue, so a reader that
-    /// waits for room in the stream gets it, and stops: nobody else takes messages off the stream
-    /// now.
-    async fn take_queue_until_stopped(
-        &self,
-        queue: &mut Receiver<Result<Message>>,
-        taken: &mut VecDeque<Result<Message>>,
-    ) {
+    /// Wait for the reader to have stopped, or for the connection to have ended.
+    async fn stopped(&self) {
         let inner = &*self.inner;
         let stop = &inner.socket_status.stop;
         loop {
             let mut ended = stop.reader_end_event.listen();
             let mut closed = inner.closed_listener();
             if !stop.reading() || inner.is_closed() {
-                break;
+                return;
             }
             poll_fn(|cx| {
-                while let Poll::Ready(Some(msg)) = Pin::new(&mut *queue).poll_next(cx) {
-                    taken.push_back(msg);
-                }
                 if Pin::new(&mut ended).poll(cx).is_ready()
                     || Pin::new(&mut closed).poll(cx).is_ready()
                 {
@@ -760,24 +1024,16 @@ impl Connection {
             })
             .await;
         }
-        // Nothing more is queued once the reader ended.
-        loop {
-            match queue.try_recv() {
-                Ok(msg) => taken.push_back(msg),
-                // As the stream itself would, this goes on from the oldest message still queued.
-                Err(TryRecvError::Overflowed(_)) => continue,
-                Err(TryRecvError::Empty | TryRecvError::Closed) => break,
-            }
-        }
     }
 
     /// Take the connection apart, once its reader stopped or came to the end of the input, with
-    /// the messages of `taken`, which the hand-over took off its stream, ahead of what the reader
-    /// read.
+    /// the messages of `taken`, which the hand-over took off the stream that it goes through, if
+    /// any, and those that the object server left, ahead of what the reader read.
     ///
-    /// The messages stay in `taken` unless the connection is handed over. An error in it is that
-    /// which the reader ended on, as it came to the end of the input, and goes with them then.
-    async fn take_apart(&self, taken: &mut VecDeque<Result<Message>>) -> Result<Handover> {
+    /// The messages stay in `taken`, and with the object server, unless the connection is handed
+    /// over. An error in `taken` is that which the reader ended on, as it came to the end of the
+    /// input, and goes with them then.
+    async fn take_apart(&self, taken: Option<&mut VecDeque<Result<Message>>>) -> Result<Handover> {
         let inner = &*self.inner;
         let stop = &inner.socket_status.stop;
         // Under the lock that every send, flush, shutdown and hand-over takes. A send over a write
@@ -837,14 +1093,16 @@ impl Connection {
             unread_bytes: tail,
             unread_fds: tail_fds,
         } = parts;
-        // The error that the reader ended on, if any, is no message to hand over. The messages that
-        // the reader was yet to yield, of those that the connection took over, come after those
-        // that it yielded, and those had them who had them before.
-        let mut queued: Vec<_> = taken
-            .drain(..)
-            .flatten()
-            .map(|msg| (msg, Had::NONE))
-            .collect();
+        // The error that the reader ended on, if any, is no message to hand over. An object server
+        // that ever took calls had every method call that it doesn't leave.
+        let unyielded = taken.map(|taken| taken.drain(..).flatten());
+        #[cfg(feature = "service")]
+        let left = inner.calls.started().then(|| inner.calls.take_left());
+        #[cfg(not(feature = "service"))]
+        let left = None;
+        let mut queued = unread(unyielded, left, |msg| stop.had_before(msg));
+        // The messages that the reader was yet to yield, of those that the connection took over,
+        // come after those that it yielded, and those had them who had them before.
         queued.extend(taken_over);
         let socket = match duplicate {
             Some((socket, kind)) => {
@@ -875,6 +1133,120 @@ impl Connection {
             unwritten,
         })
     }
+}
+
+/// The stream that a connection is handed over through: its queue, and what the hand-over took
+/// off it, which the stream keeps.
+struct Through<'s> {
+    queue: &'s mut Receiver<Result<Message>>,
+    taken: &'s mut VecDeque<Result<Message>>,
+}
+
+impl Through<'_> {
+    /// Wait for `done`, while taking what is queued on the stream off it, oldest first.
+    ///
+    /// Each message taken off makes room for one that the reader waits to queue, so a reader that
+    /// waits for room in the stream gets it, and goes on, or stops: nobody else takes messages off
+    /// the stream now.
+    async fn take_while<F>(&mut self, done: F) -> F::Output
+    where
+        F: Future,
+    {
+        let mut done = pin!(done);
+
+        poll_fn(|cx| {
+            while let Poll::Ready(Some(msg)) = Pin::new(&mut *self.queue).poll_next(cx) {
+                self.taken.push_back(msg);
+            }
+
+            done.as_mut().poll(cx)
+        })
+        .await
+    }
+
+    /// Take what is left on the queue of the stream off it.
+    fn take_rest(&mut self) {
+        loop {
+            match self.queue.try_recv() {
+                Ok(msg) => self.taken.push_back(msg),
+                // As the stream itself would, this goes on from the oldest message still queued.
+                Err(TryRecvError::Overflowed(_)) => continue,
+                Err(TryRecvError::Empty | TryRecvError::Closed) => break,
+            }
+        }
+    }
+}
+
+/// Wait for `done`, while taking what is queued on the stream of `through` off it, if the
+/// hand-over goes through one.
+async fn taking<F>(through: &mut Option<Through<'_>>, done: F) -> F::Output
+where
+    F: Future,
+{
+    match through {
+        Some(through) => through.take_while(done).await,
+        None => done.await,
+    }
+}
+
+/// Asks its connection to stop reading, as it is dropped.
+struct StopReading<'c>(&'c Connection);
+
+impl Drop for StopReading<'_> {
+    fn drop(&mut self) {
+        self.0.stop_reading();
+    }
+}
+
+/// The messages that a connection read and hands over, oldest first, each with who had it:
+/// `unyielded`, which the stream that it is handed over through didn't yield, if it is handed over
+/// through one, and `left`, the method calls that its object server left, if it ever took calls,
+/// each in the order that the connection read them. Those of a connection that took them over had
+/// them before as `had_before` tells.
+///
+/// The stream had every message that the connection read, so it yielded those of `left` that are
+/// not in `unyielded`, and the object server took every method call that it didn't leave.
+fn unread(
+    unyielded: Option<impl Iterator<Item = Message>>,
+    left: Option<VecDeque<Message>>,
+    had_before: impl Fn(&Message) -> Had,
+) -> Vec<(Message, Had)> {
+    let (streamed, served) = (unyielded.is_some(), left.is_some());
+    let mut unyielded = unyielded.into_iter().flatten().peekable();
+    let mut left = left.into_iter().flatten().peekable();
+    let position = |msg: &Message| msg.recv_position();
+    let mut unread = Vec::new();
+    loop {
+        let (msg, had) = match (unyielded.peek().map(position), left.peek().map(position)) {
+            (None, None) => break,
+            (Some(stream), Some(server)) if stream == server => {
+                left.next();
+
+                (unyielded.next(), Had::NONE)
+            }
+            (Some(stream), server) if server.is_none_or(|server| stream < server) => {
+                let msg = unyielded.next();
+                let call = msg
+                    .as_ref()
+                    .is_some_and(|msg| msg.message_type() == message::Type::MethodCall);
+
+                (
+                    msg,
+                    if served && call {
+                        Had::SERVER
+                    } else {
+                        Had::NONE
+                    },
+                )
+            }
+            _ => (left.next(), if streamed { Had::STREAM } else { Had::NONE }),
+        };
+        let msg = msg.expect("a message that was peeked at");
+        let had = had | had_before(&msg);
+        unread.push((msg, had));
+    }
+
+    unread
 }
 
 /// What a hand-over through a stream took off the queue of the stream, and the stream is yet to
@@ -947,6 +1319,10 @@ pub(super) struct StopStatus {
     reader_end: Mutex<ReaderEnd>,
     /// Notified when the reader ends.
     reader_end_event: Event,
+    /// Who had each of the messages that the connection took over, which are the first that its
+    /// reader yields, in their order: the connection hands those that it is handed over with on
+    /// as had by them still. It is set before the reader starts.
+    had_before: OnceLock<Box<[Had]>>,
 }
 
 impl StopStatus {
@@ -958,7 +1334,14 @@ impl StopStatus {
             stream: Mutex::new(None),
             reader_end: Mutex::new(ReaderEnd::Reading),
             reader_end_event: Event::new(),
+            had_before: OnceLock::new(),
         }
+    }
+
+    /// Note who had each of the messages that the connection takes over, `had`, in the order
+    /// that its reader is to yield them, before it yields anything else.
+    pub(super) fn take_over(&self, had: impl Iterator<Item = Had>) {
+        let _ = self.had_before.set(had.collect());
     }
 
     /// A listener for the connection to be asked to stop reading, if the reader can stop.
@@ -997,23 +1380,51 @@ impl StopStatus {
         self.reader_end_event.notify(usize::MAX);
     }
 
-    /// Claim the connection for the hand-overs through the stream that `stream` stands for,
-    /// unless a hand-over through another stream claimed it first.
-    fn claim(&self, stream: &Arc<()>) -> Result<()> {
+    /// Claim the connection for the hand-overs through the stream that `stream` stands for, if
+    /// any, unless a hand-over through another stream claimed it first. A hand-over through no
+    /// stream claims nothing.
+    fn claim(&self, stream: Option<&Arc<()>>) -> Result<()> {
         let mut claimed = self.stream.lock().unwrap_or_else(PoisonError::into_inner);
-        match &*claimed {
-            Some(claimed) if !Arc::ptr_eq(claimed, stream) => Err(not_connected(
+        match (&*claimed, stream) {
+            (Some(claimed), Some(stream)) if Arc::ptr_eq(claimed, stream) => Ok(()),
+            (Some(_), _) => Err(not_connected(
                 "a hand-over through another stream of the connection may have taken messages off \
                  that stream",
             )
             .into()),
-            Some(_) => Ok(()),
-            None => {
+            (None, Some(stream)) => {
                 *claimed = Some(stream.clone());
 
                 Ok(())
             }
+            (None, None) => Ok(()),
         }
+    }
+
+    /// Who had `msg`, which the reader yielded, in the connections that this one took over from:
+    /// nobody, unless it is one of the messages that the connection took over.
+    fn had_before(&self, msg: &Message) -> Had {
+        // The reader gives the first message that it yields the position 1.
+        let had_before = self.had_before.get().map_or(&[][..], |had| &had[..]);
+
+        usize::try_from(msg.recv_position().get())
+            .ok()
+            .and_then(|position| had_before.get(position.checked_sub(1)?))
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Whether the reader stopped, or came to the end of the input, and left the connection what
+    /// it read: either way, it ended every stream of the connection first.
+    #[cfg(feature = "service")]
+    fn ended_streams(&self) -> bool {
+        matches!(
+            *self
+                .reader_end
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+            ReaderEnd::Stopped(_) | ReaderEnd::Ended(_)
+        )
     }
 
     /// Whether the reader still reads.
@@ -2166,8 +2577,8 @@ mod tests {
     /// writes holds the socket leaves the connection stopped: calls fail before they are sent, and
     /// so does a stream for a match rule. The send goes on once the peer reads, and messages that
     /// expect no reply still go out. The messages that the hand-over took off its stream stay with
-    /// the stream, so a hand-over through another stream, which would miss them, fails, while one
-    /// through the same stream hands the connection over with them.
+    /// the stream, so a hand-over through another stream, or through none, which would miss them,
+    /// fails, while one through the same stream hands the connection over with them.
     #[test]
     #[timeout(15000)]
     fn a_hand_over_given_up_on_goes_on_through_its_stream() {
@@ -2197,6 +2608,7 @@ mod tests {
             assert_not_connected(late);
             assert_not_connected(MessageStream::for_match_rule(signals(), &conn, None).await);
             assert_not_connected(MessageStream::from(&conn).hand_over().await);
+            assert_not_connected(conn.hand_over().await);
             let len = big.data().len();
             let reading = thread::spawn(move || {
                 let mut received = vec![0; len];
@@ -2888,6 +3300,337 @@ mod tests {
                     "record: {record}"
                 );
             }
+        });
+    }
+
+    /// A method call that the object server of a connection answered, and that the stream that the
+    /// connection is handed over through didn't yield, is handed over as one that an object server
+    /// had: the stream of the connection that takes over yields it, and its object server doesn't
+    /// answer it again.
+    #[cfg(feature = "service")]
+    #[test]
+    #[timeout(15000)]
+    fn a_call_that_was_answered_is_not_answered_again() {
+        under_every_runtime(|runtime| async move {
+            let (mut stream, peer) = serving(&runtime, Asker).await;
+            let reply = peer
+                .call_method(None::<()>, PATH, Some(INTERFACE), "Echo", &"once")
+                .await
+                .unwrap();
+            assert_eq!(reply.body().deserialize::<&str>().unwrap(), "once");
+
+            let handover = stream.hand_over().await.unwrap();
+
+            assert_eq!(who_had(&handover), [(Type::MethodCall, Had::SERVER)]);
+            let mut peer_stream = MessageStream::from(&peer);
+            let mut stream = on(Builder::take_over(handover), &runtime)
+                .serve_at(PATH, Asker)
+                .build_message_stream()
+                .await
+                .unwrap();
+            let call = stream.next().await.unwrap().unwrap();
+            assert_eq!(call.body().deserialize::<&str>().unwrap(), "once");
+            // The answer to the next call is the first that the peer gets.
+            peer.send(&echo("after")).await.unwrap();
+            let reply = peer_stream.next().await.unwrap().unwrap();
+            assert_eq!(reply.body().deserialize::<&str>().unwrap(), "after");
+        });
+    }
+
+    /// As a connection is handed over, its object server takes no more method calls, and the
+    /// connection reads on until those that it has under way are answered, whether each has a task
+    /// of its own or not: the reply to a call that the method of one of them made comes in, so the
+    /// call is answered as at any other time. A call that comes in meanwhile is left for the
+    /// object server of the connection that takes over, which answers it, and none of those that
+    /// were answered.
+    #[cfg(feature = "service")]
+    #[test]
+    #[timeout(15000)]
+    fn calls_under_way_are_answered_and_those_after_them_are_handed_over() {
+        under_every_runtime(|runtime| async move {
+            for inline in [false, true] {
+                let (mut stream, peer) = match inline {
+                    false => serving(&runtime, Asker).await,
+                    true => serving(&runtime, InlineAsker).await,
+                };
+                let mut peer_stream = MessageStream::from(&peer);
+
+                let asking = peer.call_method(None::<()>, PATH, Some(INTERFACE), "Ask", &());
+                let handing_over = async {
+                    // The method of the call asks the peer, so the call is under way.
+                    let question = peer_stream.next().await.unwrap().unwrap();
+                    assert_eq!(question.header().member().unwrap().as_str(), "Tell");
+                    let mut handing_over = pin!(stream.hand_over());
+                    let handed_over = futures_lite::future::poll_once(handing_over.as_mut()).await;
+                    assert!(
+                        handed_over.is_none(),
+                        "handed over with a call under way: {handed_over:?}"
+                    );
+                    peer.send(&echo("left")).await.unwrap();
+                    peer.reply(&question.header(), &"told").await.unwrap();
+
+                    handing_over.await.unwrap()
+                };
+                let (answer, handover) = futures_util::future::join(asking, handing_over).await;
+
+                let answer = answer.unwrap();
+                assert_eq!(answer.body().deserialize::<&str>().unwrap(), "told");
+                // The stream yielded none of the two calls, nor what the peer told.
+                assert_eq!(
+                    who_had(&handover),
+                    [
+                        (Type::MethodCall, Had::SERVER),
+                        (Type::MethodCall, Had::NONE),
+                        (Type::MethodReturn, Had::NONE),
+                    ],
+                    "inline: {inline}"
+                );
+                let answer = peer_stream.next().await.unwrap().unwrap();
+                assert_eq!(answer.body().deserialize::<&str>().unwrap(), "told");
+                let mut stream = on(Builder::take_over(handover), &runtime)
+                    .serve_at(PATH, Asker)
+                    .build_message_stream()
+                    .await
+                    .unwrap();
+                peer.send(&echo("after")).await.unwrap();
+                assert_eq!(replies(&mut peer_stream, 2).await, ["after", "left"]);
+                let mut yielded = Vec::new();
+                for _ in 0..4 {
+                    yielded.push(stream.next().await.unwrap().unwrap().message_type());
+                }
+                assert_eq!(
+                    yielded,
+                    [
+                        Type::MethodCall,
+                        Type::MethodCall,
+                        Type::MethodReturn,
+                        Type::MethodCall,
+                    ]
+                );
+            }
+        });
+    }
+
+    /// A method call that the stream of a connection yielded, and that its object server is yet to
+    /// take as the connection is handed over, as it is in the method of the call before it, is
+    /// handed over as one that the stream had: the object server of the connection that takes over
+    /// answers it, and its stream doesn't yield it again.
+    #[cfg(feature = "service")]
+    #[test]
+    #[timeout(15000)]
+    fn a_call_that_the_stream_yielded_is_handed_over_for_the_object_server() {
+        under_every_runtime(|runtime| async move {
+            let (mut stream, peer) = serving(&runtime, InlineAsker).await;
+            let mut peer_stream = MessageStream::from(&peer);
+
+            let asking = peer.call_method(None::<()>, PATH, Some(INTERFACE), "Ask", &());
+            let handing_over = async {
+                let question = peer_stream.next().await.unwrap().unwrap();
+                // The object server runs the method of the first call itself, so the second one
+                // waits for it, while the stream yields both.
+                peer.send(&echo("queued")).await.unwrap();
+                for member in ["Ask", "Echo"] {
+                    let call = stream.next().await.unwrap().unwrap();
+                    assert_eq!(call.header().member().unwrap().as_str(), member);
+                }
+                let mut handing_over = pin!(stream.hand_over());
+                let handed_over = futures_lite::future::poll_once(handing_over.as_mut()).await;
+                assert!(
+                    handed_over.is_none(),
+                    "handed over with a call under way: {handed_over:?}"
+                );
+                peer.reply(&question.header(), &"told").await.unwrap();
+
+                handing_over.await.unwrap()
+            };
+            let (answer, handover) = futures_util::future::join(asking, handing_over).await;
+
+            answer.unwrap();
+            assert_eq!(
+                who_had(&handover),
+                [
+                    (Type::MethodCall, Had::STREAM),
+                    (Type::MethodReturn, Had::NONE),
+                ]
+            );
+            let answer = peer_stream.next().await.unwrap().unwrap();
+            assert_eq!(answer.body().deserialize::<&str>().unwrap(), "told");
+            let mut stream = on(Builder::take_over(handover), &runtime)
+                .serve_at(PATH, Asker)
+                .build_message_stream()
+                .await
+                .unwrap();
+            let reply = peer_stream.next().await.unwrap().unwrap();
+            assert_eq!(reply.body().deserialize::<&str>().unwrap(), "queued");
+            let told = stream.next().await.unwrap().unwrap();
+            assert_eq!(told.message_type(), Type::MethodReturn);
+            // What the peer sends next is what the stream yields next.
+            peer.send(&signal(1)).await.unwrap();
+            let next = stream.next().await.unwrap().unwrap();
+            assert_eq!(next.message_type(), Type::Signal);
+        });
+    }
+
+    /// A connection is handed over through no stream too, as one whose object server takes its
+    /// method calls, and which was built without a stream: the object server takes no more calls,
+    /// the call that it has under way is answered, and the one that it didn't take is handed
+    /// over, as one that nobody had, for the object server of the connection that takes over to
+    /// answer it.
+    #[cfg(feature = "service")]
+    #[test]
+    #[timeout(15000)]
+    fn a_connection_is_handed_over_through_no_stream() {
+        under_every_runtime(|runtime| async move {
+            let guid = Guid::generate();
+            let (ours, theirs) = Channel::pair();
+            let (conn, peer) = futures_util::try_join!(
+                on(Builder::authenticated_socket(ours, guid.clone()), &runtime)
+                    .p2p()
+                    .serve_at(PATH, InlineAsker)
+                    .build(),
+                on(Builder::authenticated_socket(theirs, guid), &runtime)
+                    .p2p()
+                    .build(),
+            )
+            .unwrap();
+            let mut peer_stream = MessageStream::from(&peer);
+
+            let asking = peer.call_method(None::<()>, PATH, Some(INTERFACE), "Ask", &());
+            let handing_over = async {
+                let question = peer_stream.next().await.unwrap().unwrap();
+                // The object server runs the method of the first call itself, so the second one
+                // waits for it.
+                peer.send(&echo("left")).await.unwrap();
+                let mut handing_over = pin!(conn.hand_over());
+                let handed_over = futures_lite::future::poll_once(handing_over.as_mut()).await;
+                assert!(
+                    handed_over.is_none(),
+                    "handed over with a call under way: {handed_over:?}"
+                );
+                peer.reply(&question.header(), &"told").await.unwrap();
+
+                handing_over.await.unwrap()
+            };
+            let (answer, handover) = futures_util::future::join(asking, handing_over).await;
+
+            answer.unwrap();
+            assert!(
+                conn.is_closed(),
+                "the connection is open after its hand-over"
+            );
+            assert_eq!(who_had(&handover), [(Type::MethodCall, Had::NONE)]);
+            let answer = peer_stream.next().await.unwrap().unwrap();
+            assert_eq!(answer.body().deserialize::<&str>().unwrap(), "told");
+            let _conn = on(Builder::take_over(handover), &runtime)
+                .serve_at(PATH, Asker)
+                .build()
+                .await
+                .unwrap();
+            peer.send(&echo("after")).await.unwrap();
+            assert_eq!(replies(&mut peer_stream, 2).await, ["after", "left"]);
+        });
+    }
+
+    /// The streams of a connection that is handed over through none of them, one for a match rule
+    /// among them, as the stream of a proxy is, yield what the connection read, then end, with no
+    /// error before their end, and a call that waits for its reply fails. The hand-over holds none
+    /// of the messages that the connection read.
+    #[test]
+    #[timeout(15000)]
+    fn the_streams_of_a_connection_handed_over_through_none_end() {
+        under_every_runtime(|runtime| async move {
+            let (stream, peer) = channel_pair(&runtime).await;
+            let conn = Connection::from(&stream);
+            let mut streams = [
+                stream,
+                MessageStream::for_match_rule(signals(), &conn, None)
+                    .await
+                    .unwrap(),
+            ];
+            let mut peer_stream = MessageStream::from(&peer);
+            let msg = signal(1);
+
+            let calling = conn.call_method(None::<()>, PATH, Some(INTERFACE), "NoReply", &());
+            let handing_over = async {
+                // The call went out by the time that the peer has it, and nothing answers it.
+                peer_stream.next().await.unwrap().unwrap();
+                peer.send(&msg).await.unwrap();
+                wait_until(|| conn.inner.msg_receiver.len() == 1);
+
+                conn.hand_over().await.unwrap()
+            };
+            let (reply, handover) = futures_util::future::join(calling, handing_over).await;
+
+            assert_not_connected(reply);
+            assert!(handover.queued.is_empty());
+            assert_eq!(handover.unread_len(), 0);
+            for stream in &mut streams {
+                let received = stream.next().await.unwrap().unwrap();
+                assert_eq!(&received.data()[..], &msg.data()[..]);
+                assert!(stream.next().await.is_none(), "the stream lives on");
+            }
+        });
+    }
+
+    /// A hand-over that is given up on while it waits for a call under way stops the connection
+    /// reading all the same: the call that the method waits for the reply to fails, and so the
+    /// call does, with its error. A later hand-over through the stream hands the connection over,
+    /// with the call as one that the object server had.
+    #[cfg(feature = "service")]
+    #[test]
+    #[timeout(15000)]
+    fn a_hand_over_given_up_on_with_a_call_under_way_stops_the_connection() {
+        under_every_runtime(|runtime| async move {
+            let (mut stream, peer) = serving(&runtime, Asker).await;
+            let conn = Connection::from(&stream);
+            let mut peer_stream = MessageStream::from(&peer);
+
+            let asking = peer.call_method(None::<()>, PATH, Some(INTERFACE), "Ask", &());
+            let giving_up = async {
+                let question = peer_stream.next().await.unwrap().unwrap();
+                assert_eq!(question.header().member().unwrap().as_str(), "Tell");
+                let mut handing_over = pin!(stream.hand_over());
+                let handed_over = futures_lite::future::poll_once(handing_over.as_mut()).await;
+                assert!(
+                    handed_over.is_none(),
+                    "handed over with a call under way: {handed_over:?}"
+                );
+            };
+            let (answer, ()) = futures_util::future::join(asking, giving_up).await;
+
+            assert!(matches!(answer, Err(Error::MethodError(..))), "{answer:?}");
+            let late = conn
+                .call_method(None::<()>, PATH, Some(INTERFACE), "Late", &())
+                .await;
+            assert_not_connected(late);
+            let handover = stream.hand_over().await.unwrap();
+            assert_eq!(who_had(&handover), [(Type::MethodCall, Had::SERVER)]);
+        });
+    }
+
+    /// A connection that took a message over hands it on, as it is handed over in turn, as one
+    /// that those had who had it before, whatever it has itself: a method call that an object
+    /// server answered goes on as that through a connection that has no object server.
+    #[test]
+    #[timeout(15000)]
+    fn who_had_a_message_is_handed_on() {
+        under_every_runtime(|runtime| async move {
+            let (ours, _peer) = UnixStream::pair().unwrap();
+            let mut handover = handover(HandoverSocket::UnixStream(ours), true);
+            handover.queued = vec![(echo("answered"), Had::SERVER), (signal(1), Had::NONE)];
+            let mut stream = on(Builder::take_over(handover), &runtime)
+                .build_message_stream()
+                .await
+                .unwrap();
+            let conn = Connection::from(&stream);
+            wait_until(|| conn.inner.msg_receiver.len() == 2);
+
+            let handover = stream.hand_over().await.unwrap();
+
+            assert_eq!(
+                who_had(&handover),
+                [(Type::MethodCall, Had::SERVER), (Type::Signal, Had::NONE)]
+            );
         });
     }
 
@@ -3780,6 +4523,38 @@ mod tests {
         assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{e}");
     }
 
+    /// The stream of a connection over a channel, which serves `iface` at `PATH`, and its peer,
+    /// both on `runtime`.
+    #[cfg(feature = "service")]
+    async fn serving<I>(runtime: &Runtime, iface: I) -> (MessageStream, Connection)
+    where
+        I: crate::object_server::Interface,
+    {
+        let guid = Guid::generate();
+        let (ours, theirs) = Channel::pair();
+
+        futures_util::try_join!(
+            on(Builder::authenticated_socket(ours, guid.clone()), runtime)
+                .p2p()
+                .serve_at(PATH, iface)
+                .build_message_stream(),
+            on(Builder::authenticated_socket(theirs, guid), runtime)
+                .p2p()
+                .build(),
+        )
+        .unwrap()
+    }
+
+    /// The type of each message that `handover` hands over of those that its connection read, and
+    /// who had it.
+    fn who_had(handover: &Handover) -> Vec<(Type, Had)> {
+        handover
+            .queued
+            .iter()
+            .map(|(msg, had)| (msg.message_type(), *had))
+            .collect()
+    }
+
     /// What the next `count` messages of `stream` answer calls of `Echo` with, sorted, as an
     /// interface with a task for each call answers them in any order.
     #[cfg(feature = "service")]
@@ -3796,7 +4571,6 @@ mod tests {
     }
 
     /// A call to the `Echo` method of the interfaces of the tests, with `text`.
-    #[cfg(feature = "service")]
     fn echo(text: &str) -> Message {
         Message::method_call(PATH, "Echo")
             .interface(INTERFACE)
@@ -3853,6 +4627,39 @@ mod tests {
             text
         }
     }
+
+    /// Defines an interface that answers a call with what it was given, or with what the peer of
+    /// its connection tells it, in a task for each call or not, as `spawn` says.
+    #[cfg(all(unix, feature = "service"))]
+    macro_rules! asker {
+        ($name:ident, $spawn:literal) => {
+            struct $name;
+
+            #[crate::interface(name = "org.zbus.Test", spawn = $spawn)]
+            impl $name {
+                fn echo(&self, text: String) -> String {
+                    text
+                }
+
+                /// Asks the peer, and answers with what it tells.
+                async fn ask(
+                    &self,
+                    #[zbus(connection)] conn: &Connection,
+                ) -> crate::fdo::Result<String> {
+                    let told = conn
+                        .call_method(None::<()>, PATH, Some(INTERFACE), "Tell", &())
+                        .await?;
+
+                    Ok(told.body().deserialize()?)
+                }
+            }
+        };
+    }
+
+    #[cfg(all(unix, feature = "service"))]
+    asker!(Asker, true);
+    #[cfg(all(unix, feature = "service"))]
+    asker!(InlineAsker, false);
 
     const PATH: &str = "/org/zbus/Test";
     const INTERFACE: &str = "org.zbus.Test";

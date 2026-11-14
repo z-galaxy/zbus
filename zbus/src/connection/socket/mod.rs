@@ -221,7 +221,7 @@ pub trait ReadHalf: std::fmt::Debug + Send + Sync + 'static {
     ///
     /// # Cancellation
     ///
-    /// With the `handover` feature, on Linux, a hand-over (`MessageStream::hand_over`) stops the
+    /// With the `handover` feature, on Linux, a hand-over (`Connection::hand_over`) stops the
     /// connection reading by dropping the future of this method wherever it waits, if
     /// `ReadHalf::can_take_unread` says that it can.
     ///
@@ -326,7 +326,7 @@ pub trait ReadHalf: std::fmt::Debug + Send + Sync + 'static {
 
     /// Whether this half can take out what it read off the socket and is yet to return in a
     /// message, through [`ReadHalf::take_unread`], for its connection to be handed over
-    /// ([`MessageStream::hand_over`]).
+    /// ([`Connection::hand_over`]).
     ///
     /// A half that returns `true` promises four things:
     ///
@@ -358,14 +358,14 @@ pub trait ReadHalf: std::fmt::Debug + Send + Sync + 'static {
     /// channel, and fails on part of one. The end of its input is the other end of the channel
     /// being closed.
     ///
-    /// The default implementation returns `false`. Then [`MessageStream::hand_over`] fails with
+    /// The default implementation returns `false`. Then [`Connection::hand_over`] fails with
     /// [`Error::Unsupported`] for a connection over this half.
     ///
     /// This method is only available on Linux, with the `handover` feature.
     ///
     /// [`Builder::take_over`]: crate::connection::Builder::take_over
     /// [`Error::Unsupported`]: crate::Error::Unsupported
-    /// [`MessageStream::hand_over`]: crate::MessageStream::hand_over
+    /// [`Connection::hand_over`]: crate::Connection::hand_over
     #[cfg(all(target_os = "linux", feature = "handover"))]
     fn can_take_unread(&self) -> bool {
         false
@@ -376,7 +376,7 @@ pub trait ReadHalf: std::fmt::Debug + Send + Sync + 'static {
     /// end of `fds`. Both go in the order that they came in.
     ///
     /// A connection calls this once, as it stops reading for a hand-over
-    /// ([`MessageStream::hand_over`]), if [`ReadHalf::can_take_unread`] says that it can. That
+    /// ([`Connection::hand_over`]), if [`ReadHalf::can_take_unread`] says that it can. That
     /// comes after its last call to [`ReadHalf::receive_message`], which it may have dropped while
     /// that call waited. `bytes` and `fds` then hold the `already_received_bytes` and
     /// `already_received_fds` that the connection kept for its next call.
@@ -387,7 +387,7 @@ pub trait ReadHalf: std::fmt::Debug + Send + Sync + 'static {
     ///
     /// This method is only available on Linux, with the `handover` feature.
     ///
-    /// [`MessageStream::hand_over`]: crate::MessageStream::hand_over
+    /// [`Connection::hand_over`]: crate::Connection::hand_over
     #[cfg(all(target_os = "linux", feature = "handover"))]
     fn take_unread(&mut self, bytes: &mut Vec<u8>, fds: &mut Vec<OwnedFd>) {
         let _ = (bytes, fds);
@@ -558,7 +558,7 @@ pub trait WriteHalf: std::fmt::Debug + Send + Sync + 'static {
     /// that fails, in the middle of a message can leave part of it on the socket, after which the
     /// peer can make no sense of anything that the connection sends.
     ///
-    /// With the `handover` feature, on Linux, a hand-over (`MessageStream::hand_over`) of a
+    /// With the `handover` feature, on Linux, a hand-over (`Connection::hand_over`) of a
     /// connection over such a half waits for a send under way, and fails once one was cut off
     /// midway. `Connection::prepare_hand_over` returns `false` for such a connection, as its sends
     /// have to wait for the half.

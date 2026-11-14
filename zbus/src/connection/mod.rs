@@ -20,6 +20,8 @@ use zruntime::{
 use crate::ObjectServer;
 #[cfg(feature = "service")]
 use crate::log::debug;
+#[cfg(all(target_os = "linux", feature = "handover", feature = "service"))]
+use crate::object_server::Calls;
 #[cfg(all(target_os = "linux", feature = "handover"))]
 use crate::runtime::IoSource;
 use crate::{
@@ -95,6 +97,10 @@ pub(crate) struct ConnectionInner {
     object_server: OnceLock<ObjectServer>,
     #[cfg(feature = "service")]
     object_server_dispatch_task: OnceLock<Task<()>>,
+    /// The method calls that the object server has under way, and those that it leaves as the
+    /// connection is handed over.
+    #[cfg(all(target_os = "linux", feature = "handover", feature = "service"))]
+    calls: Arc<Calls>,
 
     // The runtime that runs our tasks and times our calls out. Declared after the task handles
     // so that it outlives them.
@@ -426,7 +432,7 @@ impl Connection {
         self.inner.socket_status.unwritten.load(Ordering::Relaxed)
     }
 
-    /// Prepare this connection to be handed over ([`MessageStream::hand_over`]): from now on, for
+    /// Prepare this connection to be handed over ([`Connection::hand_over`]): from now on, for
     /// good, no send waits for the socket to take what it sends.
     ///
     /// A peer that doesn't read holds a send up for as long as it likes, as the socket takes no
@@ -452,7 +458,6 @@ impl Connection {
     ///
     /// This method is only available on Linux, with the `handover` feature.
     ///
-    /// [`MessageStream::hand_over`]: crate::MessageStream::hand_over
     /// [`WriteHalf::can_resume_writes`]: socket::WriteHalf::can_resume_writes
     #[cfg(all(target_os = "linux", feature = "handover"))]
     pub fn prepare_hand_over(&self) -> bool {
@@ -1200,11 +1205,15 @@ impl Connection {
         self.inner.object_server_dispatch_task.get_or_init(|| {
             trace!("starting ObjectServer task");
             let weak_conn = WeakConnection::from(self);
+            // The task takes the method calls from here on, and has ended once `taking` is
+            // dropped, whether it ever ran or not.
+            #[cfg(all(target_os = "linux", feature = "handover"))]
+            let (calls, mut taking) = (self.inner.calls.clone(), self.inner.calls.start());
 
             self.inner.runtime.spawn(
                 "obj_server_task",
                 async move {
-                    let mut stream = match weak_conn.upgrade() {
+                    let stream = match weak_conn.upgrade() {
                         Some(conn) => {
                             let mut builder = MatchRule::builder().msg_type(Type::MethodCall);
                             if let Some(unique_name) = conn.unique_name() {
@@ -1229,6 +1238,12 @@ impl Connection {
                             return;
                         }
                     };
+                    // The task keeps the stream in `taking`, which leaves what is queued on it
+                    // as the task ends while the connection is handed over.
+                    #[cfg(all(target_os = "linux", feature = "handover"))]
+                    let mut stream = taking.stream.insert(stream);
+                    #[cfg(not(all(target_os = "linux", feature = "handover")))]
+                    let mut stream = stream;
                     if let Some(started_event) = started_event {
                         started_event.notify(1);
                     }
@@ -1240,6 +1255,13 @@ impl Connection {
                         }
                         m.ok()
                     }) {
+                        // The call is under way from here on, until it is answered, unless the
+                        // connection is being handed over, which leaves the call for the object
+                        // server of the connection that takes over.
+                        #[cfg(all(target_os = "linux", feature = "handover"))]
+                        let Some(under_way) = calls.take(&msg) else {
+                            continue;
+                        };
                         if let Some(conn) = weak_conn.upgrade() {
                             let hdr = msg.header();
                             // If we're connected to a bus, skip the destination check as the
@@ -1265,7 +1287,13 @@ impl Connection {
                                 }
                             }
                             let server = conn.object_server();
-                            if let Err(e) = server.dispatch_call(&msg, &hdr).await {
+                            let dispatched = server.dispatch_call(
+                                &msg,
+                                &hdr,
+                                #[cfg(all(target_os = "linux", feature = "handover"))]
+                                under_way,
+                            );
+                            if let Err(e) = dispatched.await {
                                 debug!(
                                     "Error dispatching message. Message: {:?}, error: {:?}",
                                     msg, e
@@ -1478,6 +1506,8 @@ impl Connection {
                 object_server: OnceLock::new(),
                 #[cfg(feature = "service")]
                 object_server_dispatch_task: OnceLock::new(),
+                #[cfg(all(target_os = "linux", feature = "handover", feature = "service"))]
+                calls: Arc::default(),
                 socket_reader_task: OnceLock::new(),
                 msg_senders,
                 pending_method_calls,
@@ -1525,7 +1555,7 @@ impl Connection {
     /// occurs on the socket, or [`Connection::close`] is called.
     ///
     /// With the `handover` feature, on Linux, it is also closed once it was handed over
-    /// (`MessageStream::hand_over`).
+    /// (`Connection::hand_over`).
     pub fn is_closed(&self) -> bool {
         self.inner.is_closed()
     }
@@ -1536,7 +1566,7 @@ impl Connection {
     /// occurs on the socket, or [`Connection::close`] is called.
     ///
     /// With the `handover` feature, on Linux, it is also closed once it was handed over
-    /// (`MessageStream::hand_over`).
+    /// (`Connection::hand_over`).
     ///
     /// Returns immediately if the connection is already closed.
     pub async fn closed(&self) {
@@ -1592,7 +1622,7 @@ impl Connection {
     /// to have it written.
     ///
     /// With the `handover` feature, on Linux, this does nothing to the socket of a connection that
-    /// was handed over (`MessageStream::hand_over`), as the socket is no longer the connection's.
+    /// was handed over (`Connection::hand_over`), as the socket is no longer the connection's.
     pub async fn close(self) -> Result<()> {
         self.inner.socket_status.activity_event.notify(usize::MAX);
         let result = self
@@ -1696,7 +1726,12 @@ impl Connection {
             validate_bodies,
         );
         #[cfg(all(target_os = "linux", feature = "handover"))]
-        let reader = reader.yielding_first(taken_over);
+        let reader = {
+            let stop = &inner.socket_status.stop;
+            stop.take_over(taken_over.iter().map(|(_, had)| *had));
+
+            reader.yielding_first(taken_over)
+        };
         inner
             .socket_reader_task
             .set(reader.spawn(&inner.runtime))

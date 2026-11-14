@@ -36,9 +36,9 @@ use crate::{
 /// reads it.
 ///
 /// With the `handover` feature, on Linux, the stream also ends once a hand-over of its connection
-/// through another stream (`MessageStream::hand_over`) stops the connection reading, after
-/// everything that the connection read before it stopped and queued for the stream. Its `None` then
-/// comes with no error before it.
+/// that doesn't go through it (`Connection::hand_over`, or `MessageStream::hand_over` on another
+/// stream) stops the connection reading, after everything that the connection read before it
+/// stopped and queued for the stream. Its `None` then comes with no error before it.
 #[derive(Debug)]
 #[must_use = "streams do nothing unless polled"]
 pub struct MessageStream {
@@ -215,7 +215,8 @@ impl MessageStream {
         self.inner.msg_receiver.set_capacity(max_queued);
     }
 
-    /// Hand the connection of this stream over, for a connection in this process or in another
+    /// Hand the connection of this stream over, as [`Connection::hand_over`] does, with the
+    /// messages that this stream is yet to yield, for a connection in this process or in another
     /// one to go on from where it stopped, through
     /// [`Builder::take_over`](crate::connection::Builder::take_over).
     ///
@@ -226,34 +227,17 @@ impl MessageStream {
     ///
     /// This method is only available on Linux, with the `handover` feature.
     ///
-    /// This proceeds in order, once the checks that fail before anything is done to the
-    /// connection, which the errors below tell, have passed:
-    ///
-    /// 1. It prepares the hand-over, as [`Connection::prepare_hand_over`] does: from then on, for
-    ///    good, no send waits for the peer to take what it sends, a send under way included. Over a
-    ///    write half of your own that can't resume writes ([`WriteHalf::can_resume_writes`]), there
-    ///    is nothing to prepare, and sends go on waiting for the half.
-    /// 2. It stops the connection reading, wherever it is, even in the middle of a message.
-    /// 3. It waits for the connection to have stopped. Meanwhile, it takes the messages queued on
-    ///    this stream off it, as a connection that waits for room in the stream to queue a message
-    ///    there gets that room before it stops.
-    /// 4. It commits, once the socket is free: a send under way over a write half that can't resume
-    ///    writes holds it until it is through, and so does a flush under way
-    ///    ([`Connection::flush`]), which waits for the peer to take what the connection has left to
-    ///    write. Nothing else here waits for the peer. From then on nothing is written to the
-    ///    socket through the connection or any clone of it: sends and flushes fail, and
-    ///    [`Connection::close`] does nothing to the socket. The connection is closed, as
-    ///    [`Connection::is_closed`] and [`Connection::closed`] tell. The socket is neither shut
-    ///    down nor closed, so the peer sees nothing but a pause.
+    /// This goes through the steps of [`Connection::hand_over`], whose documentation goes for it
+    /// too: what it does to the connection, the calls that its object server has under way, a
+    /// peer that closes its end, the cancellation of the hand-over and its errors. While it waits,
+    /// for the object server and then for the connection to have stopped, it takes the messages
+    /// queued on this stream off it, as a connection that waits for room in the stream to queue a
+    /// message there neither reads on nor stops otherwise.
     ///
     /// The [`Handover`] that it gives holds the messages that were queued on this stream and that
-    /// it did not yield, oldest first, as they are, then what the connection read off the socket
-    /// after them and made no message of yet, with the file descriptors of all of those. It also
-    /// holds what the connection took to send and didn't write, which the connection that takes
-    /// over writes ahead of its own sends: the rest of a message that a send was dropped, or
-    /// failed, in the middle of ([`Connection::send`] tells more), then the messages that sends
-    /// kept once the hand-over was prepared. The stream then ends: it yields `None`, as it has
-    /// nothing left to yield.
+    /// it did not yield, as they are, along with the method calls that the object server didn't
+    /// take, in the order that the connection read them, each for those that are yet to get it.
+    /// The stream then ends: it yields `None`, as it has nothing left to yield.
     ///
     /// # The messages of the stream
     ///
@@ -274,87 +258,27 @@ impl MessageStream {
     /// Once a hand-over through this stream has stopped the connection reading, it may have taken
     /// messages off this stream that another stream doesn't have, as that stream yielded them or
     /// was made after them. A hand-over through any other stream of the connection, a clone of
-    /// this one included, then fails, rather than hand the connection over without them.
+    /// this one included, or through none ([`Connection::hand_over`]), then fails, rather than
+    /// hand the connection over without them.
     ///
-    /// # A peer that closes its end
-    ///
-    /// The end of what the peer sends, as the peer closes its end of the connection, such as once
-    /// it sent a last message, fails no hand-over, whether the connection comes to it before the
-    /// hand-over starts or while the hand-over stops the connection reading, and whether or not a
-    /// send to the peer failed since, as sends do once the peer receives nothing more. The
-    /// hand-over then hands over what the connection read, part of a message included, with the
-    /// socket. The connection that takes over yields the messages of what was read, then comes to
-    /// the same end of the socket, and ends as this one would have. A connection that ended on
-    /// anything else isn't handed over: see the errors below.
-    ///
-    /// For that, a connection that comes to that end keeps the part of a message that it read, if
-    /// any, and the file descriptors that came in that no message took, until it is handed over or
-    /// dropped, whether or not a hand-over is to come. Closing it doesn't let go of them.
-    ///
-    /// # While the connection is stopped
-    ///
-    /// From the second step on, the connection receives no more messages. Its other streams yield
-    /// what was queued for them and then end, with no error before their `None`, and so do the
-    /// streams of the object server and of proxies. The method calls that wait for their replies
-    /// fail with an I/O error ([`Error::InputOutput`]) of kind
-    /// [`NotConnected`](std::io::ErrorKind::NotConnected), as no reply comes in any more. Those
-    /// made since fail the same way before they are sent, and so does
-    /// [`MessageStream::for_match_rule`]. Messages that expect no reply, such as replies and
-    /// signals, are sent until the hand-over commits, as far as the socket takes them, and the
-    /// hand-over holds the rest.
-    ///
-    /// # Other consumers of the messages
-    ///
-    /// The object server, proxies, other streams of the connection and its method calls that wait
-    /// for their replies take its messages too. A message that one of them took, and that this
-    /// stream did not yield, is handled twice: by them, and again by the connection that goes on.
-    /// The stream that `build_message_stream` gives, on a connection with no object server and no
-    /// other stream, is what this is for. Another stream that is full, and that nobody polls, also
-    /// holds the hand-over up, as the connection waits for room in it before it stops.
-    ///
-    /// # Cancellation
-    ///
-    /// The future can be dropped before it resolves, such as to bound the hand-over by a timeout:
-    /// a peer that doesn't read can hold a flush under way, or a send under way over a write half
-    /// of your own that can't resume writes, up for as long as it likes. If the future was polled
-    /// by then, the hand-over is prepared, and the connection has stopped reading, for good, and
-    /// this stream keeps what the hand-over took off its queue, as told above: hand the connection
-    /// over through this stream again, or take the messages off the stream and close the
-    /// connection. A future dropped before it was ever polled does nothing to the connection,
-    /// which reads on.
+    /// While it waits for the calls that the object server has under way, the connection reads on,
+    /// and the hand-over takes what it queues on this stream off it: nothing bounds how much that
+    /// is but the time that the hand-over waits.
     ///
     /// # Errors
     ///
+    /// Those of [`Connection::hand_over`], after which the stream keeps what the hand-over took
+    /// off its queue, as told above, and:
+    ///
     /// * [`Error::Unsupported`], before anything is done to the connection, which reads on, for a
     ///   stream for a match rule ([`MessageStream::for_match_rule`]), which never had the messages
-    ///   that did not match it, and for a connection over a socket of your own whose read half
-    ///   can't hand over what it read ([`ReadHalf::can_take_unread`]).
-    /// * [`Error::InputOutput`], with nothing taken out of the connection, if:
-    ///   * the connection ended before it stopped reading, otherwise than at the end of what the
-    ///     peer sent: reading the socket failed, a message was invalid, or the runtime dropped the
-    ///     task that reads it;
-    ///   * it was closed with [`Connection::close`], or it was handed over already, such as through
-    ///     another stream;
-    ///   * a hand-over through another stream stopped the connection reading before, as told above;
-    ///   * a send over a socket of your own whose write half can't resume writes
-    ///     ([`WriteHalf::can_resume_writes`]) was cut off midway, by an error or by its future
-    ///     being dropped. The socket may then hold part of a message, and the peer can make no
-    ///     sense of what follows it. If no send is under way as the hand-over starts, it fails on
-    ///     this before anything is done to the connection, which reads on. A send that failed with
-    ///     an I/O error of kind `BrokenPipe`, `ConnectionReset` or `ConnectionAborted`, as one to a
-    ///     peer that closed its end does, doesn't count: the peer receives nothing that follows it;
-    ///   * the socket fails to be duplicated, as when the process has too many file descriptors
-    ///     open.
-    ///
-    ///   The hand-over is then prepared, and the connection has stopped reading, unless it ended
-    ///   before, or the hand-over failed before anything was done to it. The stream keeps what the
-    ///   hand-over took off its queue, as told above.
+    ///   that did not match it.
+    /// * [`Error::InputOutput`], with nothing taken out of the connection, if a hand-over through
+    ///   another stream stopped the connection reading before, as told above.
     ///
     /// [`Builder::build_message_stream`]: crate::connection::Builder::build_message_stream
     /// [`Error::InputOutput`]: crate::Error::InputOutput
     /// [`Error::Unsupported`]: crate::Error::Unsupported
-    /// [`ReadHalf::can_take_unread`]: crate::connection::socket::ReadHalf::can_take_unread
-    /// [`WriteHalf::can_resume_writes`]: crate::connection::socket::WriteHalf::can_resume_writes
     #[cfg(all(target_os = "linux", feature = "handover"))]
     pub async fn hand_over(&mut self) -> Result<Handover> {
         if self.inner.match_rule.is_some() {
@@ -362,7 +286,7 @@ impl MessageStream {
         }
         let conn = Connection::from(&*self);
         let handover = conn
-            .hand_over(&mut self.inner.msg_receiver, &mut self.backlog)
+            .hand_over_through(Some((&mut self.inner.msg_receiver, &mut self.backlog)))
             .await?;
         // Every message that the stream was yet to yield went into the hand-over.
         self.terminated = true;

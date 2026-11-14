@@ -298,8 +298,8 @@ impl<'a> Builder<'a> {
     }
 
     /// A builder for the connection that goes on from `handover`, whichever of
-    /// [`MessageStream::hand_over`] or [`Restore::restore`] gave it, in this process or in another
-    /// one.
+    /// [`Connection::hand_over`], [`MessageStream::hand_over`] or [`Restore::restore`] gave it, in
+    /// this process or in another one.
     ///
     /// The connection runs over the socket of `handover`. It has the GUID, the unique name, the
     /// passing of file descriptors and the kind (peer-to-peer or bus) of the connection that was
@@ -308,14 +308,25 @@ impl<'a> Builder<'a> {
     ///
     /// This method is only available on Linux, with the `handover` feature.
     ///
-    /// It yields the messages that the other connection left unread first: those that were queued
-    /// on its stream, as they were, then those of what it read off the socket after them, and then
+    /// It deals with the messages that the other connection read and handed over first, in the
+    /// order that the other one read them. Each goes to those that are yet to get it, as [the
+    /// module of the hand-over](crate::connection::handover#who-gets-each-message) tells: its
+    /// streams yield those that the stream that the other connection was handed over through, if
+    /// any, didn't yield, and the interfaces that `Builder::serve_at` (which requires the `service`
+    /// feature) adds get the method calls that the object server of the other one, if it had one,
+    /// didn't take. Nothing else gets them, such as a proxy. Then it goes on as any connection
+    /// does, with the messages of what the other one read off the socket after them, and with
     /// those that it reads off the socket itself, from where the other one stopped. With the
-    /// `bus-impl` feature, `Builder::validate_bodies` has it check the bodies of all of them. It
-    /// yields them as soon as it is built, so a [`MessageStream`] made from it once it is built can
-    /// miss them. Build it with [`Builder::build_message_stream`] to get them all, on a stream that
-    /// it can be handed over through in turn. The interfaces that `Builder::serve_at` (which
-    /// requires the `service` feature) adds get the method calls among them.
+    /// `bus-impl` feature, `Builder::validate_bodies` has it check the bodies of all of them.
+    ///
+    /// It deals with the messages of the hand-over as soon as it is built, so a [`MessageStream`]
+    /// made from it once it is built, or an interface added to it then, can miss them. Build it
+    /// with [`Builder::build_message_stream`] to get them all, on a stream that it can be handed
+    /// over through in turn, and add its interfaces with `Builder::serve_at`.
+    ///
+    /// A bus has the connection as the one that was handed over, with its well-known names, which
+    /// the connection knows nothing of until it is given them again (`Builder::name`): [the
+    /// module of the hand-over](crate::connection::handover#what-a-bus-keeps) tells more.
     ///
     /// What the other connection took to send and didn't write, if anything, it writes ahead of
     /// its own sends: at its first send, or at [`Connection::flush`], and not before.
@@ -340,6 +351,7 @@ impl<'a> Builder<'a> {
     /// of a connection to a bus that `Builder::p2p` was called for.
     ///
     /// [`Connection::flush`]: crate::Connection::flush
+    /// [`Connection::hand_over`]: crate::Connection::hand_over
     /// [`Connection::unwritten_len`]: crate::Connection::unwritten_len
     /// [`MessageStream::hand_over`]: crate::MessageStream::hand_over
     /// [`Restore::restore`]: zoter::Restore::restore

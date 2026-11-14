@@ -41,6 +41,12 @@ pub struct Sequence {
 impl Sequence {
     /// A sequence number that is higher than any other; used by errors that terminate a stream.
     pub(crate) const LAST: Self = Self { recv_seq: u64::MAX };
+
+    /// The position itself, which is 1 for the first message that a connection received.
+    #[cfg(all(target_os = "linux", feature = "handover"))]
+    pub(crate) fn get(self) -> u64 {
+        self.recv_seq
+    }
 }
 
 /// A D-Bus Message.
