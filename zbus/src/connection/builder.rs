@@ -692,9 +692,11 @@ impl<'a> Builder<'a> {
     ///
     /// With the `handover` feature, on Linux, the stream has had every message of the connection,
     /// from the first, so the connection can be handed over through it
-    /// (`MessageStream::hand_over`). A connection that takes over (`Builder::take_over`) yields the
-    /// messages that it was handed as soon as it is built. A stream made from it once it is built
-    /// can miss them, while one built with this gets every one of them.
+    /// (`MessageStream::hand_over`), while it is its only stream without a match rule: a clone of
+    /// it, or a stream made from the connection, fails the hand-over. A connection that takes over
+    /// (`Builder::take_over`) yields the messages that it was handed as soon as it is built. A
+    /// stream made from it once it is built can miss them, while one built with this gets every one
+    /// of them.
     ///
     /// This method is only available when the `bus-impl` or the `handover` feature is enabled.
     ///

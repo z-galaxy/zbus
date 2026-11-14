@@ -255,6 +255,24 @@ impl MessageStream {
     ///   of file descriptors that has gone. Otherwise, take the messages off the stream, deal with
     ///   them, and close the connection.
     ///
+    /// # The other streams of the connection
+    ///
+    /// The connection is to have no other stream without a match rule, a clone of this one
+    /// included: such a stream has the messages that this one has, which the connection that goes
+    /// on would give its stream once more. So this fails, before anything is done to the
+    /// connection, which reads on, where the connection has another such stream. Drop it, and
+    /// call this again: what this stream is yet to yield is handed over then, whatever a stream
+    /// that is gone by then yielded of it. Streams for match rules, as those of proxies are, and
+    /// the object server are no such streams: the connection hands over nothing for them.
+    ///
+    /// A stream without a match rule made from the start of the hand-over until the connection
+    /// stops reading, such as on another thread, can have messages that the hand-over holds too.
+    /// The hand-over then fails once the connection stopped reading, with an error that says so,
+    /// and so does every later hand-over through a stream of the connection. Take the messages
+    /// off this stream, which keeps what the hand-over took off its queue, deal with them, and
+    /// close the connection. A stream made once the connection stopped reading gets nothing that
+    /// the hand-over holds, and changes nothing.
+    ///
     /// Once a hand-over through this stream has stopped the connection reading, it may have taken
     /// messages off this stream that another stream doesn't have, as that stream yielded them or
     /// was made after them. A hand-over through any other stream of the connection, a clone of
@@ -272,9 +290,14 @@ impl MessageStream {
     ///
     /// * [`Error::Unsupported`], before anything is done to the connection, which reads on, for a
     ///   stream for a match rule ([`MessageStream::for_match_rule`]), which never had the messages
-    ///   that did not match it.
-    /// * [`Error::InputOutput`], with nothing taken out of the connection, if a hand-over through
-    ///   another stream stopped the connection reading before, as told above.
+    ///   that did not match it, and where the connection has another stream without a match rule, a
+    ///   clone of this one included, as told above.
+    /// * [`Error::InputOutput`] of kind [`NotConnected`](std::io::ErrorKind::NotConnected), with
+    ///   nothing taken out of the connection, if a hand-over through another stream stopped the
+    ///   connection reading before, or if another stream without a match rule was made while this
+    ///   hand-over, or one before it, stopped the connection reading, as told above. The connection
+    ///   has stopped reading then, unless it ended before, and the stream keeps what the hand-over
+    ///   took off its queue.
     ///
     /// [`Builder::build_message_stream`]: crate::connection::Builder::build_message_stream
     /// [`Error::InputOutput`]: crate::Error::InputOutput
@@ -300,12 +323,22 @@ impl MessageStream {
         conn: &Connection,
     ) -> Self {
         let conn_inner = conn.inner.clone();
+        // Without a match rule, this is the stream that `Builder::build_message_stream` builds
+        // along with the connection, which is counted before anyone can hand the connection over.
+        #[cfg(all(target_os = "linux", feature = "handover"))]
+        let unfiltered = rule.is_none();
+        #[cfg(all(target_os = "linux", feature = "handover"))]
+        if unfiltered {
+            conn_inner.unfiltered_stream_made();
+        }
 
         Self {
             inner: Inner {
                 conn_inner,
                 msg_receiver,
                 match_rule: rule,
+                #[cfg(all(target_os = "linux", feature = "handover"))]
+                unfiltered,
             },
             closed_listener: None,
             terminated: false,
@@ -422,6 +455,9 @@ impl FusedStream for MessageStream {
 impl From<Connection> for MessageStream {
     fn from(conn: Connection) -> Self {
         let conn_inner = conn.inner;
+        // The stream is counted before it can get any message.
+        #[cfg(all(target_os = "linux", feature = "handover"))]
+        conn_inner.unfiltered_stream_made();
         let msg_receiver = conn_inner.msg_receiver.activate_cloned();
 
         Self {
@@ -429,6 +465,8 @@ impl From<Connection> for MessageStream {
                 conn_inner,
                 msg_receiver,
                 match_rule: None,
+                #[cfg(all(target_os = "linux", feature = "handover"))]
+                unfiltered: true,
             },
             closed_listener: None,
             terminated: false,
@@ -458,15 +496,43 @@ impl From<&MessageStream> for Connection {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct Inner {
     conn_inner: Arc<ConnectionInner>,
     msg_receiver: ActiveReceiver<Result<Message>>,
     match_rule: Option<OwnedMatchRule>,
+    /// Whether the stream is one without a match rule, which the connection counts, as a
+    /// hand-over through another stream needs to know of it. `AsyncDrop` takes the match rule out
+    /// of a stream that has one.
+    #[cfg(all(target_os = "linux", feature = "handover"))]
+    unfiltered: bool,
+}
+
+/// A clone of a stream without a match rule is another such stream of the connection, which a
+/// hand-over through either of them counts.
+impl Clone for Inner {
+    fn clone(&self) -> Self {
+        #[cfg(all(target_os = "linux", feature = "handover"))]
+        if self.unfiltered {
+            self.conn_inner.unfiltered_stream_made();
+        }
+
+        Self {
+            conn_inner: self.conn_inner.clone(),
+            msg_receiver: self.msg_receiver.clone(),
+            match_rule: self.match_rule.clone(),
+            #[cfg(all(target_os = "linux", feature = "handover"))]
+            unfiltered: self.unfiltered,
+        }
+    }
 }
 
 impl Drop for Inner {
     fn drop(&mut self) {
+        #[cfg(all(target_os = "linux", feature = "handover"))]
+        if self.unfiltered {
+            self.conn_inner.unfiltered_stream_dropped();
+        }
         let conn = Connection {
             inner: self.conn_inner.clone(),
         };

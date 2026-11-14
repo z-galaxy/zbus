@@ -77,10 +77,13 @@
 //!   (`spawn = false`), and takes none from when the hand-over starts, so there can be calls that
 //!   it didn't take.
 //! * Everything else gets each message that the connection read until it stopped, and none of those
-//!   is handed over for it. The other streams of the connection, those for match rules among them,
-//!   as the streams of proxies are, yield what was queued for them, and then end. A method call
-//!   that waits for its reply gets it if it came in by then, and fails otherwise, so wait for the
-//!   calls that matter before you hand the connection over.
+//!   is handed over for it. The streams for match rules, as the streams of proxies are, yield what
+//!   was queued for them, and then end, and so do the streams without one of a connection that is
+//!   handed over through none ([`Connection::hand_over`]). A hand-over through a stream fails where
+//!   the connection has another stream without a match rule, a clone of that stream included, which
+//!   has the same messages ([`MessageStream::hand_over`] tells more). A method call that waits for
+//!   its reply gets it if it came in by then, and fails otherwise, so wait for the calls that
+//!   matter before you hand the connection over.
 //!
 //! A message that the stream and the object server both take, as each method call is, is handed
 //! over for the one that is yet to get it only, or for both. So a method call that the object
@@ -197,7 +200,7 @@ use zruntime::{
     broadcast::{Receiver, TryRecvError},
 };
 
-use super::socket_write::Unwritten;
+use super::{ConnectionInner, socket_write::Unwritten};
 #[cfg(feature = "p2p")]
 use crate::connection::socket::{Channel, Writes};
 use crate::{
@@ -1360,6 +1363,9 @@ impl Connection {
         // Nothing more is queued once the reader ended.
         if let Some(through) = &mut through {
             through.take_rest();
+            // A stream without a match rule that was made meanwhile may have had what the
+            // hand-over holds.
+            self.inner.socket_status.stop.alone()?;
         }
         // A reader that stopped, or came to the end of the input, ended the streams of the
         // connection, so the task of the object server ends, once it got the calls that were
@@ -1731,6 +1737,20 @@ fn unread(
     unread
 }
 
+impl ConnectionInner {
+    /// Note that a stream without a match rule was made for the connection, before it gets any
+    /// message: a hand-over through another stream of the connection fails while it is there, or
+    /// if it was made while the hand-over stopped the connection.
+    pub(crate) fn unfiltered_stream_made(&self) {
+        self.socket_status.stop.unfiltered_made();
+    }
+
+    /// Note that a stream without a match rule of the connection was dropped.
+    pub(crate) fn unfiltered_stream_dropped(&self) {
+        self.socket_status.stop.unfiltered_dropped();
+    }
+}
+
 /// What a hand-over through a stream took off the queue of the stream, and the stream is yet to
 /// yield, for the stream to keep, whatever comes of the hand-over.
 #[derive(Debug, Default)]
@@ -1858,6 +1878,12 @@ impl StopStatus {
             // How it ended first stands. `end` is dropped once the lock is let go of.
             return;
         }
+        // The reader yielded its last message before this, so a stream counted after it gets
+        // none of what it read.
+        {
+            let mut claim = self.stream.lock().unwrap_or_else(PoisonError::into_inner);
+            claim.made_at_stop = Some(claim.made);
+        }
         *slot = end;
         drop(slot);
         self.reader_end_event.notify(usize::MAX);
@@ -1866,23 +1892,80 @@ impl StopStatus {
     /// Claim the connection for the hand-overs through the stream that `stream` stands for, if
     /// any, unless a hand-over through another stream claimed it first. A hand-over through no
     /// stream claims nothing.
+    ///
+    /// A hand-over through a stream also fails where the connection has another stream without a
+    /// match rule, which has the messages that the hand-over would hold too: with
+    /// [`Error::Unsupported`] while nothing was done to the connection, and as `alone` does
+    /// otherwise.
     fn claim(&self, stream: Option<&mut Option<StreamId>>) -> Result<()> {
         let mut claim = self.stream.lock().unwrap_or_else(PoisonError::into_inner);
         let stream = stream.map(|id| *id.get_or_insert_with(|| claim.new_id()));
         match (claim.by, stream) {
-            (Some(by), Some(stream)) if by == stream => Ok(()),
-            (Some(_), _) => Err(not_connected(
-                "a hand-over through another stream of the connection may have taken messages off \
-                 that stream",
-            )
-            .into()),
-            (None, Some(stream)) => {
-                claim.by = Some(stream);
-
-                Ok(())
+            (Some(by), Some(stream)) if by == stream => (),
+            (Some(_), _) => {
+                return Err(not_connected(
+                    "a hand-over through another stream of the connection may have taken \
+                     messages off that stream",
+                )
+                .into());
             }
-            (None, None) => Ok(()),
+            (None, Some(_)) => (),
+            (None, None) => return Ok(()),
         }
+        if claim.shared {
+            return Err(shared());
+        }
+        // The other streams are counted under this lock, which their making takes too, so that
+        // none is made unseen between this look and the claim. Those made after the claim are
+        // for `alone` to find, once the connection stopped reading.
+        if claim.by.is_none() {
+            if claim.unfiltered > 1 {
+                if !self.asked() {
+                    return Err(Error::Unsupported);
+                }
+                claim.shared = true;
+
+                return Err(shared());
+            }
+            claim.by = stream;
+            // A stream made once the reader ended got nothing from it, so it counts for nothing.
+            claim.made_at_claim = claim.made_at_stop.unwrap_or(claim.made);
+        }
+
+        Ok(())
+    }
+
+    /// Fail, once the connection stopped reading, if a stream without a match rule was made from
+    /// when the connection was claimed for the hand-overs through a stream until it stopped
+    /// reading: it may have had messages that the hand-over holds too. Every later hand-over
+    /// through a stream fails the same way.
+    ///
+    /// The count of the streams made tells, where the count of those there are would miss one
+    /// that was made and dropped meanwhile. A stream made once the reader ended gets no message
+    /// from it, so it counts for nothing.
+    fn alone(&self) -> Result<()> {
+        let mut claim = self.stream.lock().unwrap_or_else(PoisonError::into_inner);
+        let made = claim.made_at_stop.unwrap_or(claim.made);
+        if claim.shared || made != claim.made_at_claim {
+            claim.shared = true;
+
+            return Err(shared());
+        }
+
+        Ok(())
+    }
+
+    /// Note that a stream without a match rule was made, before it gets a message.
+    fn unfiltered_made(&self) {
+        let mut claim = self.stream.lock().unwrap_or_else(PoisonError::into_inner);
+        claim.unfiltered += 1;
+        claim.made += 1;
+    }
+
+    /// Note that a stream without a match rule was dropped.
+    fn unfiltered_dropped(&self) {
+        let mut claim = self.stream.lock().unwrap_or_else(PoisonError::into_inner);
+        claim.unfiltered -= 1;
     }
 
     /// How many messages the connection took over.
@@ -1928,14 +2011,27 @@ impl StopStatus {
     }
 }
 
-/// Which stream of a connection claimed it for its hand-overs, if any, and the next id that tells
-/// a stream of the connection apart from the others.
+/// Which stream of a connection claimed it for its hand-overs, if any, the next id that tells a
+/// stream of the connection apart from the others, and the streams without a match rule that the
+/// connection has.
 #[derive(Debug, Default)]
 struct Claim {
     /// The stream of the hand-overs that claimed the connection.
     by: Option<StreamId>,
     /// The id that the next stream to be handed over gets.
     next: u64,
+    /// How many streams without a match rule the connection has.
+    unfiltered: usize,
+    /// How many streams without a match rule the connection ever made.
+    made: u64,
+    /// What `made` was as a stream claimed the connection, or as the reader ended, if it ended
+    /// before that.
+    made_at_claim: u64,
+    /// What `made` was as the reader ended, once it did.
+    made_at_stop: Option<u64>,
+    /// Whether a stream without a match rule other than that of the hand-overs may have had
+    /// messages that a hand-over through a stream would hold, which then fails.
+    shared: bool,
 }
 
 impl Claim {
@@ -2436,6 +2532,16 @@ fn torn() -> Error {
     .into()
 }
 
+/// The error of a hand-over through a stream of a connection that had another stream without a
+/// match rule while it stopped reading.
+fn shared() -> Error {
+    not_connected(
+        "another stream of the connection, with no match rule, may have had messages that the \
+         hand-over holds",
+    )
+    .into()
+}
+
 /// The error, for `reason`, of what a connection can no longer do, or of a hand-over that the
 /// connection is not in a state for.
 fn not_connected(reason: &'static str) -> io::Error {
@@ -2528,24 +2634,34 @@ mod tests {
 
     /// A connection whose peer closed its end, once it sent a last message, is handed over with
     /// that message, which the stream did not yield, though it came to the end of the input before
-    /// the hand-over. Its streams end on that end then, and so do the calls made since. A
-    /// connection that takes over yields the message, then comes to the same end.
+    /// the hand-over. Its streams end on that end then, as another stream, let go of before the
+    /// hand-over, shows, and so do the calls made since. A stream made after that end, which gets
+    /// nothing, doesn't stand in the way of the hand-over. A connection that takes over yields the
+    /// message, then comes to the same end.
     #[test]
     #[timeout(15000)]
     fn a_connection_whose_peer_went_is_handed_over_with_what_it_sent() {
         under_every_runtime(|runtime| async move {
             let (mut stream, peer) = channel_pair(&runtime).await;
             let conn = Connection::from(&stream);
-            let mut other = MessageStream::from(&conn);
             let msg = signal(1);
+            {
+                let mut other = MessageStream::from(&conn);
 
-            peer.send(&msg).await.unwrap();
-            peer.close().await.unwrap();
+                peer.send(&msg).await.unwrap();
+                peer.close().await.unwrap();
 
-            let received = other.next().await.unwrap().unwrap();
-            assert_eq!(&received.data()[..], &msg.data()[..]);
-            assert_end_of_input(other.next().await.unwrap());
-            assert!(other.next().await.is_none(), "the stream outlived its end");
+                let received = other.next().await.unwrap().unwrap();
+                assert_eq!(&received.data()[..], &msg.data()[..]);
+                assert_end_of_input(other.next().await.unwrap());
+                assert!(other.next().await.is_none(), "the stream outlived its end");
+            }
+            {
+                // A stream made once the reader ended gets none of what it read, so it doesn't
+                // stand in the way of the hand-over.
+                let mut late = MessageStream::from(&conn);
+                assert!(late.next().await.is_none(), "a late stream got a message");
+            }
             let call = conn
                 .call_method(None::<()>, PATH, Some(INTERFACE), "Late", &())
                 .await;
@@ -2904,15 +3020,19 @@ mod tests {
     fn queued_messages_are_handed_over_as_they_are() {
         under_every_runtime(|runtime| async move {
             let (mut stream, peer) = channel_pair(&runtime).await;
-            let mut probe = stream.clone();
             let msgs = [signal(1), signal(2)];
-            for msg in &msgs {
-                peer.send(msg).await.unwrap();
-            }
-            let queued = [
-                probe.next().await.unwrap().unwrap(),
-                probe.next().await.unwrap().unwrap(),
-            ];
+            // A clone has the messages that the stream has queued, and goes before the hand-over.
+            let queued = {
+                let mut probe = stream.clone();
+                for msg in &msgs {
+                    peer.send(msg).await.unwrap();
+                }
+
+                [
+                    probe.next().await.unwrap().unwrap(),
+                    probe.next().await.unwrap().unwrap(),
+                ]
+            };
 
             let handover = stream.hand_over().await.unwrap();
 
@@ -3572,17 +3692,129 @@ mod tests {
         });
     }
 
-    /// Of two hand-overs of a connection at once, through two streams, one hands it over and the
-    /// other finds it handed over already.
+    /// A hand-over through a stream fails, and does nothing to the connection, which reads on,
+    /// while the connection has another stream without a match rule, be it a clone of the stream
+    /// or one made from the connection. Once that stream is gone, the same hand-over goes through.
+    #[test]
+    #[timeout(15000)]
+    fn a_hand_over_through_a_stream_fails_while_the_connection_has_another() {
+        under_every_runtime(|runtime| async move {
+            for clone in [true, false] {
+                let (mut stream, peer) = channel_pair(&runtime).await;
+                let conn = Connection::from(&stream);
+                let other = match clone {
+                    true => stream.clone(),
+                    false => MessageStream::from(&conn),
+                };
+
+                let refused = stream.hand_over().await;
+
+                assert!(
+                    matches!(refused, Err(Error::Unsupported)),
+                    "clone: {clone}, {refused:?}"
+                );
+                peer.send(&signal(1)).await.unwrap();
+                let received = stream.next().await.unwrap().unwrap();
+                assert_eq!(members(&[received]), ["Test"], "clone: {clone}");
+                {
+                    // The other stream is let go of here.
+                    let _other = other;
+                }
+                peer.send(&signal(2)).await.unwrap();
+                queued(&conn).await;
+                let handover = stream.hand_over().await.unwrap();
+                assert_eq!(
+                    who_had(&handover),
+                    [(Type::Signal, Had::NONE)],
+                    "clone: {clone}"
+                );
+            }
+        });
+    }
+
+    /// A stream without a match rule that is made while a hand-over through another stream waits
+    /// for the calls under way, and let go of before the connection stops reading, may have had
+    /// what the hand-over holds: the hand-over fails once the connection stopped reading, and so
+    /// does the next one, while the stream keeps what the hand-over took off its queue.
+    #[cfg(feature = "service")]
+    #[test]
+    #[timeout(15000)]
+    fn a_stream_made_while_the_connection_is_handed_over_fails_the_hand_over() {
+        under_every_runtime(|runtime| async move {
+            let (mut stream, peer) = serving(&runtime, InlineAsker).await;
+            let conn = Connection::from(&stream);
+            let mut peer_stream = MessageStream::from(&peer);
+
+            let asking = peer.call_method(None::<()>, PATH, Some(INTERFACE), "Ask", &());
+            let handing_over = async {
+                // The method of the call asks the peer, so the call is under way.
+                let question = peer_stream.next().await.unwrap().unwrap();
+                let mut handing_over = pin!(stream.hand_over());
+                let handed_over = futures_lite::future::poll_once(handing_over.as_mut()).await;
+                assert!(handed_over.is_none(), "{handed_over:?}");
+                {
+                    let _made = MessageStream::from(&conn);
+                }
+                peer.reply(&question.header(), &"told").await.unwrap();
+
+                handing_over.await
+            };
+            let (answer, refused) = futures_util::future::join(asking, handing_over).await;
+
+            answer.unwrap();
+            assert_not_connected(refused);
+            assert_not_connected(stream.hand_over().await);
+            // The call and what the peer told, which the stream had queued, are still the
+            // stream's.
+            let mut kept = Vec::new();
+            for _ in 0..2 {
+                kept.push(stream.next().await.unwrap().unwrap().message_type());
+            }
+            assert_eq!(kept, [Type::MethodCall, Type::MethodReturn]);
+        });
+    }
+
+    /// Nothing that zbus makes for a connection counts as another stream without a match rule: a
+    /// connection that has an object server, a proxy with a stream of its signals and a stream for
+    /// a match rule is handed over through its one stream without a match rule.
+    #[cfg(all(feature = "service", feature = "proxy"))]
+    #[test]
+    #[timeout(15000)]
+    fn a_connection_with_streams_for_match_rules_is_handed_over_through_its_stream() {
+        under_every_runtime(|runtime| async move {
+            let (mut stream, peer) = serving(&runtime, Echo).await;
+            let conn = Connection::from(&stream);
+            // A unique name, which a peer-to-peer connection needs no bus to resolve.
+            let proxy = crate::Proxy::new(&conn, ":1.1", PATH, INTERFACE)
+                .await
+                .unwrap();
+            let _signals = proxy.receive_signal("Test").await.unwrap();
+            let _for_a_rule = MessageStream::for_match_rule(signals(), &conn, None)
+                .await
+                .unwrap();
+            let reply = peer
+                .call_method(None::<()>, PATH, Some(INTERFACE), "Echo", &"served")
+                .await
+                .unwrap();
+            assert_eq!(reply.body().deserialize::<&str>().unwrap(), "served");
+
+            let handover = stream.hand_over().await.unwrap();
+
+            assert_eq!(who_had(&handover), [(Type::MethodCall, Had::SERVER)]);
+        });
+    }
+
+    /// Of two hand-overs of a connection at once, through its stream and through none, one hands
+    /// it over and the other finds it handed over already.
     #[test]
     #[timeout(15000)]
     fn a_connection_is_handed_over_once() {
         under_every_runtime(|runtime| async move {
             let (mut stream, _peer) = channel_pair(&runtime).await;
             let conn = Connection::from(&stream);
-            let mut other = MessageStream::from(&conn);
 
-            let handovers = futures_util::future::join(stream.hand_over(), other.hand_over()).await;
+            let handing_over = conn.clone().hand_over();
+            let handovers = futures_util::future::join(stream.hand_over(), handing_over).await;
 
             let (handover, refused) = match handovers {
                 (Ok(handover), refused) | (refused, Ok(handover)) => (handover, refused),
@@ -3655,13 +3887,12 @@ mod tests {
     fn messages_after_a_take_over_are_ordered_after_those_handed_over() {
         under_every_runtime(|runtime| async move {
             let (mut stream, peer) = channel_pair(&runtime).await;
-            let mut probe = stream.clone();
             let [handed, live] = ["Handed", "Live"]
                 .map(|member| Message::signal(PATH, INTERFACE, member).build(&()).unwrap());
 
             peer.send(&handed).await.unwrap();
             // Queued on the stream, which hands it over.
-            probe.next().await.unwrap().unwrap();
+            queued(&Connection::from(&stream)).await;
             let handover = stream.hand_over().await.unwrap();
             let mut stream = on(Builder::take_over(handover), &runtime)
                 .build_message_stream()
