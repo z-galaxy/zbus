@@ -298,8 +298,8 @@ impl<'a> Builder<'a> {
     }
 
     /// A builder for the connection that goes on from `handover`, whichever of
-    /// [`MessageStream::hand_over`] or [`Restore::restore`] gave it, in this process or in another
-    /// one.
+    /// [`Connection::hand_over`], [`MessageStream::hand_over`] or [`Restore::restore`] gave it, in
+    /// this process or in another one.
     ///
     /// The connection runs over the socket of `handover`. It has the GUID, the unique name, the
     /// passing of file descriptors and the kind (peer-to-peer or bus) of the connection that was
@@ -308,14 +308,26 @@ impl<'a> Builder<'a> {
     ///
     /// This method is only available on Linux, with the `handover` feature.
     ///
-    /// It yields the messages that the other connection left unread first: those that were queued
-    /// on its stream, as they were, then those of what it read off the socket after them, and then
-    /// those that it reads off the socket itself, from where the other one stopped. With the
-    /// `bus-impl` feature, `Builder::validate_bodies` has it check the bodies of all of them. It
-    /// yields them as soon as it is built, so a [`MessageStream`] made from it once it is built can
-    /// miss them. Build it with [`Builder::build_message_stream`] to get them all, on a stream that
-    /// it can be handed over through in turn. The interfaces that `Builder::serve_at` (which
-    /// requires the `service` feature) adds get the method calls among them.
+    /// The connection deals with the messages of the hand-over first, in the order that they were
+    /// read. The stream that it is built with yields the messages that the stream of the
+    /// hand-over didn't yield. The object server that it is built with gets the method calls that
+    /// the object server of the hand-over didn't take, before any call that the connection reads.
+    /// Nothing else gets them: no stream for a match rule, such as that of a proxy, and no method
+    /// call that waits for its reply. [The module of the
+    /// hand-over](crate::connection::handover#who-gets-each-message) tells more. Then the
+    /// connection reads the socket from where the other one stopped. With the `bus-impl` feature,
+    /// `Builder::validate_bodies` has it check the bodies of all of these messages.
+    ///
+    /// The connection yields the messages of the hand-over as soon as it is built, so a
+    /// [`MessageStream`] made from it once it is built can miss them. Build it with
+    /// [`Builder::build_message_stream`] to get them all, on a stream that it can be handed over
+    /// through in turn. The object server only gets its calls if the connection is built with it:
+    /// add its interfaces with `Builder::serve_at` (which requires the `service` feature). An
+    /// object server that starts once the connection is built gets none of them.
+    ///
+    /// A bus has the connection as the one that was handed over, with its well-known names, which
+    /// the connection knows nothing of until it is given them again (`Builder::name`): [the
+    /// module of the hand-over](crate::connection::handover#what-a-bus-keeps) tells more.
     ///
     /// What the other connection took to send and didn't write, if anything, it writes ahead of
     /// its own sends: at its first send, or at [`Connection::flush`], and not before.
@@ -340,6 +352,7 @@ impl<'a> Builder<'a> {
     /// of a connection to a bus that `Builder::p2p` was called for.
     ///
     /// [`Connection::flush`]: crate::Connection::flush
+    /// [`Connection::hand_over`]: crate::Connection::hand_over
     /// [`Connection::unwritten_len`]: crate::Connection::unwritten_len
     /// [`MessageStream::hand_over`]: crate::MessageStream::hand_over
     /// [`Restore::restore`]: zoter::Restore::restore
@@ -795,6 +808,9 @@ impl<'a> Builder<'a> {
         .await?;
         conn.set_max_queued(self.max_queued.unwrap_or(DEFAULT_MAX_QUEUED));
 
+        // Handing the object server its calls notes them as had by it.
+        #[cfg(all(target_os = "linux", feature = "handover", feature = "service"))]
+        let mut taken_over = taken_over;
         #[cfg(feature = "service")]
         if !self.interfaces.is_empty() {
             let object_server = conn.ensure_object_server(false);
@@ -813,7 +829,7 @@ impl<'a> Builder<'a> {
             // over, go to the object server alone, ahead of those that the connection reads, so
             // it is handed them before it starts.
             #[cfg(all(target_os = "linux", feature = "handover"))]
-            conn.hand_calls(&taken_over);
+            conn.hand_calls(&mut taken_over);
             let started_event = Event::new();
             let listener = started_event.listen();
             conn.start_object_server(Some(started_event));

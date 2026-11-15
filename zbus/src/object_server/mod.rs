@@ -32,6 +32,11 @@ pub use signal_emitter::SignalEmitter;
 mod dispatch_notifier;
 pub use dispatch_notifier::{ResponseDispatchListener, ResponseDispatchNotifier};
 
+#[cfg(all(target_os = "linux", feature = "handover"))]
+mod calls;
+#[cfg(all(target_os = "linux", feature = "handover"))]
+pub(crate) use calls::{Calls, UnderWay};
+
 mod node;
 #[cfg(feature = "object-manager")]
 use node::ManagerSignal;
@@ -602,6 +607,7 @@ impl ObjectServer {
         connection: &Connection,
         msg: &Message,
         hdr: &Header<'_>,
+        #[cfg(all(target_os = "linux", feature = "handover"))] under_way: &mut Option<UnderWay>,
     ) -> std::result::Result<(), BoxDBusError> {
         let path = hdr
             .path()
@@ -654,7 +660,15 @@ impl ObjectServer {
             let runtime = connection.runtime().clone();
             let connection = connection.clone();
             let msg = msg.clone();
+            // The task has the call from here on, which is under way until the task is done with
+            // it.
+            #[cfg(all(target_os = "linux", feature = "handover"))]
+            let under_way = under_way.take();
             let dispatch = async move {
+                // Naming it has the task capture it, and so keep it until the task is done with
+                // the call. A binding of its own would have the task keep room for it twice.
+                #[cfg(all(target_os = "linux", feature = "handover"))]
+                let _ = &under_way;
                 let server = connection.object_server();
                 let hdr = msg.header();
                 if let Err(e) = server
@@ -694,11 +708,33 @@ impl ObjectServer {
     ///   the caller through the associated server connection.
     ///
     /// Returns an error if the message is malformed.
-    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self)))]
-    pub(crate) async fn dispatch_call(&self, msg: &Message, hdr: &Header<'_>) -> Result<()> {
+    ///
+    /// With the `handover` feature, on Linux, the call is `under_way` until its reply is sent, by
+    /// the task that this hands it on to if its interface has one spawned for each call.
+    // The macro sees `under_way` in every build, as it runs before `cfg` takes the parameter out.
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self, under_way)))]
+    pub(crate) async fn dispatch_call(
+        &self,
+        msg: &Message,
+        hdr: &Header<'_>,
+        #[cfg(all(target_os = "linux", feature = "handover"))] under_way: UnderWay,
+    ) -> Result<()> {
         let conn = self.connection();
+        // The call stays under way here until it is answered, unless a task is spawned for it,
+        // which then takes this along.
+        #[cfg(all(target_os = "linux", feature = "handover"))]
+        let mut under_way = Some(under_way);
 
-        if let Err(e) = self.dispatch_method_call_try(&conn, msg, hdr).await {
+        if let Err(e) = self
+            .dispatch_method_call_try(
+                &conn,
+                msg,
+                hdr,
+                #[cfg(all(target_os = "linux", feature = "handover"))]
+                &mut under_way,
+            )
+            .await
+        {
             debug!("Returning error: {}", e);
             conn.reply_dbus_error(hdr, e).await?;
         }

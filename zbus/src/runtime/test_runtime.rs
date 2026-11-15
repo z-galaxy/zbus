@@ -587,10 +587,7 @@ impl GatedRuntime {
 
     /// Let the readers that wait run, and those spawned from now on run at once.
     pub(crate) fn open(&self) {
-        self.gate
-            .open
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        self.gate.opened.notify(usize::MAX);
+        self.gate.open();
     }
 }
 
@@ -649,18 +646,25 @@ impl traits::Runtime for GatedRuntime {
     }
 }
 
-/// The gate of a [`GatedRuntime`].
+/// A gate that holds back those that wait to pass it until it is opened, as that of a
+/// [`GatedRuntime`] does the readers.
 #[cfg(all(target_os = "linux", feature = "handover", feature = "p2p"))]
 #[derive(Debug, Default)]
-struct Gate {
+pub(crate) struct Gate {
     open: std::sync::atomic::AtomicBool,
     opened: zruntime::Event,
 }
 
 #[cfg(all(target_os = "linux", feature = "handover", feature = "p2p"))]
 impl Gate {
+    /// Let those that wait pass, and those that come from now on pass at once.
+    pub(crate) fn open(&self) {
+        self.open.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.opened.notify(usize::MAX);
+    }
+
     /// Wait for the gate to be open.
-    async fn passed(&self) {
+    pub(crate) async fn passed(&self) {
         loop {
             // The listener comes first, so that an opening right after the look isn't missed.
             let listener = self.opened.listen();
