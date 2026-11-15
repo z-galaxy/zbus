@@ -35,7 +35,7 @@ pub use dispatch_notifier::{ResponseDispatchListener, ResponseDispatchNotifier};
 #[cfg(all(target_os = "linux", feature = "handover"))]
 mod calls;
 #[cfg(all(target_os = "linux", feature = "handover"))]
-pub(crate) use calls::{Calls, UnderWay};
+pub(crate) use calls::{Calls, CallsSlot, UnderWay};
 
 mod node;
 #[cfg(feature = "object-manager")]

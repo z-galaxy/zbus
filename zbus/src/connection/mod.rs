@@ -21,7 +21,7 @@ use crate::ObjectServer;
 #[cfg(feature = "service")]
 use crate::log::debug;
 #[cfg(all(target_os = "linux", feature = "handover", feature = "service"))]
-use crate::object_server::{Calls, UnderWay};
+use crate::object_server::{Calls, CallsSlot, UnderWay};
 #[cfg(all(target_os = "linux", feature = "handover"))]
 use crate::runtime::IoSource;
 use crate::{
@@ -100,7 +100,7 @@ pub(crate) struct ConnectionInner {
     /// The method calls that the object server has under way, and those that it leaves as the
     /// connection is handed over.
     #[cfg(all(target_os = "linux", feature = "handover", feature = "service"))]
-    calls: Arc<Calls>,
+    calls: CallsSlot,
 
     // The runtime that runs our tasks and times our calls out. Declared after the task handles
     // so that it outlives them.
@@ -1187,14 +1187,15 @@ impl Connection {
     /// connection is handed over.
     #[cfg(all(target_os = "linux", feature = "handover", feature = "service"))]
     pub(crate) fn calls(&self) -> &Arc<Calls> {
-        &self.inner.calls
+        self.inner.calls.get_or_create()
     }
 
     /// Have the method calls under way include the work that a method leaves to be done once
-    /// its call is answered, until what this gives is dropped.
+    /// its call is answered, until what this gives is dropped. It gives nothing on a connection
+    /// with no object server, which has no calls.
     #[cfg(all(target_os = "linux", feature = "handover", feature = "service"))]
-    pub(crate) fn follow_up(&self) -> UnderWay {
-        self.calls().follow_up()
+    pub(crate) fn follow_up(&self) -> Option<UnderWay> {
+        self.inner.calls.of_object_server().map(Calls::follow_up)
     }
 
     #[cfg(feature = "service")]
@@ -1525,7 +1526,7 @@ impl Connection {
                 #[cfg(feature = "service")]
                 object_server_dispatch_task: OnceLock::new(),
                 #[cfg(all(target_os = "linux", feature = "handover", feature = "service"))]
-                calls: Arc::default(),
+                calls: CallsSlot::default(),
                 socket_reader_task: OnceLock::new(),
                 msg_senders,
                 pending_method_calls,
@@ -1745,8 +1746,11 @@ impl Connection {
         );
         #[cfg(all(target_os = "linux", feature = "handover"))]
         let reader = {
-            let stop = &inner.socket_status.stop;
-            stop.take_over(taken_over.iter().map(|(_, had)| *had));
+            // With no message taken over, nobody had any before.
+            if !taken_over.is_empty() {
+                let stop = &inner.socket_status.stop;
+                stop.take_over(taken_over.iter().map(|(_, had)| *had));
+            }
 
             reader.yielding_first(taken_over)
         };
