@@ -430,7 +430,8 @@ jobs:
   # descriptors on unix alone. So the API is compared with that of the latest release on each
   # platform that the clippy job builds for. WASI is left out, as cargo-semver-checks fails to
   # build for a wasm target.
-  semver-checks:
+  semver-checks-target:
+    name: semver-checks (${{ matrix.target }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -451,3 +452,15 @@ jobs:
           rust-target: ${{ matrix.target }}
           # The action keys its cache of the released API by job, and not by target.
           prefix-key: ${{ matrix.target }}
+
+  # The one check for the branch protection of `main` to require, so that the platforms above can
+  # change without the protection having to. It runs whatever came of their jobs: a job that needs
+  # a failed one is skipped otherwise, which the protection takes for a pass.
+  semver-checks:
+    if: always()
+    needs: semver-checks-target
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check that the API passed on every platform
+        run: |
+          [ "${{ needs.semver-checks-target.result }}" = success ]
