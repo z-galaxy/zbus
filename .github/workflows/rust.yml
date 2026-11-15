@@ -425,10 +425,29 @@ jobs:
       - name: Check zbus_xml documentation build
         run: cargo --locked doc --all-features -p zbus_xml
 
+  # The public API of zbus and zbus_utils differs from one platform to the next: the `autolaunch`
+  # transport is there on Windows alone, the `launchd` one on macOS alone, and the passing of file
+  # descriptors on unix alone. So the API is compared with that of the latest release on each
+  # platform that the clippy job builds for. WASI is left out, as cargo-semver-checks fails to
+  # build for a wasm target.
   semver-checks:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - x86_64-apple-darwin
+          - x86_64-unknown-freebsd
+          - x86_64-unknown-netbsd
+          - x86_64-pc-windows-gnu
+          - aarch64-linux-android
     steps:
       - name: Checkout
         uses: actions/checkout@v7
       - name: Check semver
         uses: obi1kenobi/cargo-semver-checks-action@v2
+        with:
+          rust-target: ${{ matrix.target }}
+          # The action keys its cache of the released API by job, and not by target.
+          prefix-key: ${{ matrix.target }}
