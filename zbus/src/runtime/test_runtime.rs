@@ -566,6 +566,126 @@ impl traits::Runtime for AbortingRuntime {
     }
 }
 
+/// A [`TestRuntime`] that holds the tasks of one name back until [`GatedRuntime::open`]: the
+/// reader of each connection that runs on it, so that a test can subscribe to the messages of a
+/// connection, as a stream for a match rule does, before its reader yields any, or the tasks of
+/// another name that the test gives.
+#[cfg(all(target_os = "linux", feature = "handover", feature = "p2p"))]
+#[derive(Clone, Debug)]
+pub(crate) struct GatedRuntime {
+    inner: TestRuntime,
+    /// The name of the tasks that wait at the gate.
+    held: &'static str,
+    gate: Arc<Gate>,
+}
+
+#[cfg(all(target_os = "linux", feature = "handover", feature = "p2p"))]
+impl GatedRuntime {
+    /// A runtime that holds the reader of each connection back.
+    pub(crate) fn new() -> Self {
+        Self::holding("socket reader")
+    }
+
+    /// A runtime that holds the tasks named `held` back.
+    pub(crate) fn holding(held: &'static str) -> Self {
+        Self {
+            inner: TestRuntime::new(),
+            held,
+            gate: Arc::default(),
+        }
+    }
+
+    /// Let the tasks that wait run, and those spawned from now on run at once.
+    pub(crate) fn open(&self) {
+        self.gate.open();
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "handover", feature = "p2p"))]
+impl traits::Runtime for GatedRuntime {
+    type RegisteredIoSource = Registration;
+    type Sleep = Sleep;
+    type Task<T>
+        = Task<T>
+    where
+        T: Send + 'static;
+
+    fn register_io_source(&self, source: IoSource) -> io::Result<Registration> {
+        traits::Runtime::register_io_source(&self.inner, source)
+    }
+
+    fn sleep(&self, duration: Duration) -> Sleep {
+        traits::Runtime::sleep(&self.inner, duration)
+    }
+
+    fn spawn<T>(&self, name: &str, future: impl Future<Output = T> + Send + 'static) -> Task<T>
+    where
+        T: Send + 'static,
+    {
+        let gate = (name == self.held).then(|| self.gate.clone());
+        let future = async move {
+            if let Some(gate) = gate {
+                gate.passed().await;
+            }
+
+            future.await
+        };
+
+        traits::Runtime::spawn(&self.inner, name, future)
+    }
+
+    fn connect_tcp(
+        &self,
+        address: SocketAddr,
+    ) -> impl Future<Output = io::Result<IoSource>> + Send {
+        traits::Runtime::connect_tcp(&self.inner, address)
+    }
+
+    fn connect_unix(&self, path: &Path) -> impl Future<Output = io::Result<IoSource>> + Send {
+        traits::Runtime::connect_unix(&self.inner, path)
+    }
+
+    fn spawn_process(
+        &self,
+        command: Command,
+        stdin: Stdio,
+        stdout: Stdio,
+        stderr: Stdio,
+    ) -> io::Result<BoxFuture<'static, io::Result<ExitStatus>>> {
+        traits::Runtime::spawn_process(&self.inner, command, stdin, stdout, stderr)
+    }
+}
+
+/// A gate that holds back those that wait to pass it until it is opened, as that of a
+/// [`GatedRuntime`] does the readers.
+#[cfg(all(target_os = "linux", feature = "handover", feature = "p2p"))]
+#[derive(Debug, Default)]
+pub(crate) struct Gate {
+    open: std::sync::atomic::AtomicBool,
+    opened: zruntime::Event,
+}
+
+#[cfg(all(target_os = "linux", feature = "handover", feature = "p2p"))]
+impl Gate {
+    /// Let those that wait pass, and those that come from now on pass at once.
+    pub(crate) fn open(&self) {
+        self.open.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.opened.notify(usize::MAX);
+    }
+
+    /// Wait for the gate to be open.
+    pub(crate) async fn passed(&self) {
+        loop {
+            // The listener comes first, so that an opening right after the look isn't missed.
+            let listener = self.opened.listen();
+            if self.open.load(std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            listener.await;
+        }
+    }
+}
+
 /// A registration on async-io's reactor.
 #[derive(Debug)]
 pub(crate) struct Registration(Async<IoSource>);

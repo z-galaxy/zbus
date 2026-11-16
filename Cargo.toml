@@ -119,4 +119,11 @@ zruntime = { version = "0.2.0", default-features = false }
 
 # The traits through which a connection is handed over, as a record and file descriptors, to a
 # service's next instance through systemd's file descriptor store.
-zoter = { version = "0.1.0", default-features = false }
+#
+# FIXME: Drop `git` and `rev` once zoter 0.2.0 is on crates.io: `cargo publish` ignores them, but
+# it needs that release to be out.
+[workspace.dependencies.zoter]
+version = "0.2.0"
+git = "https://github.com/z-galaxy/zoter"
+rev = "fd146b63bbdf7771e9548aceab8623ee0a102b39"
+default-features = false
