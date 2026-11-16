@@ -10,7 +10,10 @@
 //!    builds along with it, which has had every one of them, from the first.
 //! 2. Once it is time to hand the connection over, stop taking messages off that stream, if you
 //!    take them yourself, and finish what you do with those that you took. The replies and the
-//!    other messages that you send go out until the hand-over commits.
+//!    other messages that you send go out until the hand-over commits. If the methods of your
+//!    interfaces leave work to be done once they returned, such as a signal that is to follow a
+//!    reply, have it follow the response (`ResponseDispatchNotifier::followed_by`): the hand-over
+//!    then waits for it, as for the methods.
 //! 3. Call [`Connection::hand_over`], or [`MessageStream::hand_over`] on that stream, which hands
 //!    the connection over with what the stream didn't yield. It prepares the hand-over, so that no
 //!    send waits for the peer from then on, as [`Connection::prepare_hand_over`] does, which you
@@ -763,16 +766,23 @@ impl Connection {
     ///
     /// The hand-over waits for those calls, so that each is answered as at any other time: the
     /// connection reads on meanwhile, for the replies to the calls that their methods make to come
-    /// in, and the signals that their proxies wait for. It doesn't wait for what a method left to
-    /// be done once it returned, such as a task that it spawned.
+    /// in, and the signals that their proxies wait for. The work that follows a response
+    /// (`ResponseDispatchNotifier::followed_by`) is part of its call, which is under way until
+    /// that work is done, so the hand-over waits for it too.
     ///
-    /// * It waits for as long as the methods take, which is up to them, and to whoever is to answer
-    ///   the calls that they make: bound it by a timeout ([Cancellation](#cancellation)).
-    /// * It waits for ever if you await it from a method of an interface of the connection, whose
-    ///   call is under way. Have the method return first, and hand the connection over from
-    ///   elsewhere.
+    /// * It waits for as long as the methods and that work take, which is up to them, and to
+    ///   whoever is to answer the calls that they make: bound it by a timeout
+    ///   ([Cancellation](#cancellation)).
+    /// * It waits for ever if you await it from a method of an interface of the connection, or from
+    ///   the work that follows its response, whose call is under way. Have the method return first,
+    ///   and hand the connection over from elsewhere.
     /// * The method calls that come in meanwhile are left for the object server of the connection
     ///   that takes over, and nothing bounds how many they are but the time that this waits.
+    ///
+    /// The hand-over waits for nothing else that a method left to be done once it returned, such
+    /// as a task of your own that waits for the listener of a response
+    /// (`ResponseDispatchNotifier::new`): the connection sends nothing more once it is handed
+    /// over, so what such a task sends from then on fails.
     ///
     /// A stream of the connection that is full, and that nobody polls, holds all of this up, as
     /// the connection waits for room in it to queue a message there, and reads nothing
@@ -1971,7 +1981,11 @@ mod tests {
         HAD, Had, Handover, HandoverSocket, MAJOR, NAME, ReaderEnd, TCP_STREAM, UNIX_STREAM,
     };
     #[cfg(feature = "service")]
+    use crate::object_server::{ResponseDispatchNotifier, SignalEmitter};
+    #[cfg(feature = "service")]
     use crate::runtime::test_runtime::Gate;
+    #[cfg(feature = "service")]
+    use crate::runtime::traits::TaskHandle;
     use crate::{
         Address, Connection, Error, Guid, MatchRule, Message, MessageStream, Result,
         address::transport::{Transport, Unix, UnixSocket},
@@ -3666,6 +3680,156 @@ mod tests {
         });
     }
 
+    /// What a task of the service does once the listener of a response resolved is no part of the
+    /// call: a hand-over of the connection doesn't wait for it, and what it sends once the
+    /// connection is handed over fails.
+    #[cfg(feature = "service")]
+    #[test]
+    #[timeout(15000)]
+    fn work_that_waits_for_the_listener_of_a_response_is_not_waited_for() {
+        under_every_runtime(|runtime| async move {
+            let announcement = Arc::new(Announcement::default());
+            let (mut stream, peer) = serving(&runtime, Announcer(announcement.clone())).await;
+            let mut peer_stream = MessageStream::from(&peer);
+
+            let reply = peer
+                .call_method(None::<()>, PATH, Some(INTERFACE), "Announce", &())
+                .await
+                .unwrap();
+            assert_eq!(reply.body().deserialize::<&str>().unwrap(), "announcing");
+            // The task of the method is past the listener, and yet to send the signal.
+            announcement.answered.passed().await;
+            let handover = stream.hand_over().await.unwrap();
+            announcement.released.open();
+            announcement.tried.passed().await;
+
+            let sent = announcement.sent.lock().unwrap().take().unwrap();
+            assert!(
+                sent.is_err(),
+                "the signal went out of a connection handed over"
+            );
+            // The peer gets the reply, and no signal before what the connection that takes over
+            // sends it.
+            let conn = on(Builder::take_over(handover), &runtime)
+                .build()
+                .await
+                .unwrap();
+            conn.send(&signal(1)).await.unwrap();
+            let reply = peer_stream.next().await.unwrap().unwrap();
+            assert_eq!(reply.message_type(), Type::MethodReturn, "{reply:?}");
+            let next = peer_stream.next().await.unwrap().unwrap();
+            assert_eq!(members(&[next]), ["Test"]);
+        });
+    }
+
+    /// The work that follows a response is part of its call: a hand-over of the connection waits
+    /// for it, as for the method, with the calls that come in meanwhile left, and what the work
+    /// sends goes out ahead of the hand-over.
+    #[cfg(feature = "service")]
+    #[test]
+    #[timeout(15000)]
+    fn work_that_follows_a_response_is_waited_for() {
+        under_every_runtime(|runtime| async move {
+            let announcement = Arc::new(Announcement::default());
+            let (mut stream, peer) = serving(&runtime, Announcer(announcement.clone())).await;
+            let mut peer_stream = MessageStream::from(&peer);
+
+            let reply = peer
+                .call_method(None::<()>, PATH, Some(INTERFACE), "AnnounceAfter", &())
+                .await
+                .unwrap();
+            assert_eq!(reply.body().deserialize::<&str>().unwrap(), "announcing");
+            // The work is under way, and yet to send the signal.
+            announcement.answered.passed().await;
+            let mut handing_over = pin!(stream.hand_over());
+            let handed_over = futures_lite::future::poll_once(handing_over.as_mut()).await;
+            assert!(
+                handed_over.is_none(),
+                "handed over with work under way: {handed_over:?}"
+            );
+            peer.send(&echo("left")).await.unwrap();
+            announcement.released.open();
+            let handover = handing_over.await.unwrap();
+
+            let sent = announcement.sent.lock().unwrap().take().unwrap();
+            sent.unwrap();
+            // The stream yielded neither call, and the object server left the second one.
+            assert_eq!(
+                who_had(&handover),
+                [
+                    (Type::MethodCall, Had::SERVER),
+                    (Type::MethodCall, Had::NONE)
+                ]
+            );
+            // The peer gets the reply, and then the signal.
+            let reply = peer_stream.next().await.unwrap().unwrap();
+            assert_eq!(reply.message_type(), Type::MethodReturn, "{reply:?}");
+            let signal = peer_stream.next().await.unwrap().unwrap();
+            assert_eq!(members(&[signal]), ["Announced"]);
+        });
+    }
+
+    /// The work that follows a response is part of its call from when the method made the
+    /// response, before the task that does the work ever ran: a hand-over that started while the
+    /// method was running, or once the call was answered, waits for it, and doesn't stop the
+    /// connection meanwhile.
+    #[cfg(feature = "service")]
+    #[test]
+    #[timeout(15000)]
+    fn work_that_is_yet_to_start_is_waited_for() {
+        futures_lite::future::block_on(async {
+            for early in [false, true] {
+                let gated = GatedRuntime::holding("response follow-up");
+                let runtime = Runtime::from_external(gated.clone());
+                let announcement = Arc::new(Announcement::default());
+                let (mut stream, peer) = serving(&runtime, Announcer(announcement.clone())).await;
+                let conn = Connection::from(&stream);
+                let member = match early {
+                    false => "AnnounceAfter",
+                    true => "AnnounceOnceLetGo",
+                };
+                let mut calling =
+                    pin!(peer.call_method(None::<()>, PATH, Some(INTERFACE), member, &()));
+                if !early {
+                    calling.as_mut().await.unwrap();
+                }
+
+                let mut handing_over = pin!(stream.hand_over());
+                if early {
+                    // The method of the call waits to be let go, so the call is under way.
+                    let entered = pin!(announcement.entered.passed());
+                    futures_util::future::select(calling.as_mut(), entered).await;
+                    let handed_over = futures_lite::future::poll_once(handing_over.as_mut()).await;
+                    assert!(
+                        handed_over.is_none(),
+                        "handed over with a call under way: {handed_over:?}"
+                    );
+                    announcement.let_go.open();
+                    calling.await.unwrap();
+                }
+                // The call is answered, and the task of the work that follows it is yet to run.
+                for _ in 0..50 {
+                    let handed_over = futures_lite::future::poll_once(handing_over.as_mut()).await;
+                    assert!(
+                        handed_over.is_none(),
+                        "handed over with work yet to start, early: {early}: {handed_over:?}"
+                    );
+                    assert!(
+                        !conn.inner.socket_status.stop.asked(),
+                        "the connection was stopped with work yet to start, early: {early}"
+                    );
+                    thread::sleep(Duration::from_millis(1));
+                }
+                gated.open();
+                announcement.released.open();
+                let _handover = handing_over.await.unwrap();
+
+                let sent = announcement.sent.lock().unwrap().take().unwrap();
+                sent.unwrap();
+            }
+        });
+    }
+
     /// The streams of a connection that is handed over through none of them, one for a match rule
     /// among them, as the stream of a proxy is, yield what the connection read, then end, with no
     /// error before their end, and a call that waits for its reply fails. The hand-over holds none
@@ -5144,6 +5308,90 @@ mod tests {
 
             "waited".to_string()
         }
+    }
+
+    /// An interface whose method sends a signal once its reply was sent, and the test released
+    /// it.
+    #[cfg(all(unix, feature = "service"))]
+    struct Announcer(Arc<Announcement>);
+
+    /// What a test knows of the signal that follows a reply of an [`Announcer`].
+    #[cfg(all(unix, feature = "service"))]
+    #[derive(Default)]
+    struct Announcement {
+        /// Open once the method that waits to be let go started.
+        entered: Gate,
+        /// What that method waits for.
+        let_go: Gate,
+        /// Open once the reply was sent.
+        answered: Gate,
+        /// What the signal waits for.
+        released: Gate,
+        /// Open once the signal was sent, or failed to be.
+        tried: Gate,
+        /// How sending the signal went.
+        sent: std::sync::Mutex<Option<Result<()>>>,
+    }
+
+    #[cfg(all(unix, feature = "service"))]
+    impl Announcement {
+        /// What follows the reply: the signal, once the test released it.
+        async fn follow_up(self: Arc<Self>, emitter: SignalEmitter<'static>) {
+            self.answered.open();
+            self.released.passed().await;
+            let sent = Announcer::announced(&emitter).await;
+            *self.sent.lock().unwrap() = Some(sent);
+            self.tried.open();
+        }
+    }
+
+    #[cfg(all(unix, feature = "service"))]
+    #[crate::interface(name = "org.zbus.Test")]
+    impl Announcer {
+        /// Answers, and sends the signal from a task that waits for the listener of the response.
+        fn announce(
+            &self,
+            #[zbus(connection)] conn: &Connection,
+            #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        ) -> ResponseDispatchNotifier<String> {
+            let (response, listener) = ResponseDispatchNotifier::new("announcing".to_string());
+            let follow_up = self.0.clone().follow_up(emitter.to_owned());
+            conn.spawn("announce", async move {
+                listener.await;
+                follow_up.await;
+            })
+            .detach();
+
+            response
+        }
+
+        /// Answers, and sends the signal as the work that follows the response.
+        fn announce_after(
+            &self,
+            #[zbus(connection)] conn: &Connection,
+            #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        ) -> ResponseDispatchNotifier<String> {
+            let follow_up = self.0.clone().follow_up(emitter.to_owned());
+
+            ResponseDispatchNotifier::followed_by("announcing".to_string(), conn, follow_up)
+        }
+
+        /// Tells that it started, and waits to be let go before it answers, with the signal as
+        /// the work that follows the response.
+        async fn announce_once_let_go(
+            &self,
+            #[zbus(connection)] conn: &Connection,
+            #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        ) -> ResponseDispatchNotifier<String> {
+            self.0.entered.open();
+            self.0.let_go.passed().await;
+            let follow_up = self.0.clone().follow_up(emitter.to_owned());
+
+            ResponseDispatchNotifier::followed_by("announcing".to_string(), conn, follow_up)
+        }
+
+        #[zbus(signal)]
+        async fn announced(emitter: &SignalEmitter<'_>) -> Result<()>;
     }
 
     /// Defines an interface that answers a call with what it was given, or with what the peer of

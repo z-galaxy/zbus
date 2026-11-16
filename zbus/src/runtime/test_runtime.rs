@@ -566,26 +566,36 @@ impl traits::Runtime for AbortingRuntime {
     }
 }
 
-/// A [`TestRuntime`] that holds the reader of each connection that runs on it back until
-/// [`GatedRuntime::open`], so that a test can subscribe to the messages of a connection, as a
-/// stream for a match rule does, before its reader yields any.
+/// A [`TestRuntime`] that holds the tasks of one name back until [`GatedRuntime::open`]: the
+/// reader of each connection that runs on it, so that a test can subscribe to the messages of a
+/// connection, as a stream for a match rule does, before its reader yields any, or the tasks of
+/// another name that the test gives.
 #[cfg(all(target_os = "linux", feature = "handover", feature = "p2p"))]
 #[derive(Clone, Debug)]
 pub(crate) struct GatedRuntime {
     inner: TestRuntime,
+    /// The name of the tasks that wait at the gate.
+    held: &'static str,
     gate: Arc<Gate>,
 }
 
 #[cfg(all(target_os = "linux", feature = "handover", feature = "p2p"))]
 impl GatedRuntime {
+    /// A runtime that holds the reader of each connection back.
     pub(crate) fn new() -> Self {
+        Self::holding("socket reader")
+    }
+
+    /// A runtime that holds the tasks named `held` back.
+    pub(crate) fn holding(held: &'static str) -> Self {
         Self {
             inner: TestRuntime::new(),
+            held,
             gate: Arc::default(),
         }
     }
 
-    /// Let the readers that wait run, and those spawned from now on run at once.
+    /// Let the tasks that wait run, and those spawned from now on run at once.
     pub(crate) fn open(&self) {
         self.gate.open();
     }
@@ -612,7 +622,7 @@ impl traits::Runtime for GatedRuntime {
     where
         T: Send + 'static,
     {
-        let gate = (name == "socket reader").then(|| self.gate.clone());
+        let gate = (name == self.held).then(|| self.gate.clone());
         let future = async move {
             if let Some(gate) = gate {
                 gate.passed().await;

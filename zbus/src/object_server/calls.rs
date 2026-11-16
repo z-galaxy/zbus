@@ -104,6 +104,19 @@ impl Calls {
         }
     }
 
+    /// Count the work that a method leaves to be done once its call is answered as a call of its
+    /// own, under way until what this gives is dropped, so that those that wait for the calls
+    /// under way wait for the work too.
+    ///
+    /// The method takes this while its own call is under way, so that the object server never
+    /// looks idle between the two. An object server that takes no more calls goes on with those
+    /// that it has under way, so this counts then too.
+    pub(crate) fn follow_up(self: &Arc<Self>) -> UnderWay {
+        self.under_way.fetch_add(CALL, Ordering::AcqRel);
+
+        UnderWay(self.clone())
+    }
+
     /// Have the object server take no more calls, for good, as the connection is to be handed
     /// over: it leaves each one that it gets from now on for the object server of the connection
     /// that takes over, and goes on with those that it has under way.

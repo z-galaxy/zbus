@@ -21,7 +21,7 @@ use crate::ObjectServer;
 #[cfg(feature = "service")]
 use crate::log::debug;
 #[cfg(all(target_os = "linux", feature = "handover", feature = "service"))]
-use crate::object_server::Calls;
+use crate::object_server::{Calls, UnderWay};
 #[cfg(all(target_os = "linux", feature = "handover"))]
 use crate::runtime::IoSource;
 use crate::{
@@ -1188,6 +1188,13 @@ impl Connection {
     #[cfg(all(target_os = "linux", feature = "handover", feature = "service"))]
     pub(crate) fn calls(&self) -> &Arc<Calls> {
         &self.inner.calls
+    }
+
+    /// Have the method calls under way include the work that a method leaves to be done once
+    /// its call is answered, until what this gives is dropped.
+    #[cfg(all(target_os = "linux", feature = "handover", feature = "service"))]
+    pub(crate) fn follow_up(&self) -> UnderWay {
+        self.calls().follow_up()
     }
 
     #[cfg(feature = "service")]
