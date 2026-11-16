@@ -282,11 +282,11 @@ impl_type_with_repr! {
 
 #[cfg(feature = "jiff")]
 impl_type_with_repr! {
-    jiff::Zoned => &str {
-        jiff_zoned {
+    jiff::ZonedDateTime => &str {
+        jiff_zoned_datetime {
             samples = [
-                jiff::Zoned::UNIX_EPOCH,
-                jiff::Zoned::UNIX_EPOCH.with_time_zone(
+                jiff::ZonedDateTime::UNIX_EPOCH,
+                jiff::ZonedDateTime::UNIX_EPOCH.with_time_zone(
                     jiff::tz::TimeZone::fixed(jiff::tz::Offset::constant(2))
                 )
             ],

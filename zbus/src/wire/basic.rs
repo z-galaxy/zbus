@@ -385,7 +385,7 @@ impl_basic_with_repr!(
     jiff::Span => str,
     jiff::SignedDuration => str,
     jiff::Timestamp => str,
-    jiff::Zoned => str,
+    jiff::ZonedDateTime => str,
 );
 
 #[cfg(test)]
@@ -443,7 +443,7 @@ mod tests {
     #[cfg(feature = "jiff")]
     assert_impl_all!(jiff::Timestamp: Basic);
     #[cfg(feature = "jiff")]
-    assert_impl_all!(jiff::Zoned: Basic);
+    assert_impl_all!(jiff::ZonedDateTime: Basic);
 
     #[cfg(feature = "comms")]
     assert_impl_all!(crate::fdo::RequestNameFlags: Basic);
