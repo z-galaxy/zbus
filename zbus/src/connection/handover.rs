@@ -128,7 +128,7 @@
 //!
 //!     let handover = stream.hand_over().await?;
 //!     let mut record = vec![0; handover.saved_len().ok_or(Error::Unsupported)?];
-//!     handover.save(&mut record).map_err(std::io::Error::from)?;
+//!     handover.save(&mut record)?;
 //!     // Pass `record` and the descriptors on, such as to the file descriptor store of systemd,
 //!     // which keeps descriptors of its own, as an item that `zoter::Store::hand_over` stores, and
 //!     // get them back, such as in the next instance of the service. Duplicates stand for that
@@ -555,7 +555,7 @@ impl zoter::Restore for Handover {
 ///     let channel = ChannelHandover::new(first.hand_over().await?, second.hand_over().await?)?;
 ///     let (record, fds) = {
 ///         let mut record = vec![0; channel.saved_len().expect("it has a record")];
-///         channel.save(&mut record).map_err(std::io::Error::from)?;
+///         channel.save(&mut record)?;
 ///         // Pass `record` and the descriptors on, such as to the file descriptor store of
 ///         // systemd, and get them back, such as in the next instance of the program. Duplicates
 ///         // stand for that here.
