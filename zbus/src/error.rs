@@ -111,6 +111,12 @@ pub enum Error {
         /// The address that could not be connected to.
         Box<Address>,
     ),
+    /// An error from zoter while handing a connection over to another process, such as a
+    /// restarted service instance.
+    ///
+    /// This variant is only available on Linux, with the `handover` feature.
+    #[cfg(all(target_os = "linux", feature = "handover"))]
+    Handover(Arc<zoter::Error>),
 }
 
 // The wire (de)serializers return this type by value out of deeply recursive calls, so its size
@@ -159,8 +165,9 @@ impl PartialEq for Error {
             (Self::InterfaceExists(s1, s2), Self::InterfaceExists(o1, o2)) => s1 == o1 && s2 == o2,
             #[cfg(feature = "comms")]
             (Self::Connection(_, a1), Self::Connection(_, a2)) => a1 == a2,
-            // `InputOutput` and `MissingParameter` deliberately fall through: two I/O errors are
-            // never considered equal and the parameter name is not a discriminator.
+            // `InputOutput`, `Handover` and `MissingParameter` deliberately fall through. Two I/O
+            // errors are never considered equal, and a zoter error may wrap one. The parameter
+            // name is not a discriminator.
             (_, _) => false,
         }
     }
@@ -206,6 +213,8 @@ impl error::Error for Error {
             Error::MissingParameter(_) => None,
             Error::InvalidSerial => None,
             Error::InterfaceExists(_, _) => None,
+            #[cfg(all(target_os = "linux", feature = "handover"))]
+            Error::Handover(e) => Some(&**e),
         }
     }
 }
@@ -266,6 +275,8 @@ impl fmt::Display for Error {
             Error::InterfaceExists(i, p) => write!(f, "Interface `{i}` already exists at `{p}`"),
             #[cfg(feature = "comms")]
             Error::Connection(e, addr) => write!(f, "failed to connect to `{addr}`: {e}"),
+            #[cfg(all(target_os = "linux", feature = "handover"))]
+            Error::Handover(e) => write!(f, "{e}"),
         }
     }
 }
@@ -325,6 +336,8 @@ impl Error {
             Error::InterfaceExists(_, _) => Some("interface already exists"),
             #[cfg(feature = "comms")]
             Error::Connection(_, _) => Some("could not connect to specified address"),
+            #[cfg(all(target_os = "linux", feature = "handover"))]
+            Error::Handover(_) => Some("hand-over error"),
         }
     }
 }
@@ -352,6 +365,20 @@ impl ser::Error for Error {
 impl From<io::Error> for Error {
     fn from(val: io::Error) -> Self {
         Error::InputOutput(Arc::new(val))
+    }
+}
+
+/// Convert any zoter error into [`Error::Handover`], including [`zoter::Error::Io`].
+///
+/// With this conversion, `?` works on zoter's results, such as the result of
+/// [`zoter::Save::save`], in a function that returns a [`Result`]. A caller can then match on the
+/// variants of [`zoter::Error`] to tell what failed.
+///
+/// This conversion is only available on Linux, with the `handover` feature.
+#[cfg(all(target_os = "linux", feature = "handover"))]
+impl From<zoter::Error> for Error {
+    fn from(e: zoter::Error) -> Self {
+        Error::Handover(Arc::new(e))
     }
 }
 
@@ -480,6 +507,35 @@ mod tests {
         };
         assert_eq!(name.as_str(), "org.example.Error.Oops");
         assert_eq!(detail.as_deref(), Some("oops"));
+    }
+
+    /// A zoter error converts into `Error::Handover` unchanged, including a zoter I/O error. The
+    /// result shows the zoter error's message, and returns the zoter error as its source.
+    #[cfg(all(target_os = "linux", feature = "handover"))]
+    #[test]
+    fn from_zoter_error() {
+        use std::{error::Error as _, io};
+
+        let error = Error::from(zoter::Error::NoStore);
+        let Error::Handover(handover) = &error else {
+            panic!("expected `Error::Handover`, got {error:?}");
+        };
+        assert!(matches!(**handover, zoter::Error::NoStore));
+        assert_eq!(error.to_string(), zoter::Error::NoStore.to_string());
+        let source = error
+            .source()
+            .and_then(|e| e.downcast_ref::<zoter::Error>());
+        assert!(matches!(source, Some(zoter::Error::NoStore)), "{source:?}");
+
+        let broken_pipe = io::Error::from(io::ErrorKind::BrokenPipe);
+        let error = Error::from(zoter::Error::from(broken_pipe));
+        let Error::Handover(handover) = &error else {
+            panic!("expected `Error::Handover`, got {error:?}");
+        };
+        assert!(
+            matches!(&**handover, zoter::Error::Io(e) if e.kind() == io::ErrorKind::BrokenPipe),
+            "{handover:?}"
+        );
     }
 
     fn error_reply<B>(name: &str, body: &B) -> Error

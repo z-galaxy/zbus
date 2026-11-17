@@ -2230,7 +2230,7 @@ checksum = "e6d6085d62852e35540689d1f97ad663e3971fc19cf5eceab364d62c646ea167"
 [[package]]
 name = "zoter"
 version = "0.2.0"
-source = "git+https://github.com/z-galaxy/zoter?rev=fd146b63bbdf7771e9548aceab8623ee0a102b39#fd146b63bbdf7771e9548aceab8623ee0a102b39"
+source = "git+https://github.com/z-galaxy/zoter?rev=4a89183d62ed13ae3278e38c0565de6b98122707#4a89183d62ed13ae3278e38c0565de6b98122707"
 dependencies = [
  "rustix",
 ]

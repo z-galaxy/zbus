@@ -130,8 +130,9 @@
 //!     let mut record = vec![0; handover.saved_len().ok_or(Error::Unsupported)?];
 //!     handover.save(&mut record)?;
 //!     // Pass `record` and the descriptors on, such as to the file descriptor store of systemd,
-//!     // which keeps descriptors of its own, as an item of a `zoter::Handover`, and get them back,
-//!     // such as in the next instance of the service. Duplicates stand for that here.
+//!     // which keeps descriptors of its own, as an item that `zoter::Store::hand_over` stores, and
+//!     // get them back, such as in the next instance of the service. Duplicates stand for that
+//!     // here.
 //!     let fds = handover
 //!         .fds()
 //!         .iter()
@@ -338,15 +339,16 @@ impl zoter::Save for Handover {
     ///
     /// # Errors
     ///
-    /// Nothing is written on an error, which is one of:
+    /// Nothing is written on an error. The error is one of:
     ///
-    /// * [`io::ErrorKind::Unsupported`] for the hand-over of a connection over a socket of your
-    ///   own, whose `saved_len` is `None`.
-    /// * [`io::ErrorKind::InvalidInput`] for a `dest` that is not `saved_len` bytes long, or for a
-    ///   hand-over with more messages or file descriptors than a record can count (4 billion).
+    /// * [`zoter::Error::Io`] of kind [`io::ErrorKind::Unsupported`] if the connection runs over a
+    ///   socket of your own. Such a hand-over can't be saved, and its `saved_len` is `None`.
+    /// * [`zoter::Error::Io`] of kind [`io::ErrorKind::InvalidInput`] if `dest` is not `saved_len`
+    ///   bytes long, or if the hand-over has more messages or file descriptors than a record can
+    ///   count (4 billion).
     ///
     /// [`Save::saved_len`]: zoter::Save::saved_len
-    fn save(&self, dest: &mut [u8]) -> io::Result<()> {
+    fn save(&self, dest: &mut [u8]) -> zoter::Result<()> {
         let kind = match &self.socket {
             HandoverSocket::UnixStream(_) => UNIX_STREAM,
             HandoverSocket::TcpStream(_) => TCP_STREAM,
@@ -356,12 +358,13 @@ impl zoter::Save for Handover {
                 return Err(io::Error::new(
                     io::ErrorKind::Unsupported,
                     "the hand-over of a connection over a socket of your own has no record",
-                ));
+                )
+                .into());
             }
         };
         let layout = self.layout();
         if dest.len() != layout.len {
-            return Err(invalid_input("the memory is not as long as the record"));
+            return Err(invalid_input("the memory is not as long as the record").into());
         }
         let kept = &self.unwritten.kept;
         let held = self.held();
@@ -662,16 +665,16 @@ impl zoter::Save for ChannelHandover {
     ///
     /// # Errors
     ///
-    /// Nothing is written on an error, which is [`io::ErrorKind::InvalidInput`] for a `dest` that
-    /// is not `saved_len` bytes long, or for a hand-over with more messages or file descriptors
-    /// than a record can count (4 billion).
+    /// Nothing is written on an error. The error is [`zoter::Error::Io`] of kind
+    /// [`io::ErrorKind::InvalidInput`] if `dest` is not `saved_len` bytes long, or if a hand-over
+    /// has more messages or file descriptors than a record can count (4 billion).
     ///
     /// [`Save::save`]: zoter::Save::save
     /// [`Save::saved_len`]: zoter::Save::saved_len
-    fn save(&self, dest: &mut [u8]) -> io::Result<()> {
+    fn save(&self, dest: &mut [u8]) -> zoter::Result<()> {
         let (first, second) = (self.first.layout().len, self.second.layout().len);
         if dest.len() != CHANNEL_HEADER + first + second {
-            return Err(invalid_input("the memory is not as long as the record"));
+            return Err(invalid_input("the memory is not as long as the record").into());
         }
         // The first count is that of all the file descriptors of a hand-over that is off its
         // channel, as it has no socket.
@@ -5294,7 +5297,7 @@ mod tests {
 
             let saved = handover.save(&mut memory);
 
-            let Err(e) = &saved else {
+            let Err(zoter::Error::Io(e)) = &saved else {
                 panic!("a record was saved into {len} bytes: {saved:?}");
             };
             assert_eq!(e.kind(), ErrorKind::InvalidInput, "{e}");
@@ -5315,7 +5318,7 @@ mod tests {
 
         let saved = handover.save(&mut []);
 
-        let Err(e) = saved else {
+        let Err(zoter::Error::Io(e)) = saved else {
             panic!("a record of a socket of your own was saved");
         };
         assert_eq!(e.kind(), ErrorKind::Unsupported, "{e}");

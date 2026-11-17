@@ -125,5 +125,5 @@ zruntime = { version = "0.2.0", default-features = false }
 [workspace.dependencies.zoter]
 version = "0.2.0"
 git = "https://github.com/z-galaxy/zoter"
-rev = "fd146b63bbdf7771e9548aceab8623ee0a102b39"
+rev = "4a89183d62ed13ae3278e38c0565de6b98122707"
 default-features = false
