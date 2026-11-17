@@ -1,9 +1,9 @@
 //! D-Bus Message.
-use std::{fmt, ops::Range, sync::Arc};
+use std::{fmt, num::NonZeroU32, ops::Range, sync::Arc};
 
 use crate::{
     Error, ObjectPath, Result,
-    names::{ErrorName, InterfaceName, MemberName},
+    names::{BusName, ErrorName, InterfaceName, MemberName},
     utils::padding_for_8_bytes,
     wire::{Endian, serialized},
 };
@@ -134,6 +134,53 @@ impl Message {
     {
         Builder::new(Type::Error)
             .reply_to(reply_to)
+            .error_name(name)
+    }
+
+    /// Build an error reply from the caller and call serial when the original call header is
+    /// unavailable.
+    ///
+    /// This creates a builder for a message of type [`Type::Error`]. The reply goes to `caller`,
+    /// and answers the method call that has the serial number `serial`. A bus that keeps only a
+    /// record of each call, and not the call itself, is one sender that needs this.
+    ///
+    /// [`Message::error`] takes the caller, the serial and the endianness from the header of the
+    /// call. This function can't know the endianness of the call, so the message uses the native
+    /// one unless [`Builder::endian`] sets another.
+    ///
+    /// An invalid caller name or error name is reported by [`Builder::build`].
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use std::num::NonZeroU32;
+    /// use zbus::message::Message;
+    ///
+    /// let serial = NonZeroU32::new(7).unwrap();
+    /// let error = Message::error_for_serial(":1.42", serial, "org.zbus.Error.Failed")
+    ///     .build(&("kaboom!",))
+    ///     .unwrap();
+    /// let header = error.header();
+    ///
+    /// assert_eq!(header.reply_serial(), Some(serial));
+    /// assert_eq!(header.destination().unwrap().as_str(), ":1.42");
+    /// assert_eq!(header.error_name().unwrap().as_str(), "org.zbus.Error.Failed");
+    /// ```
+    #[must_use]
+    pub fn error_for_serial<'b, 'c: 'b, 'e: 'b, C, E>(
+        caller: C,
+        serial: NonZeroU32,
+        name: E,
+    ) -> Builder<'b>
+    where
+        C: TryInto<BusName<'c>>,
+        E: TryInto<ErrorName<'e>>,
+        C::Error: Into<Error>,
+        E::Error: Into<Error>,
+    {
+        Builder::new(Type::Error)
+            .destination(caller)
+            .reply_serial(Some(serial))
             .error_name(name)
     }
 
@@ -521,6 +568,7 @@ mod tests {
     #[cfg(unix)]
     use crate::Fd;
     use crate::Signature;
+    use std::num::NonZeroU32;
     #[cfg(unix)]
     use std::os::fd::{AsFd, AsRawFd};
     use test_log::test;
@@ -567,6 +615,40 @@ mod tests {
             .build(&("kaboom!", 32))
             .unwrap();
         assert_eq!(e.to_string(), "Error org.freedesktop.zbus.Error: kaboom!");
+    }
+
+    #[test]
+    fn error_for_serial() {
+        let call = Message::method_call("/", "do")
+            .sender(":1.72")
+            .serial(NonZeroU32::new(5).unwrap())
+            .build(&())
+            .unwrap();
+        let name = "org.freedesktop.zbus.Error";
+        let from_header = Message::error(&call.header(), name)
+            .build(&("kaboom!", 32))
+            .unwrap();
+        let sender = call.header().sender().unwrap().clone();
+        let serial = call.header().primary().serial_num();
+
+        let from_serial = Message::error_for_serial(sender, serial, name)
+            .build(&("kaboom!", 32))
+            .unwrap();
+
+        let (expected, got) = (from_header.header(), from_serial.header());
+        assert_eq!(got.message_type(), Type::Error);
+        assert_eq!(got.destination(), expected.destination());
+        assert_eq!(got.reply_serial(), Some(serial));
+        assert_eq!(got.reply_serial(), expected.reply_serial());
+        assert_eq!(got.error_name(), expected.error_name());
+        assert_eq!(
+            from_serial.body().deserialize::<(String, i32)>().unwrap(),
+            from_header.body().deserialize::<(String, i32)>().unwrap(),
+        );
+        assert_eq!(
+            from_serial.body().signature(),
+            from_header.body().signature()
+        );
     }
 
     #[cfg(feature = "bus-impl")]
