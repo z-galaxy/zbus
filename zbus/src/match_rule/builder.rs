@@ -810,6 +810,46 @@ mod tests {
     }
 
     #[test]
+    fn rule_deserializes_from_a_rule_string() {
+        use crate::wire::{LE, serialized::Context, to_bytes};
+        use serde::{
+            Deserialize,
+            de::value::{self, BorrowedBytesDeserializer},
+        };
+        use serde_json::Value;
+
+        let rule = r"type='signal',member='Changed',arg0='it'\''s'";
+        let expected = MatchRule::try_from(rule).unwrap();
+
+        // Borrowed from the message.
+        let ctxt = Context::new(LE, 0);
+        let encoded = to_bytes(ctxt, &rule).unwrap();
+        let parsed: MatchRule<'_> = encoded.deserialize().unwrap().0;
+        assert_eq!(parsed, expected);
+        let member = parsed.member().unwrap();
+        assert!(encoded.bytes().as_ptr_range().contains(&member.as_ptr()));
+
+        // Lent as bytes.
+        let de = BorrowedBytesDeserializer::<value::Error>::new(rule.as_bytes());
+        assert_eq!(MatchRule::deserialize(de).unwrap(), expected);
+        // Handed over owned.
+        assert_eq!(MatchRule::deserialize(Value::from(rule)).unwrap(), expected);
+        // Only shown, as a reader can't lend it.
+        let json = serde_json::to_string(rule).unwrap();
+        let mut de = serde_json::Deserializer::from_reader(json.as_bytes());
+        assert_eq!(MatchRule::deserialize(&mut de).unwrap(), expected);
+
+        let encoded = to_bytes(ctxt, &"type='bogus'").unwrap();
+        encoded.deserialize::<MatchRule<'_>>().unwrap_err();
+        MatchRule::deserialize(Value::from("type='bogus'")).unwrap_err();
+
+        // RON tells the plain string that `MatchRule` serializes as from a newtype struct, and
+        // escapes the apostrophes in it, so it's not lent.
+        let ron = ron::to_string(&expected).unwrap();
+        assert_eq!(ron::from_str::<MatchRule<'_>>(&ron).unwrap(), expected);
+    }
+
+    #[test]
     fn owned_rule_deserializes_from_a_rule_string() {
         use crate::wire::{LE, serialized::Context, to_bytes};
 
