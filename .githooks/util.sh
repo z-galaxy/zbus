@@ -31,7 +31,7 @@ else
     }
 
     function hook_info {
-        echo "{$1}"
+        echo "${1}"
     }
 
     function hook_success {
