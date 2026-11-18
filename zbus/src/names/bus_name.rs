@@ -527,9 +527,7 @@ impl<'de> Deserialize<'de> for OwnedBusName {
     where
         D: de::Deserializer<'de>,
     {
-        String::deserialize(deserializer)
-            .and_then(|n| BusName::try_from(n).map_err(|e| de::Error::custom(e.to_string())))
-            .map(Self)
+        BusName::deserialize(deserializer).map(Self::from)
     }
 }
 
@@ -571,6 +569,7 @@ mod tests {
 
         let encoded = to_bytes(ctxt, &"not a bus name").unwrap();
         encoded.deserialize::<BusName<'_>>().unwrap_err();
+        encoded.deserialize::<OwnedBusName>().unwrap_err();
     }
 
     #[test]
@@ -579,9 +578,15 @@ mod tests {
 
         for s in [":1.23", "org.freedesktop.DBus"] {
             assert_eq!(BusName::deserialize(Value::from(s)).unwrap(), s);
+            assert_eq!(OwnedBusName::deserialize(Value::from(s)).unwrap(), s);
+            // A reader can't lend the string (#287).
+            let json = format!("{s:?}");
+            let name: OwnedBusName = serde_json::from_reader(json.as_bytes()).unwrap();
+            assert_eq!(name, s);
         }
 
         BusName::deserialize(Value::from("not a bus name")).unwrap_err();
+        OwnedBusName::deserialize(Value::from("not a bus name")).unwrap_err();
     }
 
     #[test]

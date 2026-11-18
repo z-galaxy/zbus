@@ -219,9 +219,7 @@ impl<'de> Deserialize<'de> for OwnedGuid {
     where
         D: de::Deserializer<'de>,
     {
-        String::deserialize(deserializer)
-            .and_then(|n| Guid::try_from(n).map_err(|e| de::Error::custom(e.to_string())))
-            .map(Self)
+        Guid::deserialize(deserializer).map(Self::from)
     }
 }
 
@@ -271,7 +269,10 @@ mod tests {
 
     #[test]
     fn deserialize_borrows_from_message() {
-        use crate::wire::{LE, serialized::Context, to_bytes};
+        use crate::{
+            OwnedGuid,
+            wire::{LE, serialized::Context, to_bytes},
+        };
 
         let ctxt = Context::new(LE, 0);
         let valid = "0123456789ABCDEF0123456789ABCDEF";
@@ -282,10 +283,12 @@ mod tests {
 
         let encoded = to_bytes(ctxt, &"not a GUID").unwrap();
         encoded.deserialize::<Guid<'_>>().unwrap_err();
+        encoded.deserialize::<OwnedGuid>().unwrap_err();
     }
 
     #[test]
     fn deserialize_takes_owned_string() {
+        use crate::OwnedGuid;
         use serde::Deserialize;
         use serde_json::Value;
 
@@ -294,8 +297,14 @@ mod tests {
             Guid::deserialize(Value::from(valid)).unwrap().as_str(),
             valid
         );
+        assert_eq!(OwnedGuid::deserialize(Value::from(valid)).unwrap(), valid);
+        // A reader can't lend the string (#287).
+        let json = format!("{valid:?}");
+        let guid: OwnedGuid = serde_json::from_reader(json.as_bytes()).unwrap();
+        assert_eq!(guid, valid);
 
         Guid::deserialize(Value::from("not a GUID")).unwrap_err();
+        OwnedGuid::deserialize(Value::from("not a GUID")).unwrap_err();
     }
 
     #[test]

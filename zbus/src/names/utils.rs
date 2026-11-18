@@ -377,11 +377,7 @@ macro_rules! define_name_type_impls {
             where
                 D: serde::de::Deserializer<'de>,
             {
-                String::deserialize(deserializer)
-                    .and_then(|n| {
-                        $name::try_from(n).map_err(|e| serde::de::Error::custom(e.to_string()))
-                    })
-                    .map(Self)
+                <$name<'de>>::deserialize(deserializer).map(Self::from)
             }
         }
 

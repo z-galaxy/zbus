@@ -311,9 +311,7 @@ impl<'de> Deserialize<'de> for OwnedObjectPath {
     where
         D: Deserializer<'de>,
     {
-        String::deserialize(deserializer)
-            .and_then(|s| ObjectPath::try_from(s).map_err(|e| de::Error::custom(e.to_string())))
-            .map(Self)
+        ObjectPath::deserialize(deserializer).map(Self::from)
     }
 }
 
@@ -346,6 +344,7 @@ mod unit {
 
         let encoded = to_bytes(ctxt, &"not a path").unwrap();
         encoded.deserialize::<ObjectPath<'_>>().unwrap_err();
+        encoded.deserialize::<OwnedObjectPath>().unwrap_err();
     }
 
     #[test]
@@ -363,7 +362,10 @@ mod unit {
 
         let path = ObjectPath::deserialize(Value::from("/org/example")).unwrap();
         assert_eq!(path, "/org/example");
+        let path = OwnedObjectPath::deserialize(Value::from("/org/example")).unwrap();
+        assert_eq!(path.as_str(), "/org/example");
 
         ObjectPath::deserialize(Value::from("not a path")).unwrap_err();
+        OwnedObjectPath::deserialize(Value::from("not a path")).unwrap_err();
     }
 }

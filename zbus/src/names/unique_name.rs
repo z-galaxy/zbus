@@ -146,6 +146,7 @@ mod tests {
 
         let encoded = to_bytes(ctxt, &"not a unique name").unwrap();
         encoded.deserialize::<UniqueName<'_>>().unwrap_err();
+        encoded.deserialize::<OwnedUniqueName>().unwrap_err();
     }
 
     #[test]
@@ -155,8 +156,14 @@ mod tests {
 
         let name = UniqueName::deserialize(Value::from(":1.23")).unwrap();
         assert_eq!(name, ":1.23");
+        let name = OwnedUniqueName::deserialize(Value::from(":1.23")).unwrap();
+        assert_eq!(name, ":1.23");
+        // A reader can't lend the string (#287).
+        let name: OwnedUniqueName = serde_json::from_reader(br#"":1.23""#.as_slice()).unwrap();
+        assert_eq!(name, ":1.23");
 
         UniqueName::deserialize(Value::from("not a unique name")).unwrap_err();
+        OwnedUniqueName::deserialize(Value::from("not a unique name")).unwrap_err();
     }
 
     #[test]
