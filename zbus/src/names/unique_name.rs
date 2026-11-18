@@ -135,6 +135,39 @@ mod tests {
     }
 
     #[test]
+    fn deserialize_borrows_from_message() {
+        use crate::wire::{LE, serialized::Context, to_bytes};
+
+        let ctxt = Context::new(LE, 0);
+        let encoded = to_bytes(ctxt, &":1.23").unwrap();
+        let name: UniqueName<'_> = encoded.deserialize().unwrap().0;
+        assert_eq!(name, ":1.23");
+        assert!(encoded.bytes().as_ptr_range().contains(&name.as_ptr()));
+
+        let encoded = to_bytes(ctxt, &"not a unique name").unwrap();
+        encoded.deserialize::<UniqueName<'_>>().unwrap_err();
+    }
+
+    #[test]
+    fn deserialize_takes_owned_string() {
+        use serde::Deserialize;
+        use serde_json::Value;
+
+        let name = UniqueName::deserialize(Value::from(":1.23")).unwrap();
+        assert_eq!(name, ":1.23");
+
+        UniqueName::deserialize(Value::from("not a unique name")).unwrap_err();
+    }
+
+    #[test]
+    fn deserialize_plain_string_in_ron() {
+        // RON tells a plain string from a newtype struct.
+        let name: UniqueName<'_> = ron::from_str(r#"":1.23""#).unwrap();
+        assert_eq!(name, ":1.23");
+        ron::from_str::<UniqueName<'_>>(r#""not a unique name""#).unwrap_err();
+    }
+
+    #[test]
     fn value_conversion_round_trips_valid_name() {
         let name = UniqueName::try_from(":1.23").unwrap();
         let value = Variant::from(name.clone());

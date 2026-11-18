@@ -189,7 +189,7 @@ impl<'de: 'name, 'name> Deserialize<'de> for BusName<'name> {
     where
         D: serde::Deserializer<'de>,
     {
-        let name = <Cow<'name, str>>::deserialize(deserializer)?;
+        let name = Str::deserialize(deserializer)?;
 
         Self::try_from(name).map_err(|e| de::Error::custom(e.to_string()))
     }
@@ -550,5 +550,47 @@ impl NoneValue for OwnedBusName {
 
     fn null_value() -> Self::NoneType {
         String::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deserialize_borrows_from_message() {
+        use crate::wire::{LE, serialized::Context, to_bytes};
+
+        let ctxt = Context::new(LE, 0);
+        for s in [":1.23", "org.freedesktop.DBus"] {
+            let encoded = to_bytes(ctxt, &s).unwrap();
+            let name: BusName<'_> = encoded.deserialize().unwrap().0;
+            assert_eq!(name, s);
+            assert!(encoded.bytes().as_ptr_range().contains(&name.as_ptr()));
+        }
+
+        let encoded = to_bytes(ctxt, &"not a bus name").unwrap();
+        encoded.deserialize::<BusName<'_>>().unwrap_err();
+    }
+
+    #[test]
+    fn deserialize_takes_owned_string() {
+        use serde_json::Value;
+
+        for s in [":1.23", "org.freedesktop.DBus"] {
+            assert_eq!(BusName::deserialize(Value::from(s)).unwrap(), s);
+        }
+
+        BusName::deserialize(Value::from("not a bus name")).unwrap_err();
+    }
+
+    #[test]
+    fn deserialize_plain_string_in_ron() {
+        // RON tells a plain string from a newtype struct.
+        for s in [":1.23", "org.freedesktop.DBus"] {
+            let ron = format!("{s:?}");
+            let name: BusName<'_> = ron::from_str(&ron).unwrap();
+            assert_eq!(name, s);
+        }
     }
 }

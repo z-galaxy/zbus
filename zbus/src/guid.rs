@@ -116,8 +116,7 @@ impl<'de> Deserialize<'de> for Guid<'de> {
     where
         D: serde::Deserializer<'de>,
     {
-        <Cow<'de, str>>::deserialize(deserializer)
-            .and_then(|s| s.try_into().map_err(serde::de::Error::custom))
+        Str::deserialize(deserializer).and_then(|s| s.try_into().map_err(serde::de::Error::custom))
     }
 }
 
@@ -268,5 +267,43 @@ mod tests {
 
         assert!(Guid::try_from(valid).is_ok());
         assert!(Guid::try_from(invalid).is_err());
+    }
+
+    #[test]
+    fn deserialize_borrows_from_message() {
+        use crate::wire::{LE, serialized::Context, to_bytes};
+
+        let ctxt = Context::new(LE, 0);
+        let valid = "0123456789ABCDEF0123456789ABCDEF";
+        let encoded = to_bytes(ctxt, &valid).unwrap();
+        let guid: Guid<'_> = encoded.deserialize().unwrap().0;
+        assert_eq!(guid.as_str(), valid);
+        assert!(encoded.bytes().as_ptr_range().contains(&guid.as_ptr()));
+
+        let encoded = to_bytes(ctxt, &"not a GUID").unwrap();
+        encoded.deserialize::<Guid<'_>>().unwrap_err();
+    }
+
+    #[test]
+    fn deserialize_takes_owned_string() {
+        use serde::Deserialize;
+        use serde_json::Value;
+
+        let valid = "0123456789ABCDEF0123456789ABCDEF";
+        assert_eq!(
+            Guid::deserialize(Value::from(valid)).unwrap().as_str(),
+            valid
+        );
+
+        Guid::deserialize(Value::from("not a GUID")).unwrap_err();
+    }
+
+    #[test]
+    fn deserialize_plain_string_in_ron() {
+        // RON tells a plain string from a newtype struct.
+        let valid = "0123456789ABCDEF0123456789ABCDEF";
+        let ron = format!("{valid:?}");
+        let guid: Guid<'_> = ron::from_str(&ron).unwrap();
+        assert_eq!(guid.as_str(), valid);
     }
 }

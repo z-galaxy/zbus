@@ -85,6 +85,7 @@ serde = { version = "1.0.200", features = ["derive"] }
 serde_repr = "0.1.19"
 serde_bytes = "0.11.14"
 serde_json = "1.0.116"
+ron = "0.12.3"
 criterion = { version = "6.0.0", package = "codspeed-criterion-compat" }
 doc-comment = "0.3.3"
 proc-macro2 = "1.0.81"
