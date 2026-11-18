@@ -120,7 +120,7 @@ macro_rules! define_name_type_impls {
             where
                 D: serde::Deserializer<'de>,
             {
-                let name = <std::borrow::Cow<'name, str>>::deserialize(deserializer)?;
+                let name: crate::Str<'name> = serde::Deserialize::deserialize(deserializer)?;
 
                 Self::try_from(name).map_err(|e| serde::de::Error::custom(e.to_string()))
             }
@@ -377,11 +377,7 @@ macro_rules! define_name_type_impls {
             where
                 D: serde::de::Deserializer<'de>,
             {
-                String::deserialize(deserializer)
-                    .and_then(|n| {
-                        $name::try_from(n).map_err(|e| serde::de::Error::custom(e.to_string()))
-                    })
-                    .map(Self)
+                <$name<'de>>::deserialize(deserializer).map(Self::from)
             }
         }
 

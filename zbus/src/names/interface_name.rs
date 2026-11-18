@@ -28,10 +28,12 @@ use serde::Serialize;
 ///
 /// [in]: https://dbus.freedesktop.org/doc/dbus-specification.html#message-protocol-names-interface
 #[derive(Clone, Debug, Hash, PartialEq, Eq, Serialize, Type, PartialOrd, Ord)]
+#[serde(transparent)]
 pub struct InterfaceName<'name>(Str<'name>);
 
 /// Owned sibling of [`InterfaceName`].
 #[derive(Clone, Hash, PartialEq, Eq, Serialize, Type, PartialOrd, Ord)]
+#[serde(transparent)]
 pub struct OwnedInterfaceName(#[serde(borrow)] InterfaceName<'static>);
 
 define_name_type_impls! {

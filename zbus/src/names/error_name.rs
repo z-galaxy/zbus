@@ -30,10 +30,12 @@ use serde::Serialize;
 ///
 /// [en]: https://dbus.freedesktop.org/doc/dbus-specification.html#message-protocol-names-error
 #[derive(Clone, Debug, Hash, PartialEq, Eq, Serialize, Type, PartialOrd, Ord)]
+#[serde(transparent)]
 pub struct ErrorName<'name>(Str<'name>);
 
 /// Owned sibling of [`ErrorName`].
 #[derive(Clone, Hash, PartialEq, Eq, Serialize, Type, PartialOrd, Ord)]
+#[serde(transparent)]
 pub struct OwnedErrorName(#[serde(borrow)] ErrorName<'static>);
 
 define_name_type_impls! {

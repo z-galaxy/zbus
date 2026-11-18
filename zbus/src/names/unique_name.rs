@@ -25,10 +25,12 @@ use serde::Serialize;
 ///
 /// [ubn]: https://dbus.freedesktop.org/doc/dbus-specification.html#message-protocol-names-bus
 #[derive(Clone, Debug, Hash, PartialEq, Eq, Serialize, Type, PartialOrd, Ord)]
+#[serde(transparent)]
 pub struct UniqueName<'name>(pub(crate) Str<'name>);
 
 /// Owned sibling of [`UniqueName`].
 #[derive(Clone, Hash, PartialEq, Eq, Serialize, Type, PartialOrd, Ord)]
+#[serde(transparent)]
 pub struct OwnedUniqueName(#[serde(borrow)] UniqueName<'static>);
 
 define_name_type_impls! {
@@ -132,6 +134,52 @@ mod tests {
         let encoded = to_bytes(ctxt, &Optional::from(Some(name.clone()))).unwrap();
         let opt: Optional<OwnedUniqueName> = encoded.deserialize().unwrap().0;
         assert_eq!(Option::<OwnedUniqueName>::from(opt), Some(name));
+    }
+
+    #[test]
+    fn deserialize_borrows_from_message() {
+        use crate::wire::{LE, serialized::Context, to_bytes};
+
+        let ctxt = Context::new(LE, 0);
+        let encoded = to_bytes(ctxt, &":1.23").unwrap();
+        let name: UniqueName<'_> = encoded.deserialize().unwrap().0;
+        assert_eq!(name, ":1.23");
+        assert!(encoded.bytes().as_ptr_range().contains(&name.as_ptr()));
+
+        let encoded = to_bytes(ctxt, &"not a unique name").unwrap();
+        encoded.deserialize::<UniqueName<'_>>().unwrap_err();
+        encoded.deserialize::<OwnedUniqueName>().unwrap_err();
+    }
+
+    #[test]
+    fn deserialize_takes_owned_string() {
+        use serde::Deserialize;
+        use serde_json::Value;
+
+        let name = UniqueName::deserialize(Value::from(":1.23")).unwrap();
+        assert_eq!(name, ":1.23");
+        let name = OwnedUniqueName::deserialize(Value::from(":1.23")).unwrap();
+        assert_eq!(name, ":1.23");
+        // A reader can't lend the string (#287).
+        let name: OwnedUniqueName = serde_json::from_reader(br#"":1.23""#.as_slice()).unwrap();
+        assert_eq!(name, ":1.23");
+
+        UniqueName::deserialize(Value::from("not a unique name")).unwrap_err();
+        OwnedUniqueName::deserialize(Value::from("not a unique name")).unwrap_err();
+    }
+
+    #[test]
+    fn ron_round_trip() {
+        // RON tells a plain string from a newtype struct.
+        let name = UniqueName::try_from(":1.23").unwrap();
+        let ron = ron::to_string(&name).unwrap();
+        assert_eq!(ron, r#"":1.23""#);
+        assert_eq!(ron::from_str::<UniqueName<'_>>(&ron).unwrap(), name);
+        ron::from_str::<UniqueName<'_>>(r#""not a unique name""#).unwrap_err();
+
+        let owned = OwnedUniqueName::from(name);
+        assert_eq!(ron::to_string(&owned).unwrap(), ron);
+        assert_eq!(ron::from_str::<OwnedUniqueName>(&ron).unwrap(), owned);
     }
 
     #[test]

@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize, de};
 ///
 /// [UUIDs chapter]: https://dbus.freedesktop.org/doc/dbus-specification.html#uuids
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Type, Serialize)]
+#[serde(transparent)]
 pub struct Guid<'g>(Str<'g>);
 
 impl Guid<'_> {
@@ -116,8 +117,7 @@ impl<'de> Deserialize<'de> for Guid<'de> {
     where
         D: serde::Deserializer<'de>,
     {
-        <Cow<'de, str>>::deserialize(deserializer)
-            .and_then(|s| s.try_into().map_err(serde::de::Error::custom))
+        Str::deserialize(deserializer).and_then(|s| s.try_into().map_err(serde::de::Error::custom))
     }
 }
 
@@ -162,6 +162,7 @@ impl Borrow<str> for Guid<'_> {
 
 /// Owned version of [`Guid`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Type, Serialize)]
+#[serde(transparent)]
 pub struct OwnedGuid(#[serde(borrow)] Guid<'static>);
 
 impl OwnedGuid {
@@ -220,9 +221,7 @@ impl<'de> Deserialize<'de> for OwnedGuid {
     where
         D: de::Deserializer<'de>,
     {
-        String::deserialize(deserializer)
-            .and_then(|n| Guid::try_from(n).map_err(|e| de::Error::custom(e.to_string())))
-            .map(Self)
+        Guid::deserialize(deserializer).map(Self::from)
     }
 }
 
@@ -268,5 +267,61 @@ mod tests {
 
         assert!(Guid::try_from(valid).is_ok());
         assert!(Guid::try_from(invalid).is_err());
+    }
+
+    #[test]
+    fn deserialize_borrows_from_message() {
+        use crate::{
+            OwnedGuid,
+            wire::{LE, serialized::Context, to_bytes},
+        };
+
+        let ctxt = Context::new(LE, 0);
+        let valid = "0123456789ABCDEF0123456789ABCDEF";
+        let encoded = to_bytes(ctxt, &valid).unwrap();
+        let guid: Guid<'_> = encoded.deserialize().unwrap().0;
+        assert_eq!(guid.as_str(), valid);
+        assert!(encoded.bytes().as_ptr_range().contains(&guid.as_ptr()));
+
+        let encoded = to_bytes(ctxt, &"not a GUID").unwrap();
+        encoded.deserialize::<Guid<'_>>().unwrap_err();
+        encoded.deserialize::<OwnedGuid>().unwrap_err();
+    }
+
+    #[test]
+    fn deserialize_takes_owned_string() {
+        use crate::OwnedGuid;
+        use serde::Deserialize;
+        use serde_json::Value;
+
+        let valid = "0123456789ABCDEF0123456789ABCDEF";
+        assert_eq!(
+            Guid::deserialize(Value::from(valid)).unwrap().as_str(),
+            valid
+        );
+        assert_eq!(OwnedGuid::deserialize(Value::from(valid)).unwrap(), valid);
+        // A reader can't lend the string (#287).
+        let json = format!("{valid:?}");
+        let guid: OwnedGuid = serde_json::from_reader(json.as_bytes()).unwrap();
+        assert_eq!(guid, valid);
+
+        Guid::deserialize(Value::from("not a GUID")).unwrap_err();
+        OwnedGuid::deserialize(Value::from("not a GUID")).unwrap_err();
+    }
+
+    #[test]
+    fn ron_round_trip() {
+        use crate::OwnedGuid;
+
+        // RON tells a plain string from a newtype struct.
+        let valid = "0123456789ABCDEF0123456789ABCDEF";
+        let guid = Guid::try_from(valid).unwrap();
+        let ron = ron::to_string(&guid).unwrap();
+        assert_eq!(ron, format!("{valid:?}"));
+        assert_eq!(ron::from_str::<Guid<'_>>(&ron).unwrap(), guid);
+
+        let owned = OwnedGuid::from(guid);
+        assert_eq!(ron::to_string(&owned).unwrap(), ron);
+        assert_eq!(ron::from_str::<OwnedGuid>(&ron).unwrap(), owned);
     }
 }

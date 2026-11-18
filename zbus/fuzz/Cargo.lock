@@ -496,9 +496,8 @@ dependencies = [
 
 [[package]]
 name = "zcheapstr"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d1afec51604565183aeb5c54c20aeab286120d4e4460f7f76e3e8bb8c0d99473"
+version = "1.2.0"
+source = "git+https://github.com/z-galaxy/zcheapstr?rev=b469ec034acb4b7723a196cbaab6a8f86b5e7af7#b469ec034acb4b7723a196cbaab6a8f86b5e7af7"
 dependencies = [
  "serde",
 ]

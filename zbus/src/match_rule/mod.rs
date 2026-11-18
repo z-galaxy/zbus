@@ -676,9 +676,14 @@ impl<'de: 'm, 'm> Deserialize<'de> for MatchRule<'m> {
     where
         D: serde::Deserializer<'de>,
     {
-        let name = <&str>::deserialize(deserializer)?;
+        let rule = Str::deserialize(deserializer)?;
 
-        Self::try_from(name).map_err(|e| de::Error::custom(e.to_string()))
+        match rule.as_borrowed() {
+            Some(rule) => Self::try_from(rule),
+            // `to_owned`, unlike `into_owned`, doesn't keep the spare capacity of the parsed rule.
+            None => MatchRule::try_from(rule.as_str()).map(|rule| rule.to_owned()),
+        }
+        .map_err(de::Error::custom)
     }
 }
 
@@ -721,6 +726,7 @@ impl PathSpec<'_> {
 
 /// Owned sibling of [`MatchRule`].
 #[derive(Clone, Debug, Hash, PartialEq, Eq, Serialize, VariantType)]
+#[serde(transparent)]
 pub struct OwnedMatchRule(#[serde(borrow)] MatchRule<'static>);
 
 impl OwnedMatchRule {

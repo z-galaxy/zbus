@@ -189,7 +189,7 @@ impl<'de: 'name, 'name> Deserialize<'de> for BusName<'name> {
     where
         D: serde::Deserializer<'de>,
     {
-        let name = <Cow<'name, str>>::deserialize(deserializer)?;
+        let name = Str::deserialize(deserializer)?;
 
         Self::try_from(name).map_err(|e| de::Error::custom(e.to_string()))
     }
@@ -381,6 +381,7 @@ impl<'a> From<&'a OwnedWellKnownName> for BusName<'a> {
 
 /// Owned sibling of [`BusName`].
 #[derive(Clone, Hash, PartialEq, Eq, Serialize, PartialOrd, Ord, Type)]
+#[serde(transparent)]
 pub struct OwnedBusName(#[serde(borrow)] BusName<'static>);
 
 impl_str_basic!(OwnedBusName);
@@ -527,9 +528,7 @@ impl<'de> Deserialize<'de> for OwnedBusName {
     where
         D: de::Deserializer<'de>,
     {
-        String::deserialize(deserializer)
-            .and_then(|n| BusName::try_from(n).map_err(|e| de::Error::custom(e.to_string())))
-            .map(Self)
+        BusName::deserialize(deserializer).map(Self::from)
     }
 }
 
@@ -550,5 +549,59 @@ impl NoneValue for OwnedBusName {
 
     fn null_value() -> Self::NoneType {
         String::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deserialize_borrows_from_message() {
+        use crate::wire::{LE, serialized::Context, to_bytes};
+
+        let ctxt = Context::new(LE, 0);
+        for s in [":1.23", "org.freedesktop.DBus"] {
+            let encoded = to_bytes(ctxt, &s).unwrap();
+            let name: BusName<'_> = encoded.deserialize().unwrap().0;
+            assert_eq!(name, s);
+            assert!(encoded.bytes().as_ptr_range().contains(&name.as_ptr()));
+        }
+
+        let encoded = to_bytes(ctxt, &"not a bus name").unwrap();
+        encoded.deserialize::<BusName<'_>>().unwrap_err();
+        encoded.deserialize::<OwnedBusName>().unwrap_err();
+    }
+
+    #[test]
+    fn deserialize_takes_owned_string() {
+        use serde_json::Value;
+
+        for s in [":1.23", "org.freedesktop.DBus"] {
+            assert_eq!(BusName::deserialize(Value::from(s)).unwrap(), s);
+            assert_eq!(OwnedBusName::deserialize(Value::from(s)).unwrap(), s);
+            // A reader can't lend the string (#287).
+            let json = format!("{s:?}");
+            let name: OwnedBusName = serde_json::from_reader(json.as_bytes()).unwrap();
+            assert_eq!(name, s);
+        }
+
+        BusName::deserialize(Value::from("not a bus name")).unwrap_err();
+        OwnedBusName::deserialize(Value::from("not a bus name")).unwrap_err();
+    }
+
+    #[test]
+    fn ron_round_trip() {
+        // RON tells a plain string from a newtype struct.
+        for s in [":1.23", "org.freedesktop.DBus"] {
+            let name = BusName::try_from(s).unwrap();
+            let ron = ron::to_string(&name).unwrap();
+            assert_eq!(ron, format!("{s:?}"));
+            assert_eq!(ron::from_str::<BusName<'_>>(&ron).unwrap(), name);
+
+            let owned = OwnedBusName::from(name);
+            assert_eq!(ron::to_string(&owned).unwrap(), ron);
+            assert_eq!(ron::from_str::<OwnedBusName>(&ron).unwrap(), owned);
+        }
     }
 }
