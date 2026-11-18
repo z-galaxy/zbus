@@ -43,7 +43,6 @@ zbus_xml = { path = "./zbus_xml" }
 zbus = { path = "./zbus" }
 
 # 3rd party
-zcheapstr = { version = "1.0.0", features = ["serde"] }
 snakecase = "0.1.0"
 pretty_assertions = "1.4"
 clap = { version = "4.5.4", features = ["derive", "wrap_help"] }
@@ -127,3 +126,12 @@ version = "0.2.0"
 git = "https://github.com/z-galaxy/zoter"
 rev = "4a89183d62ed13ae3278e38c0565de6b98122707"
 default-features = false
+
+# FIXME: Drop `git` and `rev`, and require the release that has the revision's changes, once
+# zcheapstr is out with them (z-galaxy/zcheapstr#13): `cargo publish` ignores them, but it needs
+# that release to be out.
+[workspace.dependencies.zcheapstr]
+version = "1.2.0"
+git = "https://github.com/z-galaxy/zcheapstr"
+rev = "b469ec034acb4b7723a196cbaab6a8f86b5e7af7"
+features = ["serde"]
