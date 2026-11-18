@@ -1,6 +1,6 @@
 use core::{fmt::Debug, str};
 use serde::{
-    de::{self, Deserialize, Deserializer, Visitor},
+    de::{self, Deserialize, Deserializer},
     ser::{Serialize, Serializer},
 };
 use std::borrow::{Borrow, Cow};
@@ -225,27 +225,10 @@ impl<'de: 'a, 'a> Deserialize<'de> for ObjectPath<'a> {
     where
         D: Deserializer<'de>,
     {
-        let visitor = ObjectPathVisitor;
+        let path = Str::deserialize(deserializer)?;
+        validate(path.as_bytes()).map_err(de::Error::custom)?;
 
-        deserializer.deserialize_str(visitor)
-    }
-}
-
-struct ObjectPathVisitor;
-
-impl<'de> Visitor<'de> for ObjectPathVisitor {
-    type Value = ObjectPath<'de>;
-
-    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("an ObjectPath")
-    }
-
-    #[inline]
-    fn visit_borrowed_str<E>(self, value: &'de str) -> core::result::Result<ObjectPath<'de>, E>
-    where
-        E: serde::de::Error,
-    {
-        ObjectPath::try_from(value).map_err(serde::de::Error::custom)
+        Ok(Self(path))
     }
 }
 
@@ -349,5 +332,38 @@ mod unit {
         // See https://github.com/z-galaxy/zbus/issues/287
         let json_str = "\"/some/path\"";
         serde_json::de::from_reader::<_, OwnedObjectPath>(json_str.as_bytes()).unwrap();
+    }
+
+    #[test]
+    fn deserialize_borrows_from_message() {
+        use crate::wire::{LE, serialized::Context, to_bytes};
+
+        let ctxt = Context::new(LE, 0);
+        let encoded = to_bytes(ctxt, &"/org/example").unwrap();
+        let path: ObjectPath<'_> = encoded.deserialize().unwrap().0;
+        assert_eq!(path, "/org/example");
+        assert!(encoded.bytes().as_ptr_range().contains(&path.as_ptr()));
+
+        let encoded = to_bytes(ctxt, &"not a path").unwrap();
+        encoded.deserialize::<ObjectPath<'_>>().unwrap_err();
+    }
+
+    #[test]
+    fn ron_round_trip() {
+        // RON tells the plain string that `ObjectPath` serializes as from a newtype struct.
+        let path = ObjectPath::try_from("/org/example").unwrap();
+        let ron = ron::to_string(&path).unwrap();
+        assert_eq!(ron, r#""/org/example""#);
+        assert_eq!(ron::from_str::<ObjectPath<'_>>(&ron).unwrap(), path);
+    }
+
+    #[test]
+    fn deserialize_takes_owned_string() {
+        use serde_json::Value;
+
+        let path = ObjectPath::deserialize(Value::from("/org/example")).unwrap();
+        assert_eq!(path, "/org/example");
+
+        ObjectPath::deserialize(Value::from("not a path")).unwrap_err();
     }
 }
