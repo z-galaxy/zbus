@@ -21,10 +21,12 @@ use serde::Serialize;
 ///
 /// [pn]: https://dbus.freedesktop.org/doc/dbus-specification.html#standard-interfaces-properties
 #[derive(Clone, Debug, Hash, PartialEq, Eq, Serialize, Type, PartialOrd, Ord)]
+#[serde(transparent)]
 pub struct PropertyName<'name>(Str<'name>);
 
 /// Owned sibling of [`PropertyName`].
 #[derive(Clone, Hash, PartialEq, Eq, Serialize, Type, PartialOrd, Ord)]
+#[serde(transparent)]
 pub struct OwnedPropertyName(#[serde(borrow)] PropertyName<'static>);
 
 define_name_type_impls! {

@@ -26,10 +26,12 @@ use serde::Serialize;
 ///
 /// [wbn]: https://dbus.freedesktop.org/doc/dbus-specification.html#message-protocol-names-bus
 #[derive(Clone, Debug, Hash, PartialEq, Eq, Serialize, Type, PartialOrd, Ord)]
+#[serde(transparent)]
 pub struct WellKnownName<'name>(pub(crate) Str<'name>);
 
 /// Owned sibling of [`WellKnownName`].
 #[derive(Clone, Hash, PartialEq, Eq, Serialize, Type, PartialOrd, Ord)]
+#[serde(transparent)]
 pub struct OwnedWellKnownName(#[serde(borrow)] WellKnownName<'static>);
 
 define_name_type_impls! {

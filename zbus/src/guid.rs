@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize, de};
 ///
 /// [UUIDs chapter]: https://dbus.freedesktop.org/doc/dbus-specification.html#uuids
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Type, Serialize)]
+#[serde(transparent)]
 pub struct Guid<'g>(Str<'g>);
 
 impl Guid<'_> {
@@ -161,6 +162,7 @@ impl Borrow<str> for Guid<'_> {
 
 /// Owned version of [`Guid`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Type, Serialize)]
+#[serde(transparent)]
 pub struct OwnedGuid(#[serde(borrow)] Guid<'static>);
 
 impl OwnedGuid {
@@ -308,11 +310,18 @@ mod tests {
     }
 
     #[test]
-    fn deserialize_plain_string_in_ron() {
+    fn ron_round_trip() {
+        use crate::OwnedGuid;
+
         // RON tells a plain string from a newtype struct.
         let valid = "0123456789ABCDEF0123456789ABCDEF";
-        let ron = format!("{valid:?}");
-        let guid: Guid<'_> = ron::from_str(&ron).unwrap();
-        assert_eq!(guid.as_str(), valid);
+        let guid = Guid::try_from(valid).unwrap();
+        let ron = ron::to_string(&guid).unwrap();
+        assert_eq!(ron, format!("{valid:?}"));
+        assert_eq!(ron::from_str::<Guid<'_>>(&ron).unwrap(), guid);
+
+        let owned = OwnedGuid::from(guid);
+        assert_eq!(ron::to_string(&owned).unwrap(), ron);
+        assert_eq!(ron::from_str::<OwnedGuid>(&ron).unwrap(), owned);
     }
 }

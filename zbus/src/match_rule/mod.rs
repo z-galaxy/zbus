@@ -726,6 +726,7 @@ impl PathSpec<'_> {
 
 /// Owned sibling of [`MatchRule`].
 #[derive(Clone, Debug, Hash, PartialEq, Eq, Serialize, VariantType)]
+#[serde(transparent)]
 pub struct OwnedMatchRule(#[serde(borrow)] MatchRule<'static>);
 
 impl OwnedMatchRule {

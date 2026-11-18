@@ -381,6 +381,7 @@ impl<'a> From<&'a OwnedWellKnownName> for BusName<'a> {
 
 /// Owned sibling of [`BusName`].
 #[derive(Clone, Hash, PartialEq, Eq, Serialize, PartialOrd, Ord, Type)]
+#[serde(transparent)]
 pub struct OwnedBusName(#[serde(borrow)] BusName<'static>);
 
 impl_str_basic!(OwnedBusName);
@@ -590,12 +591,17 @@ mod tests {
     }
 
     #[test]
-    fn deserialize_plain_string_in_ron() {
+    fn ron_round_trip() {
         // RON tells a plain string from a newtype struct.
         for s in [":1.23", "org.freedesktop.DBus"] {
-            let ron = format!("{s:?}");
-            let name: BusName<'_> = ron::from_str(&ron).unwrap();
-            assert_eq!(name, s);
+            let name = BusName::try_from(s).unwrap();
+            let ron = ron::to_string(&name).unwrap();
+            assert_eq!(ron, format!("{s:?}"));
+            assert_eq!(ron::from_str::<BusName<'_>>(&ron).unwrap(), name);
+
+            let owned = OwnedBusName::from(name);
+            assert_eq!(ron::to_string(&owned).unwrap(), ron);
+            assert_eq!(ron::from_str::<OwnedBusName>(&ron).unwrap(), owned);
         }
     }
 }

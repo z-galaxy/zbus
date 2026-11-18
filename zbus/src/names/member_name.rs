@@ -26,10 +26,12 @@ use serde::Serialize;
 ///
 /// [in]: https://dbus.freedesktop.org/doc/dbus-specification.html#message-protocol-names-member
 #[derive(Clone, Debug, Hash, PartialEq, Eq, Serialize, Type, PartialOrd, Ord)]
+#[serde(transparent)]
 pub struct MemberName<'name>(Str<'name>);
 
 /// Owned sibling of [`MemberName`].
 #[derive(Clone, Hash, PartialEq, Eq, Serialize, Type, PartialOrd, Ord)]
+#[serde(transparent)]
 pub struct OwnedMemberName(#[serde(borrow)] MemberName<'static>);
 
 define_name_type_impls! {

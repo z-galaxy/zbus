@@ -847,6 +847,10 @@ mod tests {
         // escapes the apostrophes in it, so it's not lent.
         let ron = ron::to_string(&expected).unwrap();
         assert_eq!(ron::from_str::<MatchRule<'_>>(&ron).unwrap(), expected);
+
+        let owned = OwnedMatchRule::from(expected);
+        assert_eq!(ron::to_string(&owned).unwrap(), ron);
+        assert_eq!(ron::from_str::<OwnedMatchRule>(&ron).unwrap(), owned);
     }
 
     #[test]

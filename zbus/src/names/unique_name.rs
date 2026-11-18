@@ -25,10 +25,12 @@ use serde::Serialize;
 ///
 /// [ubn]: https://dbus.freedesktop.org/doc/dbus-specification.html#message-protocol-names-bus
 #[derive(Clone, Debug, Hash, PartialEq, Eq, Serialize, Type, PartialOrd, Ord)]
+#[serde(transparent)]
 pub struct UniqueName<'name>(pub(crate) Str<'name>);
 
 /// Owned sibling of [`UniqueName`].
 #[derive(Clone, Hash, PartialEq, Eq, Serialize, Type, PartialOrd, Ord)]
+#[serde(transparent)]
 pub struct OwnedUniqueName(#[serde(borrow)] UniqueName<'static>);
 
 define_name_type_impls! {
@@ -167,11 +169,17 @@ mod tests {
     }
 
     #[test]
-    fn deserialize_plain_string_in_ron() {
+    fn ron_round_trip() {
         // RON tells a plain string from a newtype struct.
-        let name: UniqueName<'_> = ron::from_str(r#"":1.23""#).unwrap();
-        assert_eq!(name, ":1.23");
+        let name = UniqueName::try_from(":1.23").unwrap();
+        let ron = ron::to_string(&name).unwrap();
+        assert_eq!(ron, r#"":1.23""#);
+        assert_eq!(ron::from_str::<UniqueName<'_>>(&ron).unwrap(), name);
         ron::from_str::<UniqueName<'_>>(r#""not a unique name""#).unwrap_err();
+
+        let owned = OwnedUniqueName::from(name);
+        assert_eq!(ron::to_string(&owned).unwrap(), ron);
+        assert_eq!(ron::from_str::<OwnedUniqueName>(&ron).unwrap(), owned);
     }
 
     #[test]

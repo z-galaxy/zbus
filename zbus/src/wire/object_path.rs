@@ -238,6 +238,7 @@ fn validate(path: &[u8]) -> Result<()> {
 
 /// Owned [`ObjectPath`](struct.ObjectPath.html)
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash, serde::Serialize, Type)]
+#[serde(transparent)]
 pub struct OwnedObjectPath(ObjectPath<'static>);
 
 impl OwnedObjectPath {
@@ -354,6 +355,10 @@ mod unit {
         let ron = ron::to_string(&path).unwrap();
         assert_eq!(ron, r#""/org/example""#);
         assert_eq!(ron::from_str::<ObjectPath<'_>>(&ron).unwrap(), path);
+
+        let owned = OwnedObjectPath::from(path);
+        assert_eq!(ron::to_string(&owned).unwrap(), ron);
+        assert_eq!(ron::from_str::<OwnedObjectPath>(&ron).unwrap(), owned);
     }
 
     #[test]
