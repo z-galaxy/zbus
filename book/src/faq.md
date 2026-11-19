@@ -195,7 +195,12 @@ Two rules follow from the connection's work running on the calling thread:
    can only run in between polls of the future.
 2. `zbus::block_on` must not be called from inside a task zbus is running, such as a method of
    an interface the connection serves, or a future inside another `zbus::block_on`. Such a call
-   panics, because it would be waiting for the very thread it is on. Nor should it be called
+   panics, because it would be waiting for the very thread it is on. Calling it on another thread
+   and waiting for that thread from there is no way around this: with the `tokio` feature, every
+   thread's call runs the same Tokio runtime, which the waiting thread holds up, so the call may
+   never return. Without `tokio`, each thread runs a runtime of its own and such code returns, but
+   any crate in the program can turn the feature on, so a library can't count on that. Await the
+   work instead, or do it once the outer call has returned. Nor should `zbus::block_on` be called
    from a task of another runtime; the function's documentation has the details.
 
 ## Why do async tokio API calls from interface methods not work?

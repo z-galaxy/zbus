@@ -79,9 +79,13 @@ impl<T, E> ResultAdapter for Result<T, E> {
 ///
 /// Do not call this from inside a task zbus is running, such as a method of a served interface
 /// or a future inside another `block_on` call. It panics there, because it would be waiting for
-/// the very thread it is on. Do not call it from another runtime's task either: it blocks that
-/// task's thread until the future completes, which deadlocks the program if the future needs
-/// that thread to make progress.
+/// the very thread it is on. Calling it on another thread and waiting for that thread from there
+/// works here, as each thread runs a runtime of its own, but with the `tokio` feature, which any
+/// crate in the program can turn on, every thread's call runs the same Tokio runtime, which the
+/// waiting thread holds up, so the call may never return (see
+/// [the FAQ](https://z-galaxy.github.io/zbus/faq.html#how-do-i-use-zbus-from-synchronous-code)).
+/// Do not call it from another runtime's task either: it blocks that task's thread until the
+/// future completes, which deadlocks the program if the future needs that thread to make progress.
 #[cfg(all(feature = "default-rt", not(feature = "tokio")))]
 pub fn block_on<F: std::future::Future>(future: F) -> F::Output {
     crate::runtime::zruntime::block_on(future)
@@ -149,6 +153,14 @@ pub fn block_on<F: std::future::Future>(future: F) -> F::Output {
 /// Tokio's own `block_on` does. From any other runtime's task it blocks that task's thread until
 /// the future completes, which deadlocks the program if the future needs that thread to make
 /// progress.
+///
+/// Calling it from the future, or from a method of a connection built inside this function, panics
+/// too, and calling it on another thread and waiting for that thread from there is no way around
+/// that: the waiting thread holds up the runtime that every call shares, so the call may never
+/// return. A synchronous function that runs its D-Bus calls in this function on a thread of its own
+/// does that when it is called from there. Any crate in the program can turn the `tokio` feature
+/// on, so a library that calls this function has to keep to that too: see
+/// [the FAQ](https://z-galaxy.github.io/zbus/faq.html#how-do-i-use-zbus-from-synchronous-code).
 #[cfg(feature = "tokio")]
 pub fn block_on<F: std::future::Future>(future: F) -> F::Output {
     use std::sync::OnceLock;
