@@ -117,15 +117,7 @@ windows-sys = { version = "0.61", features = [
 
 # z-galaxy
 zruntime = { version = "0.2.0", default-features = false }
-
-# FIXME: Drop `git` and `rev`, and require the release that has the revision's changes, once
-# zcheapstr is out with them (z-galaxy/zcheapstr#13): `cargo publish` ignores them, but it needs
-# that release to be out.
-[workspace.dependencies.zcheapstr]
-version = "1.2.0"
-git = "https://github.com/z-galaxy/zcheapstr"
-rev = "b469ec034acb4b7723a196cbaab6a8f86b5e7af7"
-features = ["serde"]
+zcheapstr = { version = "1.3.0", features = ["serde"] }
 
 # The traits through which a connection is handed over, as a record and file descriptors, to a
 # service's next instance through systemd's file descriptor store.
