@@ -121,11 +121,4 @@ zcheapstr = { version = "1.3.0", features = ["serde"] }
 
 # The traits through which a connection is handed over, as a record and file descriptors, to a
 # service's next instance through systemd's file descriptor store.
-#
-# FIXME: Drop `git` and `rev` once zoter 0.2.0 is on crates.io: `cargo publish` ignores them, but
-# it needs that release to be out.
-[workspace.dependencies.zoter]
-version = "0.2.0"
-git = "https://github.com/z-galaxy/zoter"
-rev = "4a89183d62ed13ae3278e38c0565de6b98122707"
-default-features = false
+zoter = { version = "0.2.0", default-features = false }
