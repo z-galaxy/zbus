@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 6.4.0 - 2026-11-20
+
+### ✨ Added
+- Add Connection::hand_over, with the object server taking part.
+- Add ResponseDispatchNotifier::followed_by, for work after a response that a hand-over waits for.
+- Pass both ends of a channel on to another process, through ChannelHandover.
+- Add Error::Handover for zoter errors, so `?` works on them.
+- Take each message over for those that are yet to get it.
+- Add Message::error_for_serial to reply without the call header.
+
+### 📦 Dependencies
+- Update zcheapstr to 1.3, whose Str decodes any string and is (de)serialized as a plain string in
+  every format.
+- Update zoter to 0.2, which the handover feature now builds on: a service that calls zoter itself
+  needs 0.2 too.
+- Update jiff to 1.0: the jiff feature implements Type and Basic for the types of jiff 1.0, among
+  them ZonedDateTime, which is jiff 0.2's Zoned renamed.
+
+### 📝 Documentation
+- Warn against waiting for a block_on on another thread.
+
+### 🐛 Fixed
+- Serialize names, GUIDs and owned paths and rules as plain strings, so that RON reads them back.
+- Decode a MatchRule from a string that isn't lent.
+- Decode an ObjectPath from a string that isn't lent. #2151
+- Fail a hand-over through a stream that is not the only one. #2137
+
+### ⚡️ Performance
+- Decode an owned name, GUID or path with one allocation, not two.
+- Borrow the string of a name or GUID decoded from a message.
+- Hand over a connection with no object server at less cost.
+
 ## 6.3.0 - 2026-11-13
 
 ### ✨ Added
