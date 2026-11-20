@@ -352,11 +352,14 @@ impl Drop for SocketReader {
             }
             self.socket_status.stop.end_reading(ReaderEnd::Failed);
         }
-        self.socket_status.closed.store(true, Ordering::Release);
-        self.socket_status.closed_event.notify(usize::MAX);
+        // Fail pending calls before marking the connection closed, as on the reader's error path.
+        // This also rejects new calls, so a caller that observes the closed connection cannot send
+        // a method call whose reply would have no reader.
         self.fail_pending_method_calls(crate::Error::from(io::Error::other(
             "the socket reader task was cancelled",
         )));
+        self.socket_status.closed.store(true, Ordering::Release);
+        self.socket_status.closed_event.notify(usize::MAX);
     }
 }
 
