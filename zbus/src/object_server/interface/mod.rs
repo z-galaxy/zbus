@@ -164,8 +164,8 @@ pub trait Interface: Any + Send + Sync {
 /// Conversion of a property handler's failure into the boxed error [`Interface`] carries.
 ///
 /// The `#[interface]` macro applies it to whatever a getter or setter returns. Any `'static`
-/// [`DBusError`] is boxed as is. A plain [`Error`] is not a D-Bus error, so it is reported the
-/// way [`fdo::Error`] reports it.
+/// [`DBusError`] is boxed as is. A plain [`Error`] goes through `From<Error>` for
+/// [`BoxDBusError`].
 #[doc(hidden)]
 pub trait IntoDBusError {
     fn into_dbus_error(self) -> BoxDBusError;

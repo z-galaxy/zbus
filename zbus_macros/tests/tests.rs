@@ -122,6 +122,11 @@ fn test_derive_error() {
         LetItBe {
             desc: String,
         },
+        // A description that is never changed can be a `Box<str>`.
+        Boxed(Box<str>),
+        BoxedNamed {
+            desc: Box<str>,
+        },
         // A named field must not clash with the locals the generated `create_reply` binds.
         Shadowing {
             builder: String,
@@ -342,6 +347,48 @@ fn test_interface_with_crate_attr() {
         CrateAttrInterface::name(),
         "org.freedesktop.zbus.CrateAttrTest"
     );
+}
+
+// An error reply converts into a variant that holds its description as a `Box<str>`, and the
+// variant replies with it.
+#[test]
+fn derive_error_with_boxed_description() {
+    use zbus::message::Message;
+
+    #[derive(Debug, DBusError)]
+    #[zbus(prefix = "org.freedesktop.zbus.test")]
+    enum Test {
+        #[zbus(error)]
+        ZBus(zbus::Error),
+        Boxed(Box<str>),
+        BoxedNamed {
+            desc: Box<str>,
+        },
+    }
+
+    let call = Message::method_call("/", "Foo")
+        .destination(":1.2")
+        .build(&())
+        .unwrap();
+    for name in ["Boxed", "BoxedNamed"] {
+        let name = format!("org.freedesktop.zbus.test.{name}");
+        let reply = Message::error(&call.header(), name.as_str())
+            .build(&"oops")
+            .unwrap();
+        let error = Test::from(zbus::Error::from(reply));
+        assert!(
+            matches!(
+                &error,
+                Test::Boxed(desc) | Test::BoxedNamed { desc } if &**desc == "oops"
+            ),
+            "{error:?}"
+        );
+
+        let reply = zbus::DBusError::create_reply(&error, &call.header()).unwrap();
+        let header = reply.header();
+        assert_eq!(header.error_name().unwrap(), name.as_str());
+        assert_eq!(reply.body().deserialize::<&str>().unwrap(), "oops");
+    }
 }
 
 #[test]

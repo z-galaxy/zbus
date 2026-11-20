@@ -413,8 +413,14 @@ pub fn interface(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// [`zbus::Error`]. This implementation makes it possible for you to declare proxy methods to
 /// directly return this type, rather than [`zbus::Error`].
 ///
+/// It also lets a method of an interface that returns your type pass the error of a call that it
+/// makes on to its own caller with `?`: an error of your type's domain as the variant of its name,
+/// and any other D-Bus error as the special variant, which replies with that error's own name. The
+/// special variant replies as `org.freedesktop.zbus.Error` only for an error of zbus's own, such as
+/// an I/O error.
+///
 /// Each variant (except for the special `zbus` one) can optionally have a (named or unnamed)
-/// `String` field (which is used as the human-readable error description).
+/// `String` or `Box<str>` field (which is used as the human-readable error description).
 ///
 /// The following type-level attributes are supported:
 ///

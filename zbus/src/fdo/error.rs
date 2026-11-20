@@ -6,6 +6,10 @@ use crate::DBusError;
 #[allow(clippy::upper_case_acronyms)]
 pub enum Error {
     /// Unknown or fall-through zbus error.
+    ///
+    /// It replies with the name of the D-Bus error that it holds, such as an error reply of another
+    /// domain that a method passes on, and as `org.freedesktop.zbus.Error` when it holds none, such
+    /// as for an I/O error.
     #[zbus(error)]
     ZBus(zbus::Error),
 

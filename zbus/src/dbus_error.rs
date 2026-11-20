@@ -89,8 +89,9 @@ impl From<fdo::Error> for BoxDBusError {
     }
 }
 
-/// A D-Bus error carried by an [`Error`] is boxed as is. Any other [`Error`] is not a D-Bus
-/// error; it is reported the way [`fdo::Error`] reports it.
+/// An [`fdo::Error`] or other [`DBusError`] carried by an [`Error`] is boxed as is. Any other
+/// [`Error`] is reported the way [`fdo::Error`] reports it: the error reply to a call under its own
+/// name, and an error of zbus's own, such as an I/O error, as `org.freedesktop.zbus.Error`.
 impl From<Error> for BoxDBusError {
     fn from(e: Error) -> Self {
         match e {

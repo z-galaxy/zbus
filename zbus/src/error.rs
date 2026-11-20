@@ -470,7 +470,13 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 #[cfg(all(test, feature = "comms"))]
 mod tests {
-    use crate::{Error, fdo, message::Message};
+    use std::sync::Arc;
+
+    use crate::{
+        DBusError, Error, fdo,
+        message::{Header, Message},
+        names::ErrorName,
+    };
 
     #[test]
     fn error_reply_with_fdo_name() {
@@ -509,6 +515,60 @@ mod tests {
         assert_eq!(detail.as_deref(), Some("oops"));
     }
 
+    // A method that passes on the error reply to a call of its own, with `?` into an `fdo::Result`
+    // for one, replies with that error's name and description. `fdo::Error` holds an error of a
+    // name it doesn't define in its catch-all variant.
+    #[test]
+    fn passed_on_error_reply_keeps_its_name() {
+        let error = fdo::Error::from(error_reply("org.example.Error.Oops", &"oops"));
+        assert!(
+            matches!(error, fdo::Error::ZBus(Error::MethodError(..))),
+            "{error:?}"
+        );
+        assert_reply(&error, "org.example.Error.Oops", "oops");
+        assert_eq!(error.to_string(), "org.example.Error.Oops: oops");
+
+        // So does an `fdo::Error` that an error of another domain holds in its catch-all variant.
+        let error = Domain::from(error_reply(
+            "org.freedesktop.DBus.Error.ServiceUnknown",
+            &"no such service",
+        ));
+        assert!(matches!(error, Domain::ZBus(Error::FDO(_))), "{error:?}");
+        assert_reply(
+            &error,
+            "org.freedesktop.DBus.Error.ServiceUnknown",
+            "no such service",
+        );
+
+        // A D-Bus error of a type that isn't derived replies as it would on its own, body and all.
+        let error = fdo::Error::from(Error::DBus(Arc::new(Detailed)));
+        assert!(
+            matches!(error, fdo::Error::ZBus(Error::DBus(_))),
+            "{error:?}"
+        );
+        assert_eq!(error.name(), "org.example.Error.Detailed");
+        let reply = error.create_reply(&method_call().header()).unwrap();
+        let header = reply.header();
+        assert_eq!(
+            header.error_name().map(|name| name.as_str()),
+            Some("org.example.Error.Detailed")
+        );
+        let body = reply.body();
+        assert_eq!(body.deserialize::<(&str, u32)>().unwrap(), ("oops", 42));
+
+        // An error of a domain's own converts into the variant of its name, not the catch-all one.
+        let error = Domain::from(error_reply("org.example.Error.Oops", &"oops"));
+        assert!(
+            matches!(&error, Domain::Oops(description) if description == "oops"),
+            "{error:?}"
+        );
+
+        // An error that holds no D-Bus error has no name of its own.
+        let error = fdo::Error::ZBus(Error::InvalidReply);
+        assert_eq!(error.name(), "org.freedesktop.zbus.Error");
+        assert_eq!(error.description(), Some("invalid reply"));
+    }
+
     /// A zoter error converts into `Error::Handover` unchanged, including a zoter I/O error. The
     /// result shows the zoter error's message, and returns the zoter error as its source.
     #[cfg(all(target_os = "linux", feature = "handover"))]
@@ -542,14 +602,56 @@ mod tests {
     where
         B: serde::Serialize + crate::DynamicType,
     {
-        let call = Message::method_call("/", "foo")
-            .destination(":1.2")
-            .build(&())
-            .unwrap();
-
-        Message::error(&call.header(), name)
+        Message::error(&method_call().header(), name)
             .build(body)
             .unwrap()
             .into()
+    }
+
+    /// Check that `error` replies to a call under `name`, with `description` as its body.
+    fn assert_reply<E>(error: &E, name: &str, description: &str)
+    where
+        E: DBusError,
+    {
+        assert_eq!(error.name(), name);
+        assert_eq!(error.description(), Some(description));
+
+        let reply = error.create_reply(&method_call().header()).unwrap();
+        let header = reply.header();
+        assert_eq!(header.error_name().map(|name| name.as_str()), Some(name));
+        assert_eq!(reply.body().deserialize::<&str>().unwrap(), description);
+    }
+
+    fn method_call() -> Message {
+        Message::method_call("/", "foo")
+            .destination(":1.2")
+            .build(&())
+            .unwrap()
+    }
+
+    /// The errors of a domain other than `fdo::Error`'s.
+    #[derive(Debug, crate::DBusError)]
+    #[zbus(prefix = "org.example.Error")]
+    enum Domain {
+        #[zbus(error)]
+        ZBus(Error),
+        Oops(String),
+    }
+
+    /// A D-Bus error whose reply carries more than its description.
+    struct Detailed;
+
+    impl DBusError for Detailed {
+        fn create_reply(&self, call: &Header<'_>) -> crate::Result<Message> {
+            Message::error(call, self.name()).build(&("oops", 42u32))
+        }
+
+        fn name(&self) -> ErrorName<'_> {
+            ErrorName::from_static_str_unchecked("org.example.Error.Detailed")
+        }
+
+        fn description(&self) -> Option<&str> {
+            Some("oops")
+        }
     }
 }
