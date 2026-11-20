@@ -53,7 +53,7 @@ pub fn expand_derive(input: DeriveInput) -> Result<TokenStream, Error> {
         let fqn = if !error {
             format!("{prefix}.{name}")
         } else {
-            // The ZBus error variant will always be a hardcoded string.
+            // The name of a `zbus::Error` that holds no D-Bus error, such as an I/O error.
             String::from("org.freedesktop.zbus.Error")
         };
 
@@ -63,6 +63,16 @@ pub fn expand_derive(input: DeriveInput) -> Result<TokenStream, Error> {
         let e = match variant.fields {
             Fields::Unit => quote! {
                 Self::#ident => #error_name,
+            },
+            // A D-Bus error that a `zbus::Error` holds, such as the error reply to a call that a
+            // method passes on, keeps its own name.
+            Fields::Unnamed(_) if error => quote! {
+                Self::#ident(e) => match e {
+                    #zbus::Error::MethodError(name, _, _) => name.as_ref(),
+                    #zbus::Error::FDO(e) => #zbus::DBusError::name(&**e),
+                    #zbus::Error::DBus(e) => #zbus::DBusError::name(&**e),
+                    _ => #error_name,
+                },
             },
             Fields::Unnamed(_) => quote! {
                 Self::#ident(..) => #error_name,
@@ -90,7 +100,10 @@ pub fn expand_derive(input: DeriveInput) -> Result<TokenStream, Error> {
             Fields::Unnamed(_) => {
                 if error {
                     quote! {
-                        Self::#ident(e) => e.description(),
+                        Self::#ident(e) => match e {
+                            #zbus::Error::FDO(e) => #zbus::DBusError::description(&**e),
+                            e => e.description(),
+                        },
                     }
                 } else {
                     quote! {
@@ -233,33 +246,29 @@ fn gen_reply_for_variant(
             let in_fields = (0..f.unnamed.len())
                 .map(|n| Ident::new(&format!("f{n}"), ident.span()).to_token_stream())
                 .collect::<Vec<_>>();
-            let out_fields = if zbus_error_variant {
-                let error_field = in_fields.first().ok_or_else(|| {
-                    Error::new(
-                        ident.span(),
-                        "expected at least one field for #[zbus(error)] variant",
-                    )
-                })?;
-                vec![quote! {
-                    match #error_field {
-                        #zbus::Error::MethodError(name, desc, _) => {
-                            ::std::clone::Clone::clone(desc)
-                        }
-                        #zbus::Error::DBus(e) => {
-                            #zbus::DBusError::description(e).map(::std::string::ToString::to_string)
-                        }
-                        _ => None,
-                    }
-                    .unwrap_or_else(|| ::std::string::ToString::to_string(#error_field))
-                }]
-            } else {
-                // FIXME: Workaround for https://github.com/rust-lang/rust-clippy/issues/10577
-                #[allow(clippy::redundant_clone)]
-                in_fields.clone()
-            };
+            if !zbus_error_variant {
+                return Ok(quote! {
+                    Self::#ident(#(#in_fields),*) => #builder.build(&(#(#in_fields),*)),
+                });
+            }
 
+            let error_field = in_fields.first().ok_or_else(|| {
+                Error::new(
+                    ident.span(),
+                    "expected at least one field for #[zbus(error)] variant",
+                )
+            })?;
+            // A D-Bus error that the `zbus::Error` holds replies as it would on its own, and the
+            // error reply to a call with its name, and its description as the body.
             Ok(quote! {
-                Self::#ident(#(#in_fields),*) => #builder.build(&(#(#out_fields),*)),
+                Self::#ident(#(#in_fields),*) => match #error_field {
+                    #zbus::Error::FDO(e) => #zbus::DBusError::create_reply(&**e, call),
+                    #zbus::Error::DBus(e) => #zbus::DBusError::create_reply(&**e, call),
+                    #zbus::Error::MethodError(_, ::std::option::Option::Some(desc), _) => {
+                        #builder.build(desc)
+                    }
+                    e => #builder.build(&::std::string::ToString::to_string(e)),
+                },
             })
         }
         Fields::Named(f) => {
