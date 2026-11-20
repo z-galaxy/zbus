@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 6.5.0 - 2026-11-20
+
+### 🐛 Fixed
+- Pass a D-Bus error of another domain on to a method's caller under its own name, not as
+  org.freedesktop.zbus.Error.
+- Don't send calls made once a dropped reader closed the connection.
+
 ## 6.4.0 - 2026-11-20
 
 ### ✨ Added

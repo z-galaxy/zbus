@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 6.5.0 - 2026-11-20
+
+### ✨ Added
+- Let a variant of a derived DBusError hold its description in a Box<str>, as well as a String.
+
+### 🐛 Fixed
+- Pass a D-Bus error of another domain on to a method's caller under its own name, not as
+  org.freedesktop.zbus.Error.
+
 ## 6.4.0 - 2026-11-20
 
 No changes since 6.3.0: released alongside zbus 6.4.0, as the two are kept at the same version.
