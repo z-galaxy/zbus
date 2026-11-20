@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "rust";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-b101d842.js";
+            window.path_to_searchindex_js = "searchindex-0520894d.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-0eac0ed4.js"></script>
@@ -1898,7 +1898,12 @@ reply, or a busy loop until a signal arrives, never finishes, because the work i
 can only run in between polls of the future.</li>
 <li><code>zbus::block_on</code> must not be called from inside a task zbus is running, such as a method of
 an interface the connection serves, or a future inside another <code>zbus::block_on</code>. Such a call
-panics, because it would be waiting for the very thread it is on. Nor should it be called
+panics, because it would be waiting for the very thread it is on. Calling it on another thread
+and waiting for that thread from there is no way around this: with the <code>tokio</code> feature, every
+thread’s call runs the same Tokio runtime, which the waiting thread holds up, so the call may
+never return. Without <code>tokio</code>, each thread runs a runtime of its own and such code returns, but
+any crate in the program can turn the feature on, so a library can’t count on that. Await the
+work instead, or do it once the outer call has returned. Nor should <code>zbus::block_on</code> be called
 from a task of another runtime; the function’s documentation has the details.</li>
 </ol>
 <h2 id="why-do-async-tokio-api-calls-from-interface-methods-not-work"><a class="header" href="#why-do-async-tokio-api-calls-from-interface-methods-not-work">Why do async tokio API calls from interface methods not work?</a></h2>
