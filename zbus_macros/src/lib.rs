@@ -420,7 +420,7 @@ pub fn interface(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// an I/O error.
 ///
 /// Each variant (except for the special `zbus` one) can optionally have a (named or unnamed)
-/// `String` field (which is used as the human-readable error description).
+/// `String` or `Box<str>` field (which is used as the human-readable error description).
 ///
 /// The following type-level attributes are supported:
 ///

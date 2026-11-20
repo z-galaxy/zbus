@@ -1,6 +1,6 @@
 use proc_macro2::{Span, TokenStream};
 use quote::{ToTokens, quote};
-use syn::{Data, DeriveInput, Error, Fields, Ident, Variant, spanned::Spanned};
+use syn::{Data, DeriveInput, Error, Fields, Ident, Type, Variant, spanned::Spanned};
 use zbus_utils::def_attrs;
 
 def_attrs! {
@@ -126,26 +126,39 @@ pub fn expand_derive(input: DeriveInput) -> Result<TokenStream, Error> {
 
         // The conversion for #[zbus(error)] variant is handled separately/explicitly.
         if !error {
+            // The description, as the type of the field that holds it, such as a `String` or a
+            // `Box<str>`.
+            let description = |ty: &Type| {
+                quote! {
+                    <#ty as ::std::convert::From<::std::string::String>>::from(
+                        desc.map(::std::string::String::from).unwrap_or_default(),
+                    )
+                }
+            };
             // FIXME: deserialize msg to error field instead, to support variable args
             let e = match &variant.fields {
                 Fields::Unit => quote! {
                     #fqn => Self::#ident,
                 },
-                Fields::Unnamed(_) => quote! {
-                    #fqn => Self::#ident(
-                        desc.map(::std::string::String::from).unwrap_or_default(),
-                    ),
-                },
+                Fields::Unnamed(u) => {
+                    let field = u
+                        .unnamed
+                        .first()
+                        .ok_or_else(|| Error::new(u.span(), "expected at least one field"))?;
+                    let description = description(&field.ty);
+                    quote! {
+                        #fqn => Self::#ident(#description),
+                    }
+                }
                 Fields::Named(n) => {
-                    let f = &n
+                    let field = n
                         .named
                         .first()
-                        .ok_or_else(|| Error::new(n.span(), "expected at least one field"))?
-                        .ident;
+                        .ok_or_else(|| Error::new(n.span(), "expected at least one field"))?;
+                    let f = &field.ident;
+                    let description = description(&field.ty);
                     quote! {
-                        #fqn => Self::#ident {
-                            #f: desc.map(::std::string::String::from).unwrap_or_default(),
-                        },
+                        #fqn => Self::#ident { #f: #description },
                     }
                 }
             };
