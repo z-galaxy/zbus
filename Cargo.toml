@@ -7,6 +7,7 @@ members = [
     "zbus_xmlgen",
     "test_fixtures/geoclue_client",
     "test_fixtures/geoclue_service",
+    "test_fixtures/own_io",
     "test_fixtures/renamed_zbus",
     "test_fixtures/service_only",
     "test_fixtures/zbus_only",
