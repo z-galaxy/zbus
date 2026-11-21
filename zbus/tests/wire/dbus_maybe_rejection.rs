@@ -103,8 +103,7 @@ fn dbus_message_body_rejects_header_signature_carrying_maybe() {
     bytes.extend_from_slice(&[8, 1, b'g', 0, 2, b'm', b'i', 0]);
     let data = Data::new(bytes, Context::new(LE, 0));
 
-    // SAFETY: the bytes are those of a whole message, without a body.
-    let msg = unsafe { Message::from_bytes(data) }.unwrap();
+    let msg = Message::try_from_bytes(data).unwrap();
     let body = msg.body();
     let res: zbus::Result<(i32, usize)> = body
         .data()

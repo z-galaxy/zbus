@@ -52,8 +52,7 @@ fn msg_de(c: &mut Criterion) {
     let data = msg.data().clone();
     g.bench_function("received", |b| {
         b.iter(|| {
-            // SAFETY: The bytes are those of a message that zbus built.
-            let msg = unsafe { Message::from_bytes(black_box(data.clone())) }.unwrap();
+            let msg = Message::try_from_bytes(black_box(data.clone())).unwrap();
             black_box(msg);
         })
     });
