@@ -15,9 +15,10 @@ serde = "1.0.229"
 [dependencies.zbus]
 path = ".."
 default-features = false
-# The D-Bus API, for the `header` target to decode messages with and the `body` target to check
-# bodies with, and the bus API, for `Message::with_sender`, which the `header` target checks too.
-features = ["comms", "bus-impl"]
+# The part of the D-Bus API that needs no connection, for the `header` target to decode messages
+# with and the `body` target to check bodies with, and the deprecated `bus-impl`, for the deprecated
+# `Message::with_sender`, which the `header` target checks too, until zbus 7 removes both.
+features = ["core", "bus-impl"]
 
 # Prevent this from interfering with workspaces
 [workspace]

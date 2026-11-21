@@ -113,9 +113,10 @@ unixexec = ["comms", "tokio?/process"]
 ibus = ["comms", "tokio?/process"]
 # Enables API that is only needed for peer-to-peer (p2p) connections (enables `core-p2p`).
 p2p = ["comms", "core-p2p"]
-# Enables API that is only needed for bus implementations (enables `p2p`):
+# Deprecated: the API for bus implementations, which they implement themselves,
 # `connection::Builder::unique_name` and `validate_bodies`, `Connection::set_unique_name` and
-# `Message::with_sender`.
+# `Message::with_sender`, all of them deprecated. It still enables them, and `p2p`, until zbus 7
+# removes them and the feature.
 bus-impl = ["p2p"]
 # Enables API, on Linux, to hand a connection over, for it to go on in this process or in another
 # one, as a service or a bus that restarts through systemd's file descriptor store does.

@@ -27,9 +27,9 @@ zbus = { version = "6", default-features = false }
 That build compiles `zbus::wire` and `zbus::names` and nothing else — no connection, proxy or
 object server. The optional wire-format features keep zvariant's names (`arrayvec`, `camino`,
 `chrono`, `heapless`, `option-as-array`, `serde_bytes`, `time`, `url`, `uuid`), and enabling any
-D-Bus feature (`comms`, `default-rt`, `tokio`, `tokio-multithread`, `p2p`, `bus-impl`, `handover`,
-`proxy`, `service`, `object-manager`, `unixexec`, `ibus`) brings the D-Bus API back. `core` and
-`core-p2p` bring back the part of it that needs no connection, as below.
+D-Bus feature (`comms`, `default-rt`, `tokio`, `tokio-multithread`, `p2p`, `handover`, `proxy`,
+`service`, `object-manager`, `unixexec`, `ibus`, or the deprecated `bus-impl`) brings the D-Bus
+API back. `core` and `core-p2p` bring back the part of it that needs no connection, as below.
 
 zbus logs through [`tracing`], behind the default `tracing` feature; a `default-features =
 false` build that wants zbus's logs must re-enable it explicitly.
@@ -59,6 +59,19 @@ program read once it is whole, along with the file descriptors that it carries. 
 as the bytes and the file descriptors of `Message::data`. Before the messages comes the
 authentication handshake, whose commands `zbus::sasl::Command` parses and writes, and
 `fdo::ConnectionCredentials::from_socket` tells who the peer of a unix socket is, with no runtime.
+
+## Deprecated: `bus-impl`
+
+The `bus-impl` feature is deprecated, and zbus 7 removes it. The API that only it enables is for
+bus implementations, which implement what it does themselves, and it is deprecated along with the
+feature: `connection::Builder::unique_name` and `validate_bodies`, `Connection::set_unique_name`
+and `Message::with_sender`. Until zbus 7, the feature still enables them, and `p2p`.
+
+What else it enabled is general, and no longer needs it: `message::Body::validate`, which checks a
+body as `validate_bodies` has a connection do, with `core`, and
+`connection::Builder::build_message_stream` and, on Unix, `fdo::ConnectionCredentials::of_peer`,
+with `comms`. A bus that does its own I/O has all that it needs of zbus with `core` and
+`core-p2p`, as above.
 
 ## Example code
 
