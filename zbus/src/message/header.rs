@@ -186,7 +186,10 @@ impl PrimaryHeader {
     ///
     /// A program that reads messages off a socket of its own tells where each ends with this:
     /// once [`PrimaryHeader::LEN_WITH_FIELDS_LEN`] bytes of a message are in, this says how many
-    /// it has in all. The header fields and the body aren't looked at.
+    /// it has in all, and [`Message::take_from`] takes the message once they are in. The header
+    /// fields and the body aren't looked at.
+    ///
+    /// [`Message::take_from`]: super::Message::take_from
     ///
     /// # Errors
     ///

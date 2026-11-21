@@ -53,7 +53,9 @@ of the `p2p` API that a server needs without a connection, `Guid::generate`. Eve
 feature enables `core`, and `p2p` enables `core-p2p`.
 
 A program that reads messages off a socket of its own tells how long each is from its first bytes
-with `message::PrimaryHeader::read_with_len`.
+with `message::PrimaryHeader::read_with_len`, and `Message::take_from` takes it out of what the
+program read once it is whole, along with the file descriptors that it carries. A message goes out
+as the bytes and the file descriptors of `Message::data`.
 
 ## Example code
 
