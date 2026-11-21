@@ -126,7 +126,8 @@ handover = ["comms", "dep:zoter"]
 zbus_macros = { path = "../zbus_macros", version = "6.5.0", default-features = false }
 zcheapstr.workspace = true
 endi.workspace = true
-zbus_utils = { path = "../zbus_utils", version = "6.1.0" }
+# Without the code generation of the derives: only zbus_macros needs it, and it is what needs syn.
+zbus_utils = { path = "../zbus_utils", version = "6.1.0", default-features = false }
 
 serde.workspace = true
 serde_repr = { workspace = true, optional = true }

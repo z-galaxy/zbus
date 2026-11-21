@@ -157,6 +157,19 @@ jobs:
           cargo --locked clippy -p geoclue_service_fixture -p geoclue_client_fixture
           cargo --locked clippy -p geoclue_service_fixture -p geoclue_client_fixture \
             --no-default-features --features tokio
+      - name: Check that zbus builds syn for the host alone
+        run: |
+          # zbus takes zbus_utils without its `codegen` feature, so that syn, quote and
+          # proc-macro2 are built for zbus_macros, a proc-macro crate, on the host alone, and not
+          # for zbus's target too. Features only add dependencies, so the build with every feature
+          # covers the others. `-p zbus` is load-bearing: in a workspace-wide build, zbus_utils is
+          # built with its own default features, `codegen` among them, for zbus too. The tree is
+          # kept before it is searched, so that a `cargo tree` failure fails the step.
+          tree=$(cargo --locked tree -e normal,no-proc-macro -p zbus --all-features --target all)
+          if printf '%s\n' "$tree" | grep -E "^[^a-zA-Z0-9]*(syn|quote|proc-macro2) v"; then
+            echo "zbus builds syn, quote or proc-macro2 for its target" >&2
+            exit 1
+          fi
 
   linux_test:
     runs-on: ubuntu-latest
