@@ -93,9 +93,9 @@ threads. A target holds benchmarks of one kind only, and a new one goes in the l
 ### Core Crates
 - **zbus**: Everything a user sees. The D-Bus API (connection, proxy, object server) sits behind
   the `comms` feature; the part of it that needs no connection (messages, match rules, addresses,
-  GUIDs, `DBusError`, the `fdo` errors and types) behind `core`, which `comms` enables, for a
-  program that does its own I/O, such as busd; the `wire` module (D-Bus wire format) and the
-  `names` module (D-Bus name types) are always compiled
+  GUIDs, the SASL commands, `DBusError`, the `fdo` errors and types) behind `core`, which `comms`
+  enables, for a program that does its own I/O, such as busd; the `wire` module (D-Bus wire
+  format) and the `names` module (D-Bus name types) are always compiled
 - **zbus_macros**: Procedural macros: `#[interface]`, `#[proxy]`, `#[derive(DBusError)]` and the
   wire derives (`Type`, `Variant`, `OwnedVariant`, `SerializeDict`, `DeserializeDict`, `signature!`)
 - **zbus_utils**: Signature parser, D-Bus name validators and the derive codegen shared by zbus
@@ -133,13 +133,15 @@ zbus/src/
 ├── proxy/              # Client-side proxy objects with #[proxy] macro
 ├── object_server/      # Service-side interface implementation
 ├── message/            # D-Bus message serialization/parsing
+├── sasl/               # The commands of the authentication handshake (SASL)
 ├── address/            # Transport layer abstraction
 ├── fdo/                # Standard D-Bus interfaces (Peer, Properties, etc.)
 └── runtime/            # Async runtime integration: zruntime, Tokio and `traits::Runtime`
 ```
 
-Everything below `error.rs` in that list is behind the `comms` feature, but for `message/`, the
-parsing and formatting of `address/`, and the errors and types of `fdo/`, which are behind `core`.
+Everything below `error.rs` in that list is behind the `comms` feature, but for `message/`,
+`sasl/`, the parsing and formatting of `address/`, and the errors and types of `fdo/`, which are
+behind `core`.
 
 **Message Flow**: Connection ↔ Message ↔ `zbus::wire` serialization ↔ Transport
 

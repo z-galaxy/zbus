@@ -46,16 +46,18 @@ zbus = { version = "6.6", default-features = false, features = ["core"] }
 ```
 
 The `core` feature adds D-Bus messages (`zbus::message`), match rules, GUIDs, addresses (parsed
-and written, but not connected to), `DBusError`, and the errors and types of `zbus::fdo` to the
-wire format and the bus name types. It compiles no connection, proxy, object server or runtime,
-and none of the crates that only they need, such as zruntime or socket2. `core-p2p` adds the part
-of the `p2p` API that a server needs without a connection, `Guid::generate`. Every other D-Bus
-feature enables `core`, and `p2p` enables `core-p2p`.
+and written, but not connected to), the commands of the authentication handshake (`zbus::sasl`),
+`DBusError`, and the errors and types of `zbus::fdo` to the wire format and the bus name types. It
+compiles no connection, proxy, object server or runtime, and none of the crates that only they
+need, such as zruntime or socket2. `core-p2p` adds the part of the `p2p` API that a server needs
+without a connection, `Guid::generate`. Every other D-Bus feature enables `core`, and `p2p`
+enables `core-p2p`.
 
 A program that reads messages off a socket of its own tells how long each is from its first bytes
 with `message::PrimaryHeader::read_with_len`, and `Message::take_from` takes it out of what the
 program read once it is whole, along with the file descriptors that it carries. A message goes out
-as the bytes and the file descriptors of `Message::data`.
+as the bytes and the file descriptors of `Message::data`. Before the messages comes the
+authentication handshake, whose commands `zbus::sasl::Command` parses and writes.
 
 ## Example code
 

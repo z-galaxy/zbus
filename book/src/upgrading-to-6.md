@@ -38,7 +38,8 @@ A lot of the API is now behind new Cargo features. Those marked as default are o
   `core` and `core-p2p`, such as `tokio`, `proxy` or `p2p`, enables it. Without it (or `core`),
   zbus is the wire format and the name types.
 * `core` (since 6.6): the part of the D-Bus API that needs no connection, i.e. messages, match
-  rules, addresses, GUIDs and the `fdo` errors and types, for a program that does its own I/O.
+  rules, addresses, GUIDs, the commands of the authentication handshake (`zbus::sasl`) and the
+  `fdo` errors and types, for a program that does its own I/O.
   `comms` enables it, and `core-p2p` (which `p2p` enables) adds `Guid::generate` to it.
 * `proxy` (default): the client-side API, i.e. `Proxy`, `#[proxy]` and the `fdo::*Proxy` types.
 * `service` (default): the service-side API, i.e. `ObjectServer` and `#[interface]`.

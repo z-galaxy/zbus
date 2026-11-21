@@ -36,8 +36,9 @@ uuid = ["dep:uuid"]
 
 # The part of the D-Bus API that needs no connection and no runtime, for a program that reads and
 # writes D-Bus messages on sockets of its own, such as a bus: messages (`zbus::message`), match
-# rules, GUIDs, addresses (parsed and written, not connected to), `DBusError`, the errors and types
-# of `zbus::fdo`, and every variant of `zbus::Error` that `comms` has. `comms` enables it.
+# rules, GUIDs, addresses (parsed and written, not connected to), the commands of the
+# authentication handshake (`zbus::sasl`), `DBusError`, the errors and types of `zbus::fdo`, and
+# every variant of `zbus::Error` that `comms` has. `comms` enables it.
 core = [
     "dep:bitflags",
     "zbus_macros/comms",
@@ -47,6 +48,8 @@ core = [
     "dep:uuid",
     # `Address::session` asks for the user's ID through it on Unix.
     "dep:rustix",
+    # `zbus::sasl` hex-encodes the data of the commands of the handshake with it.
+    "dep:hex",
 ]
 # The part of the `p2p` API that needs no connection, for a server that does its own I/O:
 # `Guid::generate`. `p2p` enables it. It is a feature of its own, as generating GUIDs takes the
@@ -57,7 +60,6 @@ core-p2p = ["core", "uuid?/v4"]
 comms = [
     "core",
     "dep:futures-core",
-    "dep:hex",
     "dep:ordered-stream",
     # Without `dep:zruntime`, Cargo would also make `zruntime` a feature of zbus.
     "dep:zruntime",
