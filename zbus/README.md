@@ -28,8 +28,8 @@ That build compiles `zbus::wire` and `zbus::names` and nothing else — no conne
 object server. The optional wire-format features keep zvariant's names (`arrayvec`, `camino`,
 `chrono`, `heapless`, `option-as-array`, `serde_bytes`, `time`, `url`, `uuid`), and enabling any
 D-Bus feature (`comms`, `default-rt`, `tokio`, `tokio-multithread`, `p2p`, `bus-impl`, `handover`,
-`proxy`, `service`, `object-manager`, `unixexec`, `ibus`) brings the D-Bus API back. `core`
-brings back the part of it that needs no connection, as below.
+`proxy`, `service`, `object-manager`, `unixexec`, `ibus`) brings the D-Bus API back. `core` and
+`core-p2p` bring back the part of it that needs no connection, as below.
 
 zbus logs through [`tracing`], behind the default `tracing` feature; a `default-features =
 false` build that wants zbus's logs must re-enable it explicitly.
@@ -48,8 +48,9 @@ zbus = { version = "6.6", default-features = false, features = ["core"] }
 The `core` feature adds D-Bus messages (`zbus::message`), match rules, GUIDs, addresses (parsed
 and written, but not connected to), `DBusError`, and the errors and types of `zbus::fdo` to the
 wire format and the bus name types. It compiles no connection, proxy, object server or runtime,
-and none of the crates that only they need, such as zruntime or socket2. Every other D-Bus feature
-enables `core`.
+and none of the crates that only they need, such as zruntime or socket2. `core-p2p` adds the part
+of the `p2p` API that a server needs without a connection, `Guid::generate`. Every other D-Bus
+feature enables `core`, and `p2p` enables `core-p2p`.
 
 ## Example code
 
