@@ -454,6 +454,11 @@ impl Message {
     /// This is mainly provided for bus implementations, and hence only available when the
     /// `bus-impl` feature is enabled.
     #[cfg(feature = "bus-impl")]
+    #[deprecated(
+        since = "6.6.0",
+        note = "Only a bus sets the sender of a peer's message, and a bus implements that itself. \
+                This will be removed in zbus 7."
+    )]
     pub fn with_sender(&self, sender: &crate::names::UniqueName<'_>) -> Result<Self> {
         let data = &self.inner.bytes;
         let bytes = data.bytes();
@@ -807,6 +812,7 @@ mod tests {
                     .unwrap(),
             ];
             for msg in messages {
+                #[allow(deprecated)]
                 let new = msg.with_sender(&sender).unwrap();
                 assert_eq!(new.header().sender(), Some(&sender));
                 assert_eq!(new.body().data().bytes(), msg.body().data().bytes());
