@@ -227,6 +227,59 @@ impl Message {
         Self::from_raw_parts(bytes, 0)
     }
 
+    /// Create a message from its bytes, and the file descriptors that it carries.
+    ///
+    /// The bytes are checked as those of a message that a connection receives are: its header,
+    /// in full, its protocol version, the fields that its type requires, the padding after its
+    /// header, that they end where its header says that it does, and that it carries as many file
+    /// descriptors as its header counts. The body is not checked against its signature:
+    /// [`Body::validate`] does that.
+    ///
+    /// The message is at receive position 0 ([`Message::recv_position`]), as no connection
+    /// received it.
+    ///
+    /// # Errors
+    ///
+    /// The error that tells what is wrong with the message, such as:
+    ///
+    /// * [`Error::IncorrectEndian`] if its endian signature isn't the byte order of the context of
+    ///   `bytes`;
+    /// * [`Error::OutOfBounds`] if `bytes` are fewer than its header says, and
+    ///   [`Error::ExcessData`] if they are more;
+    /// * [`Error::MissingParameter`] if it carries fewer file descriptors than its header counts,
+    ///   and [`Error::ExcessData`] if it carries more.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use zbus::{message::Message, wire::serialized::Data};
+    ///
+    /// let msg = Message::method_call("/org/zbus/Example", "Ping").build(&())?;
+    /// let bytes = Data::new(msg.data().to_vec(), msg.data().context());
+    ///
+    /// let copy = Message::try_from_bytes(bytes)?;
+    /// assert_eq!(copy.header().member().unwrap().as_str(), "Ping");
+    /// # Ok::<(), zbus::Error>(())
+    /// ```
+    pub fn try_from_bytes(bytes: serialized::Data<'static, 'static>) -> Result<Self> {
+        let (_, len) = PrimaryHeader::read_with_len(&bytes)?;
+        if bytes.len() < len {
+            return Err(Error::OutOfBounds);
+        }
+        if bytes.len() > len {
+            return Err(Error::ExcessData);
+        }
+        let msg = Self::from_raw_parts(bytes, 0)?;
+        // Making the message checked that it carries no fewer file descriptors than its header
+        // counts.
+        #[cfg(unix)]
+        if msg.data().fds().len() > msg.quick_fields().unix_fds().unwrap_or(0) as usize {
+            return Err(Error::ExcessData);
+        }
+
+        Ok(msg)
+    }
+
     /// Take the message that `bytes` start with out of them, once it is whole, along with the file
     /// descriptors that it carries out of `fds`.
     ///
@@ -737,7 +790,13 @@ mod tests {
     use test_log::test;
 
     use super::{Message, Sequence, Type, parser};
-    use crate::{Error, wire::serialized::Data};
+    use crate::{
+        Error,
+        wire::{
+            BE, Endian, LE,
+            serialized::{Context, Data},
+        },
+    };
 
     #[test]
     fn test() {
@@ -1027,6 +1086,66 @@ mod tests {
         let data = Data::new_fds(bytes, m.data().context(), fds);
         let error = Message::from_raw_parts(data, 0).unwrap_err();
         assert!(matches!(error, Error::MissingParameter(_)), "{error:?}");
+    }
+
+    /// A message made of the bytes of another is that message, in the byte order of their
+    /// context only.
+    #[test]
+    fn try_from_bytes() {
+        let msg = Message::method_call("/org/zbus/Test", "Test")
+            .interface("org.zbus.Test")
+            .build(&(7u32, "seven"))
+            .unwrap();
+
+        let copy = Message::try_from_bytes(msg.data().clone()).unwrap();
+        assert_eq!(
+            format!("{:?}", copy.header()),
+            format!("{:?}", msg.header())
+        );
+        let body: (u32, String) = copy.body().deserialize().unwrap();
+        assert_eq!(body, (7, "seven".to_string()));
+        assert_eq!(copy.recv_position(), Sequence::default());
+
+        let other = match msg.data().context().endian() {
+            Endian::Little => BE,
+            Endian::Big => LE,
+        };
+        let data = Data::new(msg.data().to_vec(), Context::new(other, 0));
+        let error = Message::try_from_bytes(data).unwrap_err();
+        assert_eq!(error, Error::IncorrectEndian);
+
+        // Bytes that end before the end of the message that their header tells, or after it.
+        let bytes = msg.data().bytes();
+        let context = msg.data().context();
+        let short = Data::new(bytes[..bytes.len() - 1].to_vec(), context);
+        let error = Message::try_from_bytes(short).unwrap_err();
+        assert_eq!(error, Error::OutOfBounds);
+        let long = Data::new([bytes, &[0]].concat(), context);
+        let error = Message::try_from_bytes(long).unwrap_err();
+        assert_eq!(error, Error::ExcessData);
+    }
+
+    /// A message made of bytes carries as many file descriptors as its header counts: fewer, or
+    /// more, are an error.
+    #[cfg(unix)]
+    #[test]
+    fn try_from_bytes_with_fds() {
+        let stdout = std::io::stdout();
+        let msg = Message::method_call("/org/zbus/Test", "Test")
+            .build(&Fd::from(&stdout))
+            .unwrap();
+        let data = |count: usize| {
+            let fds = (0..count).map(|_| OwnedFd::from(std::io::pipe().unwrap().0));
+
+            Data::new_fds(msg.data().to_vec(), msg.data().context(), fds)
+        };
+
+        let copy = Message::try_from_bytes(data(1)).unwrap();
+        assert_eq!(copy.data().fds().len(), 1);
+        let error = Message::try_from_bytes(data(0)).unwrap_err();
+        assert!(matches!(error, Error::MissingParameter(_)), "{error:?}");
+        let error = Message::try_from_bytes(data(2)).unwrap_err();
+        assert_eq!(error, Error::ExcessData);
     }
 
     /// Each message is taken out of the bytes that came in once it is whole in them, and nothing
