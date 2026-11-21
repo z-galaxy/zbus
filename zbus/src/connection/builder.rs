@@ -313,8 +313,10 @@ impl<'a> Builder<'a> {
     /// Nothing else gets them: no stream for a match rule, such as that of a proxy, and no method
     /// call that waits for its reply. [The module of the
     /// hand-over](crate::connection::handover#who-gets-each-message) tells more. Then the
-    /// connection reads the socket from where the other one stopped. With the `bus-impl` feature,
-    /// `Builder::validate_bodies` has it check the bodies of all of these messages.
+    /// connection reads the socket from where the other one stopped. To check the bodies of the
+    /// messages that the stream yields, call [`Body::validate`](crate::message::Body::validate) on
+    /// each. With the `bus-impl` feature, the deprecated `Builder::validate_bodies` has the
+    /// connection check the bodies of all of these messages.
     ///
     /// The connection yields the messages of the hand-over as soon as it is built, so a
     /// [`MessageStream`] made from it once it is built can miss them. Build it with
@@ -631,6 +633,11 @@ impl<'a> Builder<'a> {
     ///
     /// [`Body::validate`]: crate::message::Body::validate
     #[cfg(feature = "bus-impl")]
+    #[deprecated(
+        since = "6.6.0",
+        note = "Call `Body::validate` on the messages that you take off the connection's stream \
+                instead. This will be removed in zbus 7."
+    )]
     pub fn validate_bodies(mut self) -> Self {
         self.validate_bodies = true;
 
