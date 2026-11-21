@@ -154,6 +154,10 @@ jobs:
           # The service-only fixture has to be built on its own: in a workspace-wide build, the
           # features of its `zbus` dependency are unified with those of the other members.
           cargo --locked clippy -p service_only_fixture
+          # So does the library of the fixture that does its own I/O, which is built with the
+          # `core` and `core-p2p` features of zbus alone, to show that they are all that such a
+          # program needs. Its test, which isn't built here, adds a zbus client.
+          cargo --locked clippy -p own_io_fixture
           cargo --locked clippy -p geoclue_service_fixture -p geoclue_client_fixture
           cargo --locked clippy -p geoclue_service_fixture -p geoclue_client_fixture \
             --no-default-features --features tokio
@@ -292,6 +296,9 @@ jobs:
           # No connection, so no session bus is needed.
           cargo --locked test --release --verbose -p zbus --no-default-features \
             --features core,core-p2p
+          # A zbus client talks to a server that does its own I/O on that build, over a socket
+          # pair, with no bus either.
+          cargo --locked test --release --verbose -p own_io_fixture
           # See CI/forbidden-deps.sh for what this guards against and why. The crates that only
           # connections need are forbidden here too, but for `windows-sys`: `--target all` shows it
           # under rustix, which zbus only depends on off Windows.
