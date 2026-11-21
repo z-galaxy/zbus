@@ -14,20 +14,12 @@ mod split;
 pub(crate) use split::Writes;
 pub use split::{BoxedSplit, Split};
 
-use std::{io, mem};
+use std::io;
 
 #[cfg(unix)]
 use crate::utils::FDS_MAX;
 use crate::{
-    Message,
-    conn::AuthMechanism,
-    fdo::ConnectionCredentials,
-    log::trace,
-    message::PrimaryHeader,
-    wire::{
-        Endian,
-        serialized::{self, Context},
-    },
+    Message, conn::AuthMechanism, fdo::ConnectionCredentials, log::trace, message::PrimaryHeader,
 };
 #[cfg(unix)]
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
@@ -241,17 +233,20 @@ pub trait ReadHalf: std::fmt::Debug + Send + Sync + 'static {
         // and the message gets an allocation of its exact length once it is in. Each read is
         // straight into `already_received_bytes`, no further than the end of the message, and
         // into room for no more than `READ_MAX` bytes of it.
-        let (primary_header, len) = loop {
+        loop {
+            if let Some(msg) = Message::take_received(
+                already_received_bytes,
+                #[cfg(unix)]
+                already_received_fds,
+                seq,
+            )? {
+                return Ok(msg);
+            }
             let have = already_received_bytes.len();
             let want = if have < PrimaryHeader::LEN_WITH_FIELDS_LEN {
                 PrimaryHeader::LEN_WITH_FIELDS_LEN
             } else {
-                let (primary_header, len) = PrimaryHeader::read_with_len(already_received_bytes)?;
-                if have >= len {
-                    break (primary_header, len);
-                }
-
-                len
+                PrimaryHeader::read_with_len(already_received_bytes)?.1
             };
             already_received_bytes.reserve_exact(want - have);
             let mut room = Room::new(already_received_bytes, want.min(have + READ_MAX));
@@ -280,16 +275,7 @@ pub trait ReadHalf: std::fmt::Debug + Send + Sync + 'static {
                     .into());
                 }
             }
-        };
-
-        take_message(
-            seq,
-            &primary_header,
-            len,
-            already_received_bytes,
-            #[cfg(unix)]
-            already_received_fds,
-        )
+        }
     }
 
     /// Attempt to receive bytes from the socket.
@@ -568,39 +554,6 @@ pub trait WriteHalf: std::fmt::Debug + Send + Sync + 'static {
     fn can_resume_writes(&self) -> bool {
         false
     }
-}
-
-/// Take the message that `bytes` start with, which is whole in them, `len` bytes long as
-/// `primary_header` says, out of them, with as many of `fds` as its header counts.
-pub(crate) fn take_message(
-    seq: u64,
-    primary_header: &PrimaryHeader,
-    len: usize,
-    bytes: &mut Vec<u8>,
-    #[cfg(unix)] fds: &mut Vec<OwnedFd>,
-) -> crate::Result<Message> {
-    // Nothing is allocated when nothing follows the message.
-    let rest = bytes.split_off(len);
-    let bytes = mem::replace(bytes, rest);
-
-    // The message takes as many of the descriptors that wait as its header counts, whichever of
-    // its bytes they came with, as the reference implementation of D-Bus does.
-    #[cfg(unix)]
-    let fds = if fds.is_empty() {
-        vec![]
-    } else {
-        let (_, _, fields) = crate::message::parser::parse(&bytes)?;
-        let count = (fields.unix_fds().unwrap_or(0) as usize).min(fds.len());
-
-        fds.drain(..count).collect()
-    };
-    let endian = Endian::from(primary_header.endian_sig());
-    let ctxt = Context::new(endian, 0);
-    #[cfg(unix)]
-    let bytes = serialized::Data::new_fds(bytes, ctxt, fds);
-    #[cfg(not(unix))]
-    let bytes = serialized::Data::new(bytes, ctxt);
-    Message::from_raw_parts(bytes, seq)
 }
 
 /// The most that a read of the default [`ReadHalf::receive_message`] has room for.
@@ -926,7 +879,8 @@ mod tests {
     }
 
     /// A message whose header counts more file descriptors than came in is an error, rather than
-    /// a panic, whichever of them the handshake read.
+    /// a panic, whichever of them the handshake read, and the message and the descriptors stay
+    /// where they are.
     #[cfg(unix)]
     #[test]
     #[timeout(15000)]
@@ -937,17 +891,20 @@ mod tests {
             .unwrap();
         let mut half = Scripted::default();
         half.push(msg.data().to_vec());
+        let mut bytes = vec![];
         // The handshake read one of the descriptors, and the other never comes.
         let mut fds = clones(&pipes[..1]);
 
         let received = half
-            .receive(&mut vec![], &mut fds)
+            .receive(&mut bytes, &mut fds)
             .expect("a call waits with the message read");
 
         assert!(
             matches!(received, Err(Error::MissingParameter(_))),
             "{received:?}",
         );
+        assert_eq!(bytes, msg.data().bytes());
+        assert_eq!(fds.len(), 1);
     }
 
     /// File descriptors that no header counts wait for the messages after them to take them, but

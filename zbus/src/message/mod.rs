@@ -392,7 +392,7 @@ impl Message {
     ///
     /// The message is checked as it lies in `bytes`, before anything is taken out of them, so
     /// that nothing is on an error.
-    fn take_received(
+    pub(crate) fn take_received(
         bytes: &mut Vec<u8>,
         #[cfg(unix)] fds: &mut Vec<OwnedFd>,
         recv_seq: u64,
