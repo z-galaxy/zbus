@@ -16,13 +16,16 @@ categories = ["data-structures", "encoding", "parsing"]
 readme = "README.md"
 
 [features]
-default = []
+default = ["codegen"]
+# The code generation of the derives of zbus and zgvariant (the `derive` and `macros` modules),
+# which needs syn, quote and proc-macro2.
+codegen = ["dep:proc-macro2", "dep:syn", "dep:quote"]
 gvariant = []
 
 [dependencies]
-proc-macro2.workspace = true
-syn.workspace = true
-quote.workspace = true
+proc-macro2 = { workspace = true, optional = true }
+syn = { workspace = true, optional = true }
+quote = { workspace = true, optional = true }
 serde.workspace = true
 winnow.workspace = true
 
