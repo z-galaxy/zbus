@@ -50,6 +50,11 @@ A lot of the API is now behind new Cargo features. Those marked as default are o
 * `tokio-multithread`: runs `zbus::block_on` on a multi-threaded Tokio runtime.
 * `unixexec` and `ibus`: the `unixexec:` and `ibus:` transports. Without them, an address of that
   transport is rejected, including in `DBUS_SESSION_BUS_ADDRESS`.
+* `bus-impl` (deprecated since 6.6): the API for bus implementations, which implement it
+  themselves: `connection::Builder::unique_name` and `validate_bodies`,
+  `Connection::set_unique_name` and `Message::with_sender`. zbus 7 removes it along with the
+  feature. Since 6.6, `message::Body::validate`, `connection::Builder::build_message_stream` and
+  `fdo::ConnectionCredentials::of_peer` no longer need it.
 
 These features are gone and have to be removed from your dependency entry:
 
