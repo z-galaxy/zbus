@@ -316,7 +316,7 @@ mod tests {
         Into<Dict<'static, 'static>>
     );
 
-    #[cfg(feature = "comms")]
+    #[cfg(feature = "core")]
     assert_impl_all!(
         HashMap<crate::fdo::RequestNameFlags, u8>:
             Type,

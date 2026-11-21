@@ -28,10 +28,28 @@ That build compiles `zbus::wire` and `zbus::names` and nothing else — no conne
 object server. The optional wire-format features keep zvariant's names (`arrayvec`, `camino`,
 `chrono`, `heapless`, `option-as-array`, `serde_bytes`, `time`, `url`, `uuid`), and enabling any
 D-Bus feature (`comms`, `default-rt`, `tokio`, `tokio-multithread`, `p2p`, `bus-impl`, `handover`,
-`proxy`, `service`, `object-manager`, `unixexec`, `ibus`) brings the D-Bus API back.
+`proxy`, `service`, `object-manager`, `unixexec`, `ibus`) brings the D-Bus API back. `core`
+brings back the part of it that needs no connection, as below.
 
 zbus logs through [`tracing`], behind the default `tracing` feature; a `default-features =
 false` build that wants zbus's logs must re-enable it explicitly.
+
+## Without connections
+
+A program that reads and writes D-Bus messages on its own sockets, such as a bus, or a
+peer-to-peer server with its own event loop, can use only the part of the D-Bus API that needs no
+connection:
+
+```toml
+[dependencies]
+zbus = { version = "6.6", default-features = false, features = ["core"] }
+```
+
+The `core` feature adds D-Bus messages (`zbus::message`), match rules, GUIDs, addresses (parsed
+and written, but not connected to), `DBusError`, and the errors and types of `zbus::fdo` to the
+wire format and the bus name types. It compiles no connection, proxy, object server or runtime,
+and none of the crates that only they need, such as zruntime or socket2. Every other D-Bus feature
+enables `core`.
 
 ## Example code
 

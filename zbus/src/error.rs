@@ -2,7 +2,7 @@ use std::{convert::Infallible, error, fmt, io, sync::Arc};
 
 use serde::{de, ser};
 
-#[cfg(feature = "comms")]
+#[cfg(feature = "core")]
 use crate::{
     Address, fdo,
     message::{Message, Type},
@@ -71,7 +71,7 @@ pub enum Error {
     /// instead. This variant is for the names that are not.
     // According to the spec, there can be all kinds of details in D-Bus errors but nobody adds
     // anything more than a string description.
-    #[cfg(feature = "comms")]
+    #[cfg(feature = "core")]
     MethodError(OwnedErrorName, Option<String>, Message),
     /// A required field is missing in the message headers.
     MissingField,
@@ -83,13 +83,13 @@ pub enum Error {
     ///
     /// This includes the D-Bus error replies whose name is defined by [`fdo::Error`], such as
     /// `org.freedesktop.DBus.Error.ServiceUnknown`, which becomes [`fdo::Error::ServiceUnknown`].
-    #[cfg(feature = "comms")]
+    #[cfg(feature = "core")]
     FDO(Box<fdo::Error>),
     /// A [`DBusError`](crate::DBusError) of any other type.
     ///
     /// This is how the failure of a property getter reaches the caller of the
     /// `PropertiesChanged` emission helper that `#[interface]` generates for the property.
-    #[cfg(feature = "comms")]
+    #[cfg(feature = "core")]
     DBus(Arc<dyn crate::DBusError + Send + Sync>),
     /// The requested name was already claimed by another peer.
     NameTaken,
@@ -104,7 +104,7 @@ pub enum Error {
     /// The given interface already exists at the given path.
     InterfaceExists(InterfaceName<'static>, ObjectPath<'static>),
     /// Failed to connect to the D-Bus server at the given address.
-    #[cfg(feature = "comms")]
+    #[cfg(feature = "core")]
     Connection(
         /// The I/O error that caused the failure.
         Arc<io::Error>,
@@ -148,14 +148,14 @@ impl PartialEq for Error {
             (Self::IncorrectEndian, Self::IncorrectEndian) => true,
             (Self::Handshake(_), Self::Handshake(_)) => true,
             (Self::InvalidReply, Self::InvalidReply) => true,
-            #[cfg(feature = "comms")]
+            #[cfg(feature = "core")]
             (Self::MethodError(_, _, _), Self::MethodError(_, _, _)) => true,
             (Self::MissingField, Self::MissingField) => true,
             (Self::InvalidGUID, Self::InvalidGUID) => true,
             (Self::Unsupported, Self::Unsupported) => true,
-            #[cfg(feature = "comms")]
+            #[cfg(feature = "core")]
             (Self::FDO(s), Self::FDO(o)) => s == o,
-            #[cfg(feature = "comms")]
+            #[cfg(feature = "core")]
             (Self::DBus(s), Self::DBus(o)) => {
                 s.name() == o.name() && s.description() == o.description()
             }
@@ -163,7 +163,7 @@ impl PartialEq for Error {
             (Self::InvalidMatchRule, Self::InvalidMatchRule) => true,
             (Self::InvalidSerial, Self::InvalidSerial) => true,
             (Self::InterfaceExists(s1, s2), Self::InterfaceExists(o1, o2)) => s1 == o1 && s2 == o2,
-            #[cfg(feature = "comms")]
+            #[cfg(feature = "core")]
             (Self::Connection(_, a1), Self::Connection(_, a2)) => a1 == a2,
             // `InputOutput`, `Handover` and `MissingParameter` deliberately fall through. Two I/O
             // errors are never considered equal, and a zoter error may wrap one. The parameter
@@ -178,11 +178,11 @@ impl error::Error for Error {
         match self {
             Error::InputOutput(e) => Some(e),
             Error::Utf8(e) => Some(e),
-            #[cfg(feature = "comms")]
+            #[cfg(feature = "core")]
             Error::FDO(e) => Some(e),
-            #[cfg(feature = "comms")]
+            #[cfg(feature = "core")]
             Error::DBus(_) => None,
-            #[cfg(feature = "comms")]
+            #[cfg(feature = "core")]
             Error::Connection(e, _) => Some(e),
             Error::Failure(_) => None,
             Error::IncorrectType => None,
@@ -203,7 +203,7 @@ impl error::Error for Error {
             Error::IncorrectEndian => None,
             Error::Handshake(_) => None,
             Error::InvalidReply => None,
-            #[cfg(feature = "comms")]
+            #[cfg(feature = "core")]
             Error::MethodError(_, _, _) => None,
             Error::MissingField => None,
             Error::InvalidGUID => None,
@@ -252,7 +252,7 @@ impl fmt::Display for Error {
             Error::IncorrectEndian => write!(f, "incorrect endian"),
             Error::Handshake(e) => write!(f, "D-Bus handshake failed: {e}"),
             Error::InvalidReply => write!(f, "Invalid D-Bus method reply"),
-            #[cfg(feature = "comms")]
+            #[cfg(feature = "core")]
             Error::MethodError(name, detail, _reply) => write!(
                 f,
                 "{}: {}",
@@ -262,9 +262,9 @@ impl fmt::Display for Error {
             Error::MissingField => write!(f, "A required field is missing from message headers"),
             Error::InvalidGUID => write!(f, "Invalid GUID"),
             Error::Unsupported => write!(f, "Connection support is lacking"),
-            #[cfg(feature = "comms")]
+            #[cfg(feature = "core")]
             Error::FDO(e) => write!(f, "{e}"),
-            #[cfg(feature = "comms")]
+            #[cfg(feature = "core")]
             Error::DBus(e) => write!(f, "{e}"),
             Error::NameTaken => write!(f, "name already taken on the bus"),
             Error::InvalidMatchRule => write!(f, "Invalid match rule string"),
@@ -273,7 +273,7 @@ impl fmt::Display for Error {
             }
             Error::InvalidSerial => write!(f, "Serial number in the message header is 0"),
             Error::InterfaceExists(i, p) => write!(f, "Interface `{i}` already exists at `{p}`"),
-            #[cfg(feature = "comms")]
+            #[cfg(feature = "core")]
             Error::Connection(e, addr) => write!(f, "failed to connect to `{addr}`: {e}"),
             #[cfg(all(target_os = "linux", feature = "handover"))]
             Error::Handover(e) => write!(f, "{e}"),
@@ -320,21 +320,21 @@ impl Error {
             Error::IncorrectEndian => Some("incorrect endian"),
             Error::Handshake(e) => Some(e),
             Error::InvalidReply => Some("invalid reply"),
-            #[cfg(feature = "comms")]
+            #[cfg(feature = "core")]
             Error::MethodError(_, desc, _) => desc.as_deref(),
-            #[cfg(feature = "comms")]
+            #[cfg(feature = "core")]
             Error::DBus(e) => e.description(),
             Error::MissingField => Some("a required field is missing from message headers"),
             Error::InvalidGUID => Some("invalid GUID"),
             Error::Unsupported => Some("connection support is lacking"),
-            #[cfg(feature = "comms")]
+            #[cfg(feature = "core")]
             Error::FDO(_) => Some("FDO error"),
             Error::NameTaken => Some("name already taken on the bus"),
             Error::InvalidMatchRule => Some("invalid match rule string"),
             Error::MissingParameter(_) => Some("A required parameter is missing"),
             Error::InvalidSerial => Some("serial number in the message header is 0"),
             Error::InterfaceExists(_, _) => Some("interface already exists"),
-            #[cfg(feature = "comms")]
+            #[cfg(feature = "core")]
             Error::Connection(_, _) => Some("could not connect to specified address"),
             #[cfg(all(target_os = "linux", feature = "handover"))]
             Error::Handover(_) => Some("hand-over error"),
@@ -394,7 +394,7 @@ impl From<Infallible> for Error {
     }
 }
 
-#[cfg(feature = "comms")]
+#[cfg(feature = "core")]
 impl From<fdo::Error> for Error {
     fn from(val: fdo::Error) -> Self {
         match val {
@@ -405,7 +405,7 @@ impl From<fdo::Error> for Error {
 }
 
 // For messages that are D-Bus error returns
-#[cfg(feature = "comms")]
+#[cfg(feature = "core")]
 impl From<Message> for Error {
     fn from(message: Message) -> Error {
         // FIXME: Instead of checking this, we should have Method as trait and specific types for
@@ -468,7 +468,7 @@ impl fmt::Display for MaxDepthExceeded {
 /// Alias for a `Result` with the error type `zbus::Error`.
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[cfg(all(test, feature = "comms"))]
+#[cfg(all(test, feature = "core"))]
 mod tests {
     use std::sync::Arc;
 

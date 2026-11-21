@@ -69,6 +69,7 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<(PrimaryHeader, usize, QuickFields)>
 }
 
 /// Parse the primary header at the start of `bytes`, and the length of the header fields after it.
+#[cfg(feature = "comms")]
 pub(super) fn parse_primary_header(bytes: &[u8]) -> Result<(PrimaryHeader, u32)> {
     let input = &mut Input::new(bytes);
     match bytes.first() {

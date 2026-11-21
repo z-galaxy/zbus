@@ -29,10 +29,11 @@ use header::{MAX_MESSAGE_SIZE, PRIMARY_HEADER_SIZE};
 pub(crate) mod parser;
 use parser::QuickFields;
 
-/// A position in the stream of [`Message`] objects received by a single [`zbus::Connection`].
+/// A position in the stream of [`Message`] objects received by a single `zbus::Connection` (which
+/// requires the `comms` feature).
 ///
-/// Note: the relative ordering of values obtained from distinct [`zbus::Connection`] objects is
-/// not specified; only sequence numbers originating from the same connection should be compared.
+/// Note: the relative ordering of values obtained from distinct connections is not specified; only
+/// sequence numbers originating from the same connection should be compared.
 #[derive(Debug, Default, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub struct Sequence {
     recv_seq: u64,
@@ -40,6 +41,7 @@ pub struct Sequence {
 
 impl Sequence {
     /// A sequence number that is higher than any other; used by errors that terminate a stream.
+    #[cfg(feature = "comms")]
     pub(crate) const LAST: Self = Self { recv_seq: u64::MAX };
 
     /// The position itself, which is 1 for the first message that a connection received.
@@ -57,8 +59,8 @@ impl Sequence {
 ///
 /// Also provided are constructors for messages of different types. These will mainly be useful for
 /// very advanced use cases as typically you will want to create a message for immediate dispatch
-/// and hence use the API provided by [`crate::connection::Connection::call_method`], even when
-/// using the low-level API.
+/// and hence use the API provided by `Connection::call_method` (which requires the `comms`
+/// feature), even when using the low-level API.
 ///
 /// **Note**: The message owns the received FDs and will close them when dropped. You can
 /// deserialize the body (that you get using [`Message::body`]) to [`crate::OwnedFd`] if
@@ -316,7 +318,7 @@ impl Message {
     /// Get the receive ordering of a message.
     ///
     /// This may be used to identify how two events were ordered on the bus. It only produces a
-    /// useful ordering for messages that were produced by the same [`zbus::Connection`].
+    /// useful ordering for messages that were produced by the same connection.
     ///
     /// This is completely unrelated to the serial number on the message, which is set by the peer
     /// and might not be ordered at all.

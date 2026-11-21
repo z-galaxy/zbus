@@ -89,7 +89,7 @@ fn dbus_deserialize_rejects_variant_carrying_maybe() {
 // the header leaves the maybe type to the signature parser, which takes it here, so it's the body
 // that the D-Bus boundary must reject when a whole message is read. The message is a
 // little-endian method call of `M` on `/`, with a `mi` signature field and an empty body.
-#[cfg(feature = "comms")]
+#[cfg(feature = "core")]
 #[test]
 fn dbus_message_body_rejects_header_signature_carrying_maybe() {
     use zbus::message::Message;
