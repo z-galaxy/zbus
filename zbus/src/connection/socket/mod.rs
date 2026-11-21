@@ -23,11 +23,7 @@ use crate::{
     conn::AuthMechanism,
     fdo::ConnectionCredentials,
     log::trace,
-    message::{
-        PrimaryHeader,
-        header::{MAX_MESSAGE_SIZE, MIN_MESSAGE_SIZE},
-    },
-    padding_for_8_bytes,
+    message::PrimaryHeader,
     wire::{
         Endian,
         serialized::{self, Context},
@@ -247,10 +243,10 @@ pub trait ReadHalf: std::fmt::Debug + Send + Sync + 'static {
         // into room for no more than `READ_MAX` bytes of it.
         let (primary_header, len) = loop {
             let have = already_received_bytes.len();
-            let want = if have < MIN_MESSAGE_SIZE {
-                MIN_MESSAGE_SIZE
+            let want = if have < PrimaryHeader::LEN_WITH_FIELDS_LEN {
+                PrimaryHeader::LEN_WITH_FIELDS_LEN
             } else {
-                let (primary_header, len) = read_primary_header(already_received_bytes)?;
+                let (primary_header, len) = PrimaryHeader::read_with_len(already_received_bytes)?;
                 if have >= len {
                     break (primary_header, len);
                 }
@@ -572,22 +568,6 @@ pub trait WriteHalf: std::fmt::Debug + Send + Sync + 'static {
     fn can_resume_writes(&self) -> bool {
         false
     }
-}
-
-/// The primary header that `bytes` start with, and the length of the whole message it opens.
-///
-/// A message longer than the D-Bus specification allows is an error.
-pub(crate) fn read_primary_header(bytes: &[u8]) -> crate::Result<(PrimaryHeader, usize)> {
-    let (primary_header, fields_len) = PrimaryHeader::read(bytes)?;
-    let header_len = MIN_MESSAGE_SIZE + fields_len as usize;
-    let body_padding = padding_for_8_bytes(header_len);
-    let body_len = primary_header.body_len() as usize;
-    let total_len = header_len + body_padding + body_len;
-    if total_len > MAX_MESSAGE_SIZE {
-        return Err(crate::Error::ExcessData);
-    }
-
-    Ok((primary_header, total_len))
 }
 
 /// Take the message that `bytes` start with, which is whole in them, `len` bytes long as

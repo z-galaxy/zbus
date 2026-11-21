@@ -21,10 +21,12 @@ mod body;
 pub use body::Body;
 
 pub(crate) mod header;
-use header::PROTOCOL_VERSION;
-pub use header::{EndianSig, Flags, Header, NATIVE_ENDIAN_SIG, PrimaryHeader, Type};
 #[cfg(feature = "bus-impl")]
-use header::{MAX_MESSAGE_SIZE, PRIMARY_HEADER_SIZE};
+use header::PRIMARY_HEADER_SIZE;
+use header::PROTOCOL_VERSION;
+pub use header::{
+    EndianSig, Flags, Header, MAX_MESSAGE_SIZE, NATIVE_ENDIAN_SIG, PrimaryHeader, Type,
+};
 
 pub(crate) mod parser;
 use parser::QuickFields;

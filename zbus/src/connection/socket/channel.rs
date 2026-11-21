@@ -11,10 +11,8 @@ use std::{io, num::NonZeroUsize};
 
 use zruntime::broadcast::{Receiver, RecvError, Sender, channel};
 
-use super::{read_primary_header, take_message};
-use crate::{
-    Message, conn::AuthMechanism, fdo::ConnectionCredentials, message::header::MIN_MESSAGE_SIZE,
-};
+use super::take_message;
+use crate::{Message, conn::AuthMechanism, fdo::ConnectionCredentials, message::PrimaryHeader};
 
 /// An in-process channel-based socket.
 ///
@@ -123,8 +121,8 @@ impl super::ReadHalf for Reader {
         // channel, so it is left where it is rather than lost.
         if !already_received_bytes.is_empty() {
             let (primary_header, len) = match already_received_bytes.len() {
-                have if have < MIN_MESSAGE_SIZE => return Err(not_whole()),
-                have => match read_primary_header(already_received_bytes)? {
+                have if have < PrimaryHeader::LEN_WITH_FIELDS_LEN => return Err(not_whole()),
+                have => match PrimaryHeader::read_with_len(already_received_bytes)? {
                     (_, len) if have < len => return Err(not_whole()),
                     whole => whole,
                 },
