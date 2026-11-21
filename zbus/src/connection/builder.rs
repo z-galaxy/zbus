@@ -595,6 +595,11 @@ impl<'a> Builder<'a> {
     ///
     /// An invalid name is reported by [`Builder::build`].
     #[cfg(feature = "bus-impl")]
+    #[deprecated(
+        since = "6.6.0",
+        note = "Only a bus gives a connection a unique name of its choosing, and a bus implements \
+                that itself. This will be removed in zbus 7."
+    )]
     pub fn unique_name<U>(mut self, unique_name: U) -> Self
     where
         U: TryInto<crate::names::UniqueName<'a>>,
