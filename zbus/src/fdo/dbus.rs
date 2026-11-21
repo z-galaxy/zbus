@@ -269,7 +269,7 @@ impl ConnectionCredentials {
     /// runtime is current, as for a connection built there, and on the threads that zbus keeps for
     /// blocking work otherwise, which need no runtime to be running.
     ///
-    /// This method is only available on Unix platforms, when the `bus-impl` feature is enabled.
+    /// This method is only available on Unix platforms, when the `comms` feature is enabled.
     ///
     /// # Errors
     ///
@@ -278,7 +278,7 @@ impl ConnectionCredentials {
     ///
     /// [`Connection::peer_creds`]: crate::Connection::peer_creds
     /// [`Error::InputOutput`]: crate::Error::InputOutput
-    #[cfg(all(unix, feature = "bus-impl"))]
+    #[cfg(all(unix, feature = "comms"))]
     pub async fn of_peer(socket: impl std::os::fd::AsFd) -> crate::Result<Self> {
         Ok(crate::runtime::io::peer_credentials(socket.as_fd(), None).await?)
     }
