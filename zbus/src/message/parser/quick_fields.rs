@@ -28,7 +28,6 @@ pub(crate) struct QuickFields {
     sender: Option<FieldPos>,
     signature: Signature,
     /// Where the signature lies, if the message has one.
-    #[cfg(feature = "bus-impl")]
     signature_pos: Option<FieldPos>,
     unix_fds: Option<u32>,
     /// A bit for the code of each field that came, and [`REPEATED`] if one came more than once.
@@ -100,7 +99,6 @@ impl QuickFields {
 
     /// The signature of the body as it lies in `bytes`, which must be those that `self` was parsed
     /// from.
-    #[cfg(feature = "bus-impl")]
     pub(in crate::message) fn signature_bytes<'m>(&self, bytes: &'m [u8]) -> &'m [u8] {
         self.signature_pos.map_or(&[], |pos| &bytes[pos.range()])
     }
@@ -151,16 +149,9 @@ impl Accumulate<Field> for QuickFields {
                 self.unique_destination = unique;
             }
             Field::Sender(pos) => self.sender = Some(pos),
-            Field::Signature {
-                signature,
-                #[cfg(feature = "bus-impl")]
-                pos,
-            } => {
+            Field::Signature { signature, pos } => {
                 self.signature = signature;
-                #[cfg(feature = "bus-impl")]
-                {
-                    self.signature_pos = Some(pos);
-                }
+                self.signature_pos = Some(pos);
             }
             Field::UnixFds(unix_fds) => self.unix_fds = Some(unix_fds),
         }
@@ -186,8 +177,7 @@ pub(super) enum Field {
     Sender(FieldPos),
     Signature {
         signature: Signature,
-        /// Where the signature lies, which only a bus needs, to check the body against it.
-        #[cfg(feature = "bus-impl")]
+        /// Where the signature lies, to check the body against it.
         pos: FieldPos,
     },
     UnixFds(u32),
@@ -211,13 +201,8 @@ impl Field {
     }
 
     /// The signature field, of `signature`, which lies at `pos` in the message.
-    #[cfg_attr(not(feature = "bus-impl"), expect(unused_variables))]
     pub(super) fn signature(signature: Signature, pos: FieldPos) -> Self {
-        Self::Signature {
-            signature,
-            #[cfg(feature = "bus-impl")]
-            pos,
-        }
+        Self::Signature { signature, pos }
     }
 }
 
