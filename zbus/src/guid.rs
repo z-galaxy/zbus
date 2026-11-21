@@ -20,11 +20,20 @@ use serde::{Deserialize, Serialize, de};
 pub struct Guid<'g>(Str<'g>);
 
 impl Guid<'_> {
-    /// Generate a D-Bus GUID that can be used with e.g.
-    /// [`connection::Builder::server`](crate::connection::Builder::server).
+    #[cfg_attr(
+        feature = "p2p",
+        doc = "Generate a D-Bus GUID that can be used with e.g.",
+        doc = "[`connection::Builder::server`](crate::connection::Builder::server)."
+    )]
+    #[cfg_attr(
+        not(feature = "p2p"),
+        doc = "Generate a D-Bus GUID that can be used with e.g. `connection::Builder::server`",
+        doc = "(requires the `p2p` feature), or by a server that does its own I/O."
+    )]
     ///
-    /// This method is only available when the `p2p` feature is enabled (disabled by default).
-    #[cfg(feature = "p2p")]
+    /// This method is only available when the `core-p2p` feature is enabled, which `p2p` enables
+    /// (both disabled by default).
+    #[cfg(feature = "core-p2p")]
     pub fn generate() -> Guid<'static> {
         let s = uuid::Uuid::new_v4().as_simple().to_string();
         Guid(s.into())
@@ -249,7 +258,7 @@ mod tests {
     use test_log::test;
 
     #[test]
-    #[cfg(feature = "p2p")]
+    #[cfg(feature = "core-p2p")]
     fn generate() {
         let u1 = Guid::generate();
         let u2 = Guid::generate();

@@ -24,6 +24,9 @@ cargo test -p zbus_xml
 # Test the wire-format-only build (the D-Bus API, i.e. the `comms` feature, off)
 cargo test -p zbus --no-default-features
 
+# Test the build without connections (the part of the D-Bus API that needs none, `comms` off)
+cargo test -p zbus --no-default-features --features core,core-p2p
+
 # Test with specific features
 cargo test --no-default-features --features tokio
 cargo test --features uuid,url,time,chrono,option-as-array,bus-impl,unixexec,ibus

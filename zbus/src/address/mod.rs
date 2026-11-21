@@ -255,7 +255,7 @@ mod tests {
             Address::from_str("unix:abstract=/tmp/dbus-foo").unwrap(),
             Transport::Unix(Unix::new(UnixSocket::Abstract("/tmp/dbus-foo".into()))).into(),
         );
-        #[cfg(feature = "p2p")]
+        #[cfg(feature = "core-p2p")]
         {
             let guid = crate::Guid::generate();
             assert_eq!(
