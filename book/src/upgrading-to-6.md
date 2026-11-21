@@ -40,7 +40,8 @@ A lot of the API is now behind new Cargo features. Those marked as default are o
 * `core` (since 6.6): the part of the D-Bus API that needs no connection, i.e. messages, match
   rules, addresses, GUIDs, the commands of the authentication handshake (`zbus::sasl`) and the
   `fdo` errors and types, for a program that does its own I/O.
-  `comms` enables it, and `core-p2p` (which `p2p` enables) adds `Guid::generate` to it.
+  `comms` enables it, and `core-p2p` (which `p2p` enables) adds `Guid::generate` and, on Unix,
+  `fdo::ConnectionCredentials::from_socket` to it.
 * `proxy` (default): the client-side API, i.e. `Proxy`, `#[proxy]` and the `fdo::*Proxy` types.
 * `service` (default): the service-side API, i.e. `ObjectServer` and `#[interface]`.
 * `object-manager` (default): the service-side `fdo::ObjectManager`.

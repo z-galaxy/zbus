@@ -88,6 +88,8 @@ cargo feature of `zbus` has the part of the API that this takes, and none of the
 * A message goes out as the bytes and the file descriptors of [`Message::data`].
 * [`sasl::Command`] parses and writes the commands of the authentication handshake, which comes
   before the messages.
+* With the `core-p2p` cargo feature, [`ConnectionCredentials::from_socket`] tells who the peer of
+  a unix socket is, and [`Guid::generate`] gives a server a GUID of its own.
 
 ```rust,noplayground
 # #[cfg(unix)]
@@ -196,5 +198,7 @@ has how to write one.
 [`Message::take_from`]: https://docs.rs/zbus/latest/zbus/message/struct.Message.html#method.take_from
 [`Message::data`]: https://docs.rs/zbus/latest/zbus/message/struct.Message.html#method.data
 [`sasl::Command`]: https://docs.rs/zbus/latest/zbus/sasl/enum.Command.html
+[`ConnectionCredentials::from_socket`]: https://docs.rs/zbus/latest/zbus/fdo/struct.ConnectionCredentials.html#method.from_socket
+[`Guid::generate`]: https://docs.rs/zbus/latest/zbus/struct.Guid.html#method.generate
 
 [^bus-less]: Unless you implemented them, none of the bus methods will exist.

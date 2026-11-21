@@ -52,9 +52,11 @@ core = [
     "dep:hex",
 ]
 # The part of the `p2p` API that needs no connection, for a server that does its own I/O:
-# `Guid::generate`. `p2p` enables it. It is a feature of its own, as generating GUIDs takes the
-# `v4` feature of `uuid`, which adds `getrandom` to the build, and on Linux `libc` too.
-core-p2p = ["core", "uuid?/v4"]
+# `Guid::generate`, and on Unix `fdo::ConnectionCredentials::from_socket`. `p2p` enables it. It is
+# a feature of its own, as generating GUIDs takes the `v4` feature of `uuid`, which adds
+# `getrandom` to the build, and the credentials of a peer take `libc`, which `getrandom` takes too
+# on Linux.
+core-p2p = ["core", "uuid?/v4", "dep:libc"]
 # The D-Bus API: connection, message, proxy, object server, fdo and friends (enables `core`, which
 # holds the part of it that needs no connection).
 comms = [
