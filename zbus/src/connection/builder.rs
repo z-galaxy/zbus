@@ -16,14 +16,12 @@ use std::os::unix::net::UnixStream;
 #[cfg(windows)]
 use uds_windows::UnixStream;
 
-#[cfg(any(feature = "bus-impl", feature = "handover"))]
-use crate::MessageStream;
 #[cfg(all(target_os = "linux", feature = "handover"))]
 use crate::runtime::IoSource;
 #[cfg(any(unix, windows))]
 use crate::runtime::io::UnixOps;
 use crate::{
-    Connection, Error, Guid, OwnedGuid, Result,
+    Connection, Error, Guid, MessageStream, OwnedGuid, Result,
     address::Address,
     fdo::RequestNameFlags,
     message::Message,
@@ -698,8 +696,6 @@ impl<'a> Builder<'a> {
     /// stream made from it once it is built can miss them, while one built with this gets every one
     /// of them.
     ///
-    /// This method is only available when the `bus-impl` or the `handover` feature is enabled.
-    ///
     /// # Errors
     ///
     /// The same errors as [`Builder::build`].
@@ -748,7 +744,6 @@ impl<'a> Builder<'a> {
     /// # });
     /// # }
     /// ```
-    #[cfg(any(feature = "bus-impl", feature = "handover"))]
     pub async fn build_message_stream(self) -> Result<MessageStream> {
         let (conn, msg_receiver) = self.build_inner(true).await?;
         let msg_receiver = msg_receiver.expect("build_inner(true) always returns Some");

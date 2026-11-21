@@ -633,9 +633,7 @@ mod tests {
     use rustix::process::{getegid, geteuid, getgroups};
 
     use super::GroupLookup;
-    #[cfg(feature = "bus-impl")]
-    use crate::Error;
-    use crate::{block_on, fdo::ConnectionCredentials};
+    use crate::{Error, block_on, fdo::ConnectionCredentials};
 
     /// The credentials of a peer come from its socket: its user, its process, and the groups that
     /// its process has, along with its primary group, with nothing to look up in NSS.
@@ -665,7 +663,6 @@ mod tests {
 
     /// The credentials of the peer of a socket that no connection runs over are those that a
     /// connection over it would have.
-    #[cfg(feature = "bus-impl")]
     #[test]
     fn credentials_of_the_peer_of_a_socket_of_its_own() {
         let (socket, _peer) = UnixStream::pair().unwrap();
@@ -676,7 +673,6 @@ mod tests {
     }
 
     /// A descriptor that is not a socket has no peer to tell the credentials of.
-    #[cfg(feature = "bus-impl")]
     #[test]
     fn a_descriptor_that_is_no_socket_has_no_credentials() {
         let (read, _write) = std::io::pipe().unwrap();
