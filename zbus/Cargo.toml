@@ -48,6 +48,8 @@ core = [
     # needed here. `dep:uuid` rather than `uuid` keeps the `Uuid` wire impls opt-in, as today.
     "dep:uuid",
     # `fdo::machine_id` gets the ID of the machine through it on macOS, FreeBSD and DragonFly.
+    # With `core-p2p`, `fdo::ConnectionCredentials::from_socket` gets the credentials of a peer
+    # through it on Unix.
     "dep:libc",
     # `fdo::machine_id` gets the ID of the machine through it on Windows.
     "dep:windows-sys",
@@ -57,8 +59,9 @@ core = [
     "dep:hex",
 ]
 # The part of the `p2p` API that needs no connection, for a server that does its own I/O:
-# `Guid::generate`. `p2p` enables it. It is a separate feature because generating GUIDs needs the
-# `v4` feature of `uuid`, which adds `getrandom` to the build.
+# `Guid::generate`, and on Unix `fdo::ConnectionCredentials::from_socket`. `p2p` enables it. It is
+# a separate feature because generating GUIDs needs the `v4` feature of `uuid`, which adds
+# `getrandom` to the build.
 core-p2p = ["core", "uuid?/v4"]
 # The D-Bus API: connection, message, proxy, object server, fdo and friends (enables `core`, the
 # part of it that needs no connection).

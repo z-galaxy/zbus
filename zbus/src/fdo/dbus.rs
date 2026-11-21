@@ -251,18 +251,10 @@ impl ConnectionCredentials {
     /// with no connection over it, such as for a server to know who connected before it goes
     /// through the handshake of a connection.
     ///
-    /// They are those that [`Connection::peer_creds`] gives for a connection over the socket:
-    ///
-    /// * the user ID of the peer,
-    /// * on Linux and Android, its process ID, unless its process has none in the PID namespace of
-    ///   this one,
-    /// * on Linux 6.5 and later, a file descriptor that pins its process ([`Self::process_fd`]),
-    ///   unless the kernel has none to give, as before Linux 6.16 for a process that has exited,
-    /// * on Linux and Android, its groups: on Linux 4.13 and later, those that its process had as
-    ///   it connected, which the socket tells, and otherwise those that the name service (NSS) has
-    ///   for its user.
-    ///
-    /// On macOS and the BSDs, the socket tells the user ID alone.
+    /// They are those that [`ConnectionCredentials::from_socket`] gives, and so those that
+    /// [`Connection::peer_creds`] gives for a connection over the socket. Where the socket doesn't
+    /// tell the groups of the peer, as on Linux before 4.13 and on Android, they come from the name
+    /// service (NSS).
     ///
     /// The name service may go to a file, a daemon or the network, so a lookup in it runs off the
     /// calling thread: on the blocking pool of Tokio, if the `tokio` feature is enabled and a Tokio

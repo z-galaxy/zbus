@@ -50,8 +50,9 @@ written, but not connected to), the commands of the authentication handshake
 (`zbus::connection::handshake`), `DBusError`, the errors and types of `zbus::fdo`, and
 `fdo::machine_id` to the wire format and the bus name types. It compiles no connection, proxy,
 object server or runtime, and none of the crates that only they need, such as zruntime or socket2.
-`core-p2p` adds the part of the `p2p` API that a server needs without a connection,
-`Guid::generate`. Every other D-Bus feature enables `core`, and `p2p` enables `core-p2p`.
+`core-p2p` adds the part of the `p2p` API that a server needs without a connection:
+`Guid::generate`, and on Unix `fdo::ConnectionCredentials::from_socket`. Every other D-Bus feature
+enables `core`, and `p2p` enables `core-p2p`.
 
 A program that reads messages off its own socket finds the length of each from its first bytes with
 `message::PrimaryHeader::parse_with_len`. Once a message is whole, `Message::from_parts` makes a
@@ -59,6 +60,7 @@ A program that reads messages off its own socket finds the length of each from i
 `message::Header::parse` tells. A message goes out as the bytes and the file descriptors of
 `Message::data`. The authentication handshake comes before the messages:
 `zbus::connection::handshake::Command` parses and writes its commands.
+`fdo::ConnectionCredentials::from_socket` tells who the peer of a unix socket is, with no runtime.
 
 ## Example code
 

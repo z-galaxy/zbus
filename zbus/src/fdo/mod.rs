@@ -26,6 +26,9 @@ pub use dbus::{
     NameLostStream, NameOwnerChanged, NameOwnerChangedArgs, NameOwnerChangedStream,
 };
 
+#[cfg(all(unix, any(feature = "comms", feature = "core-p2p")))]
+pub(crate) mod credentials;
+
 #[cfg(any(feature = "proxy", feature = "service"))]
 pub(crate) mod introspectable;
 #[cfg(feature = "service")]
