@@ -1,6 +1,6 @@
 #[cfg(target_os = "linux")]
 use std::ffi::OsString;
-#[cfg(any(unix, windows))]
+#[cfg(all(feature = "comms", any(unix, windows)))]
 use std::{borrow::Cow, io, sync::Arc};
 use std::{
     ffi::OsStr,
@@ -8,11 +8,13 @@ use std::{
     path::PathBuf,
 };
 
+#[cfg(feature = "comms")]
 use super::Stream;
 #[cfg(unix)]
 use super::encode_percents;
-#[cfg(any(unix, windows))]
+#[cfg(all(feature = "comms", any(unix, windows)))]
 use crate::runtime::io::{RegisteredIo, UnixOps};
+#[cfg(feature = "comms")]
 use crate::{Address, Error, Result, runtime::Runtime};
 
 /// A Unix domain socket transport in a D-Bus address.
@@ -38,7 +40,7 @@ impl Unix {
     }
 
     /// Connects to the socket this address names.
-    #[cfg(any(unix, windows))]
+    #[cfg(all(feature = "comms", any(unix, windows)))]
     pub(super) async fn connect(&self, address: &Address, runtime: &Runtime) -> Result<Stream> {
         let path = match self.path() {
             UnixSocket::File(path) => Cow::Borrowed(path.as_path()),
@@ -68,7 +70,7 @@ impl Unix {
 
     /// Connects to the socket this address names, which WASI has no way to: it has no unix-domain
     /// sockets.
-    #[cfg(target_os = "wasi")]
+    #[cfg(all(feature = "comms", target_os = "wasi"))]
     pub(super) async fn connect(&self, _address: &Address, _runtime: &Runtime) -> Result<Stream> {
         Err(Error::Unsupported)
     }
@@ -103,7 +105,7 @@ impl Unix {
 ///
 /// A unix socket address whose path starts with a zero byte is a name in the Linux abstract
 /// namespace rather than one on the filesystem.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "comms"))]
 fn abstract_path(name: &OsStr) -> PathBuf {
     use std::os::unix::ffi::{OsStrExt, OsStringExt};
 

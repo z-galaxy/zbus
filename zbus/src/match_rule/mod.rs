@@ -160,13 +160,25 @@ impl<'m> MatchRule<'m> {
     /// difference to those.
     ///
     /// It is deprecated, in favour of the `BecomeMonitor` method of the bus, which treats every
-    /// rule it is given as if it had this. [`Connection`] has an example of using it. A bus may
+    #[cfg_attr(
+        feature = "comms",
+        doc = "rule it is given as if it had this. [`Connection`] has an example of using it. A \
+               bus may"
+    )]
+    #[cfg_attr(
+        not(feature = "comms"),
+        doc = "rule it is given as if it had this. `Connection` (which requires the `comms` \
+               feature) has an example of using it. A bus may"
+    )]
     /// restrict such rules to privileged connections, and dbus-broker refuses them in `AddMatch`.
     ///
     /// [`MatchRule::matches`] doesn't look at this, as it is the bus that decides which messages a
     /// connection gets.
-    ///
-    /// [`Connection`]: crate::Connection#monitoring-all-messages
+    #[cfg_attr(
+        feature = "comms",
+        doc = "",
+        doc = "[`Connection`]: crate::Connection#monitoring-all-messages"
+    )]
     pub fn eavesdrop(&self) -> bool {
         self.eavesdrop
     }
@@ -346,6 +358,7 @@ impl<'m> MatchRule<'m> {
         Ok(true)
     }
 
+    #[cfg(feature = "comms")]
     pub(crate) fn fdo_signal_builder<S>(signal_name: S) -> Builder<'m>
     where
         S: TryInto<MemberName<'m>>,

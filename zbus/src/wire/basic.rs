@@ -445,9 +445,9 @@ mod tests {
     #[cfg(feature = "jiff")]
     assert_impl_all!(jiff::ZonedDateTime: Basic);
 
-    #[cfg(feature = "comms")]
+    #[cfg(feature = "core")]
     assert_impl_all!(crate::fdo::RequestNameFlags: Basic);
-    #[cfg(feature = "comms")]
+    #[cfg(feature = "core")]
     assert_impl_all!(crate::message::Flags: Basic);
     #[cfg(feature = "proxy")]
     assert_impl_all!(crate::proxy::MethodFlags: Basic);

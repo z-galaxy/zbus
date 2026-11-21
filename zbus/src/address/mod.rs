@@ -11,13 +11,16 @@
 
 pub mod transport;
 
-use crate::{Error, Guid, OwnedGuid, Result, runtime::Runtime};
+#[cfg(feature = "comms")]
+use crate::runtime::Runtime;
+use crate::{Error, Guid, OwnedGuid, Result};
 #[cfg(all(unix, not(target_os = "macos")))]
 use rustix::process::geteuid;
 use std::{collections::HashMap, env, str::FromStr};
 
 use std::fmt::{Display, Formatter};
 
+#[cfg(feature = "comms")]
 use self::transport::Stream;
 pub use self::transport::Transport;
 
@@ -54,6 +57,7 @@ impl Address {
         &self.transport
     }
 
+    #[cfg(feature = "comms")]
     pub(crate) async fn connect(&self, runtime: &Runtime) -> Result<Stream> {
         self.transport.connect(self, runtime).await
     }
@@ -222,10 +226,9 @@ mod tests {
     use crate::address::transport::Unixexec;
     #[cfg(windows)]
     use crate::address::transport::{Autolaunch, AutolaunchScope};
-    use crate::{
-        address::transport::{Unix, UnixSocket},
-        runtime::test_runtime::under_every_runtime,
-    };
+    use crate::address::transport::{Unix, UnixSocket};
+    #[cfg(feature = "comms")]
+    use crate::runtime::test_runtime::under_every_runtime;
     use std::str::FromStr;
     use test_log::test;
 
@@ -422,6 +425,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "comms")]
     #[test]
     #[ntest::timeout(15000)]
     fn connect_tcp() {
@@ -438,7 +442,7 @@ mod tests {
         });
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "comms"))]
     #[test]
     #[ntest::timeout(15000)]
     fn connect_abstract_unix() {
@@ -465,6 +469,7 @@ mod tests {
         });
     }
 
+    #[cfg(feature = "comms")]
     #[test]
     #[ntest::timeout(15000)]
     fn connect_nonce_tcp() {

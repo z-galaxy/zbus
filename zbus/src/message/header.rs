@@ -192,6 +192,7 @@ impl PrimaryHeader {
     }
 
     /// Read the primary header at the start of `buf`, and the length of the header fields after it.
+    #[cfg(feature = "comms")]
     pub(crate) fn read(buf: &[u8]) -> Result<(PrimaryHeader, u32), Error> {
         super::parser::parse_primary_header(buf)
     }
@@ -452,6 +453,7 @@ mod tests {
         assert_eq!(Flags::try_from(value).unwrap(), flags);
     }
 
+    #[cfg(feature = "comms")]
     #[test]
     fn unknown_flags_are_retained() {
         // The primary header of a method call, followed by the length of its (empty) header

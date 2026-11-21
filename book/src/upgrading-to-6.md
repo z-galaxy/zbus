@@ -34,8 +34,12 @@ GVariant support, deprecated in zvariant 5.15, is gone; it lives on in the [zgva
 A lot of the API is now behind new Cargo features. Those marked as default are on with a plain
 `zbus = "6"`; the others have to be enabled explicitly:
 
-* `comms`: the D-Bus API, i.e. connections, messages and `fdo`. Every other D-Bus feature, such as
-  `tokio`, `proxy` or `p2p`, enables it. Without it, zbus is the wire format and the name types.
+* `comms`: the D-Bus API, i.e. connections, messages and `fdo`. Every other D-Bus feature but
+  `core`, such as `tokio`, `proxy` or `p2p`, enables it. Without it (or `core`), zbus is the wire
+  format and the name types.
+* `core` (since 6.6): the part of the D-Bus API that needs no connection, i.e. messages, match
+  rules, addresses, GUIDs and the `fdo` errors and types, for a program that does its own I/O.
+  `comms` enables it.
 * `proxy` (default): the client-side API, i.e. `Proxy`, `#[proxy]` and the `fdo::*Proxy` types.
 * `service` (default): the service-side API, i.e. `ObjectServer` and `#[interface]`.
 * `object-manager` (default): the service-side `fdo::ObjectManager`.
@@ -96,7 +100,7 @@ keeps working. Besides that:
 * `Error::MissingFramingOffset` and `Error::IncompatibleFormat` are gone with GVariant.
 * `Error::Connection` holds a `Box<Address>`.
 * `Error::MethodError`, `Error::FDO`, `Error::Connection` and the new `Error::DBus` only exist
-  with `comms`.
+  with `comms`, or, since 6.6, with `core`, which `comms` enables.
 * The `Invalid*Name` variants that `zbus_names` 4.1 deprecated are gone; `Error::InvalidName` is
   what you get.
 * `zbus::Error` no longer implements `From<hex::FromHexError>`.

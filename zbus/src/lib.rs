@@ -16,7 +16,16 @@
     doc = "for an overview of the crate."
 )]
 #![cfg_attr(
-    not(feature = "comms"),
+    all(feature = "core", not(feature = "comms")),
+    doc = "# zbus\n\nThis build has connections (the `comms` feature) disabled: only the part \
+           of the D-Bus API that needs none (the `core` feature) is compiled in, which is \
+           [messages](crate::message), [match rules](crate::match_rule), \
+           [addresses](crate::address), [GUIDs](crate::Guid), [`DBusError`] \
+           and the [standard errors and types](crate::fdo), along with the D-Bus \
+           [wire format](crate::wire) and the [bus name types](crate::names).\n"
+)]
+#![cfg_attr(
+    not(feature = "core"),
     doc = "# zbus\n\nThis build has the D-Bus API (the `comms` feature) disabled: only the \
            D-Bus [wire format](crate::wire) and the [bus name types](crate::names) are \
            compiled in.\n"
@@ -80,24 +89,24 @@ pub mod zvariant;
 #[cfg(all(feature = "comms", windows))]
 mod win32;
 
-#[cfg(feature = "comms")]
+#[cfg(feature = "core")]
 mod dbus_error;
-#[cfg(feature = "comms")]
+#[cfg(feature = "core")]
 pub use dbus_error::*;
 
-#[cfg(feature = "comms")]
+#[cfg(feature = "core")]
 pub mod address;
-#[cfg(feature = "comms")]
+#[cfg(feature = "core")]
 pub use address::Address;
 
-#[cfg(feature = "comms")]
+#[cfg(feature = "core")]
 mod guid;
-#[cfg(feature = "comms")]
+#[cfg(feature = "core")]
 pub use guid::*;
 
-#[cfg(feature = "comms")]
+#[cfg(feature = "core")]
 pub mod message;
-#[cfg(feature = "comms")]
+#[cfg(feature = "core")]
 pub use message::Message;
 
 #[cfg(feature = "comms")]
@@ -116,9 +125,9 @@ pub mod runtime;
 #[cfg(feature = "comms")]
 pub use runtime::AsyncDrop;
 
-#[cfg(feature = "comms")]
+#[cfg(feature = "core")]
 pub mod match_rule;
-#[cfg(feature = "comms")]
+#[cfg(feature = "core")]
 pub use match_rule::{MatchRule, OwnedMatchRule};
 
 #[cfg(feature = "proxy")]
@@ -133,16 +142,16 @@ pub use object_server::ObjectServer;
 
 #[cfg(feature = "comms")]
 mod log;
-#[cfg(feature = "comms")]
+#[cfg(feature = "core")]
 mod utils;
-#[cfg(feature = "comms")]
+#[cfg(feature = "core")]
 pub use utils::*;
 
-#[cfg(feature = "comms")]
+#[cfg(feature = "core")]
 #[macro_use]
 pub mod fdo;
 
-#[cfg(feature = "comms")]
+#[cfg(feature = "core")]
 pub use zbus_macros::DBusError;
 #[cfg(feature = "service")]
 pub use zbus_macros::interface;

@@ -34,11 +34,24 @@ time = ["dep:time"]
 url = ["dep:url"]
 uuid = ["dep:uuid"]
 
-# The D-Bus API: connection, message, proxy, object server, fdo and friends.
-comms = [
+# The part of the D-Bus API that needs no connection and no runtime, for a program that reads and
+# writes D-Bus messages on sockets of its own, such as a bus: messages (`zbus::message`), match
+# rules, GUIDs, addresses (parsed and written, not connected to), `DBusError`, the errors and types
+# of `zbus::fdo`, and every variant of `zbus::Error` that `comms` has. `comms` enables it.
+core = [
     "dep:bitflags",
     "zbus_macros/comms",
     "dep:serde_repr",
+    # `guid::validate_guid` parses GUIDs with `uuid` outside any `p2p` gate, so the dependency is
+    # needed here. `dep:uuid` rather than `uuid` keeps the `Uuid` wire impls opt-in, as today.
+    "dep:uuid",
+    # `Address::session` asks for the user's ID through it on Unix.
+    "dep:rustix",
+]
+# The D-Bus API: connection, message, proxy, object server, fdo and friends (enables `core`, which
+# holds the part of it that needs no connection).
+comms = [
+    "core",
     "dep:futures-core",
     "dep:hex",
     "dep:ordered-stream",
@@ -48,14 +61,10 @@ comms = [
     "zruntime/lock",
     "zruntime/unblock",
     "dep:async-trait",
-    "dep:rustix",
     "dep:libc",
     "dep:windows-sys",
     "dep:uds_windows",
     "dep:socket2",
-    # `guid::validate_guid` parses GUIDs with `uuid` outside any `p2p` gate, so the dependency is
-    # needed here. `dep:uuid` rather than `uuid` keeps the `Uuid` wire impls opt-in, as today.
-    "dep:uuid",
 ]
 # The runtime zbus ships, provided by zruntime: one runtime per thread that runs
 # `zbus::block_on`, driven by that thread (default). The feature is named for the role, not for
