@@ -1,6 +1,4 @@
-mod auth_mechanism;
 mod client;
-mod command;
 mod common;
 #[cfg(feature = "p2p")]
 mod server;
@@ -16,9 +14,9 @@ use crate::{Error, OwnedGuid, Result, fdo::ConnectionCredentials, names::OwnedUn
 
 use super::socket::{BoxedSplit, ReadHalf, WriteHalf};
 
-pub use auth_mechanism::AuthMechanism;
+pub use crate::sasl::AuthMechanism;
+use crate::sasl::Command;
 use client::Client;
-use command::Command;
 use common::Common;
 #[cfg(feature = "p2p")]
 use server::Server;

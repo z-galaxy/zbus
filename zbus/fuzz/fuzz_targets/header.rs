@@ -17,13 +17,25 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     };
     check(data, endian);
 
-    // The length that most inputs give their fields doesn't match the bytes after it, so each is
-    // checked with the length of the bytes after it too, for the fuzzer to get to the fields
-    // sooner.
+    // The lengths that most inputs give their fields and their body don't match the bytes after
+    // them, so each is checked with lengths that do too, for the fuzzer to get to the fields
+    // sooner: with fields as long as the bytes after them, and no body, and with the fields of the
+    // input, and a body as long as the bytes after them.
     if let Some(fields_len) = data.len().checked_sub(FIELDS_LEN.end) {
         let mut data = data.to_vec();
+        endian.write_u32(&mut data[BODY_LEN], 0);
         endian.write_u32(&mut data[FIELDS_LEN], fields_len.try_into().unwrap());
         check(&data, endian);
+    }
+    if let Some(fields_len) = data.get(FIELDS_LEN) {
+        // The body starts on an 8-byte boundary after the fields.
+        let body_start =
+            (FIELDS_LEN.end + endian.read_u32(fields_len) as usize).next_multiple_of(8);
+        if let Some(body_len) = data.len().checked_sub(body_start) {
+            let mut data = data.to_vec();
+            endian.write_u32(&mut data[BODY_LEN], body_len.try_into().unwrap());
+            check(&data, endian);
+        }
     }
 });
 
@@ -31,8 +43,7 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
 /// serde gives.
 fn check(data: &[u8], endian: Endian) {
     let ctxt = Context::new(endian, 0);
-    // SAFETY: The data carries no file descriptors.
-    let received = unsafe { Message::from_bytes(Data::new(data.to_vec(), ctxt)) };
+    let received = Message::try_from_bytes(Data::new(data.to_vec(), ctxt));
     let encoded = Data::new(data, ctxt);
     let decoded = encoded.deserialize::<Header<'_>>();
 
@@ -48,7 +59,7 @@ fn check(data: &[u8], endian: Endian) {
         }
     }
 
-    // The body of a message isn't looked at, as it may be shorter than its header says.
+    // The body of a message isn't looked at, but for where it ends.
     let (received, decoded) = match (received, decoded) {
         (Ok(received), Ok((decoded, len))) => {
             assert!(whole(&decoded, len, data, endian));
@@ -88,11 +99,12 @@ fn check(data: &[u8], endian: Endian) {
     assert_eq!(header.unix_fds(), decoded.unix_fds());
 
     // A bus that sets the sender of the message gets the same header but for its sender, which a
-    // recipient reads from the bytes of the new message as well.
+    // recipient reads from the bytes of the new message as well. `Message::with_sender` is
+    // deprecated, and checked until zbus 7 removes it.
     let sender = UniqueName::from_static_str_unchecked(":busd.42");
+    #[allow(deprecated)]
     let new = received.with_sender(&sender).unwrap();
-    // SAFETY: The data carries no file descriptors.
-    let reread = unsafe { Message::from_bytes(new.data().clone()) }.unwrap();
+    let reread = Message::try_from_bytes(new.data().clone()).unwrap();
     for new in [&new, &reread] {
         let new_header = new.header();
         assert_eq!(new_header.sender(), Some(&sender));
@@ -112,8 +124,8 @@ fn check(data: &[u8], endian: Endian) {
 /// in byte order `endian`, is whole, as a received message has to be beyond what decoding a header
 /// through serde checks of its fields: of the only version of the protocol, with the fields that
 /// its type requires, none of which comes twice, with a 0 that ends each string and signature in
-/// them, with padding of 0s after its header, and with the file descriptors that its header says it
-/// brought, of which `data` has none.
+/// them, with padding of 0s after its header, with a body that ends where `data` does, and with the
+/// file descriptors that its header says it brought, of which `data` has none.
 fn whole(header: &Header<'_>, len: usize, data: &[u8], endian: Endian) -> bool {
     let required = match header.message_type() {
         Type::MethodCall => header.path().is_some() && header.member().is_some(),
@@ -126,12 +138,15 @@ fn whole(header: &Header<'_>, len: usize, data: &[u8], endian: Endian) -> bool {
     let padded = data
         .get(len..len.next_multiple_of(8))
         .is_some_and(|padding| padding.iter().all(|byte| *byte == 0));
+    let body_len = header.primary().body_len() as usize;
+    let ends = len.next_multiple_of(8).checked_add(body_len) == Some(data.len());
     let fds = !cfg!(unix) || header.unix_fds().unwrap_or(0) == 0;
 
     header.primary().protocol_version() == 1
         && required
         && canonical_fields(data, endian)
         && padded
+        && ends
         && fds
 }
 
@@ -167,6 +182,9 @@ fn canonical_fields(data: &[u8], endian: Endian) -> bool {
 
     true
 }
+
+/// Where the length of the body lies in a message.
+const BODY_LEN: std::ops::Range<usize> = 4..8;
 
 /// Where the length of the header fields lies in a message, which is followed by the fields.
 const FIELDS_LEN: std::ops::Range<usize> = 12..16;

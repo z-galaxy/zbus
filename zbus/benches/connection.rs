@@ -92,6 +92,7 @@ mod unix {
     /// its clients, and takes the signals off its stream, notifying `received` after each burst of
     /// them, until the client hangs up.
     async fn receive(socket: UnixStream, received: &Event) {
+        #[allow(deprecated)]
         let mut messages = Builder::unix_stream(socket)
             .server(Guid::generate())
             .p2p()

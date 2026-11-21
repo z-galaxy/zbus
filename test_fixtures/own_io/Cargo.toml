@@ -1,0 +1,24 @@
+[package]
+name = "own_io_fixture"
+version = "0.0.0"
+edition = { workspace = true }
+rust-version = { workspace = true }
+publish = false
+
+description = "A server that does its own I/O with the core features of zbus, for a zbus client"
+
+# The server reads and writes a unix socket, with the file descriptors that come with the
+# messages, so the fixture is unix only: the workspace-wide builds take it to Windows too, where it
+# is empty and depends on nothing.
+[target.'cfg(unix)'.dependencies]
+# The part of the D-Bus API that needs no connection, and none of the rest, which the server is
+# built on to show that it is all that a program that does its own I/O needs.
+zbus = { path = "../../zbus", default-features = false, features = ["core", "core-p2p"] }
+rustix = { workspace = true }
+
+[target.'cfg(unix)'.dev-dependencies]
+# The client of the test, a connection to the server as to a bus.
+zbus = { path = "../../zbus", default-features = false, features = ["default-rt"] }
+
+[lints]
+workspace = true

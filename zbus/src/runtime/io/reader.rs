@@ -8,9 +8,9 @@ use super::{RegisteredIo, SocketOps};
 use crate::{
     Message,
     conn::AuthMechanism,
-    connection::socket::{ReadHalf, RecvmsgResult, read_primary_header},
+    connection::socket::{ReadHalf, RecvmsgResult},
     fdo::ConnectionCredentials,
-    message::header::MIN_MESSAGE_SIZE,
+    message::PrimaryHeader,
     wire::{
         Endian,
         serialized::{self, Context},
@@ -113,10 +113,13 @@ where
     /// The length of the message that `bytes` start, if they hold no more than that message,
     /// which is longer than the buffer, while this half holds nothing.
     fn long_start(&self, bytes: &[u8]) -> Option<usize> {
-        if self.start < self.end || !self.long.is_empty() || bytes.len() < MIN_MESSAGE_SIZE {
+        if self.start < self.end
+            || !self.long.is_empty()
+            || bytes.len() < PrimaryHeader::LEN_WITH_FIELDS_LEN
+        {
             return None;
         }
-        let (_, len) = read_primary_header(bytes).ok()?;
+        let (_, len) = PrimaryHeader::read_with_len(bytes).ok()?;
 
         (len > BUFFER_SIZE && bytes.len() <= len).then_some(len)
     }
@@ -239,12 +242,12 @@ where
                 let bytes = mem::take(&mut self.long);
                 self.long_filled = 0;
 
-                break (read_primary_header(&bytes)?.0, bytes);
+                break (PrimaryHeader::read_with_len(&bytes)?.0, bytes);
             }
 
             let buffered = &self.buffer[self.start..self.end];
-            if buffered.len() >= MIN_MESSAGE_SIZE {
-                let (primary_header, len) = read_primary_header(buffered)?;
+            if buffered.len() >= PrimaryHeader::LEN_WITH_FIELDS_LEN {
+                let (primary_header, len) = PrimaryHeader::read_with_len(buffered)?;
                 if buffered.len() >= len {
                     let bytes = buffered[..len].to_vec();
                     self.start += len;

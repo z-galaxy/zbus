@@ -35,6 +35,19 @@ jobs:
           cargo --locked check -p zbus --no-default-features --target x86_64-unknown-freebsd
           cargo --locked check -p zbus --no-default-features --target x86_64-unknown-netbsd
           cargo --locked check -p zbus --no-default-features --target aarch64-linux-android
+          # The build without connections, for a program that does its own I/O, such as a bus.
+          CORE=core,core-p2p
+          cargo --locked check -p zbus --no-default-features --features $CORE
+          cargo --locked check -p zbus --no-default-features --features $CORE \
+            --target x86_64-pc-windows-gnu
+          cargo --locked check -p zbus --no-default-features --features $CORE \
+            --target x86_64-apple-darwin
+          cargo --locked check -p zbus --no-default-features --features $CORE \
+            --target x86_64-unknown-freebsd
+          cargo --locked check -p zbus --no-default-features --features $CORE \
+            --target x86_64-unknown-netbsd
+          cargo --locked check -p zbus --no-default-features --features $CORE \
+            --target aarch64-linux-android
           # The external-runtime-only build: neither the default-rt nor the tokio feature.
           EXT=proxy,service,object-manager,unixexec,ibus,tracing,p2p,handover
           cargo --locked check -p zbus --no-default-features --features $EXT
@@ -96,6 +109,22 @@ jobs:
           cargo --locked clippy -p zbus --no-default-features --target x86_64-unknown-netbsd
           cargo --locked clippy -p zbus --no-default-features --target x86_64-pc-windows-gnu
           cargo --locked clippy -p zbus --no-default-features --target aarch64-linux-android
+          # The build without connections: `core` alone, and with `core-p2p`.
+          cargo --locked clippy -p zbus --no-default-features --all-targets --features core
+          cargo --locked clippy -p zbus --no-default-features --features core \
+            --target x86_64-apple-darwin
+          CORE=core,core-p2p
+          cargo --locked clippy -p zbus --no-default-features --all-targets --features $CORE
+          cargo --locked clippy -p zbus --no-default-features --features $CORE \
+            --target x86_64-apple-darwin
+          cargo --locked clippy -p zbus --no-default-features --features $CORE \
+            --target x86_64-unknown-freebsd
+          cargo --locked clippy -p zbus --no-default-features --features $CORE \
+            --target x86_64-unknown-netbsd
+          cargo --locked clippy -p zbus --no-default-features --features $CORE \
+            --target x86_64-pc-windows-gnu
+          cargo --locked clippy -p zbus --no-default-features --features $CORE \
+            --target aarch64-linux-android
           # The proxy and service API can be disabled independently. `--all-targets` covers the
           # tests, examples and benchmarks, whose `required-features` must match what they use.
           cargo --locked clippy -p zbus --no-default-features --all-targets \
@@ -125,9 +154,26 @@ jobs:
           # The service-only fixture has to be built on its own: in a workspace-wide build, the
           # features of its `zbus` dependency are unified with those of the other members.
           cargo --locked clippy -p service_only_fixture
+          # So does the library of the fixture that does its own I/O, which is built with the
+          # `core` and `core-p2p` features of zbus alone, to show that they are all that such a
+          # program needs. Its test, which isn't built here, adds a zbus client.
+          cargo --locked clippy -p own_io_fixture
           cargo --locked clippy -p geoclue_service_fixture -p geoclue_client_fixture
           cargo --locked clippy -p geoclue_service_fixture -p geoclue_client_fixture \
             --no-default-features --features tokio
+      - name: Check that zbus builds syn for the host alone
+        run: |
+          # zbus takes zbus_utils without its `codegen` feature, so that syn, quote and
+          # proc-macro2 are built for zbus_macros, a proc-macro crate, on the host alone, and not
+          # for zbus's target too. Features only add dependencies, so the build with every feature
+          # covers the others. `-p zbus` is load-bearing: in a workspace-wide build, zbus_utils is
+          # built with its own default features, `codegen` among them, for zbus too. The tree is
+          # kept before it is searched, so that a `cargo tree` failure fails the step.
+          tree=$(cargo --locked tree -e normal,no-proc-macro -p zbus --all-features --target all)
+          if printf '%s\n' "$tree" | grep -E "^[^a-zA-Z0-9]*(syn|quote|proc-macro2) v"; then
+            echo "zbus builds syn, quote or proc-macro2 for its target" >&2
+            exit 1
+          fi
 
   linux_test:
     runs-on: ubuntu-latest
@@ -244,6 +290,21 @@ jobs:
           cargo --locked test --release --verbose -p zbus --no-default-features \
             --features arrayvec,camino,chrono,heapless \
             --features option-as-array,serde_bytes,time,url,uuid
+      - name: Test the build without connections
+        if: matrix.suite == 'wire'
+        run: |
+          # No connection, so no session bus is needed.
+          cargo --locked test --release --verbose -p zbus --no-default-features \
+            --features core,core-p2p
+          # A zbus client talks to a server that does its own I/O on that build, over a socket
+          # pair, with no bus either.
+          cargo --locked test --release --verbose -p own_io_fixture
+          # See CI/forbidden-deps.sh for what this guards against and why. The crates that only
+          # connections need are forbidden here too, but for `windows-sys`: `--target all` shows it
+          # under rustix, which zbus only depends on off Windows.
+          export FORBIDDEN_EXTRA="zruntime|async-trait|futures-core|ordered-stream|socket2"
+          FORBIDDEN_EXTRA="$FORBIDDEN_EXTRA|uds_windows|tokio|zoter"
+          CI/forbidden-deps.sh core-only --no-default-features --features core,core-p2p
       - name: Test zbus with zbus_utils/gvariant enabled (zgvariant coexistence)
         if: matrix.suite == 'wire'
         run: |
@@ -317,7 +378,7 @@ jobs:
           $PSNativeCommandUseErrorActionPreference = $true
           Start-Process C:\vcpkg\installed\x64-windows\tools\dbus\dbus-daemon.exe '--config-file=CI/win32-session.conf --address=autolaunch:'
           cargo --locked test
-      - name: Test the tokio-only and wire-format-only builds
+      - name: Test the tokio-only, core-only and wire-format-only builds
         if: matrix.suite == 'no-default-features'
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
@@ -326,6 +387,8 @@ jobs:
           # `--no-default-features` is undone by zbus_xmlgen's default-featured zbus dependency.
           # `--tests` because the doc examples assume zruntime.
           cargo --locked test -p zbus --no-default-features --features tokio,proxy,service --tests
+          # The build without connections.
+          cargo --locked test -p zbus --no-default-features --features core,core-p2p
           # The wire-format-only build.
           cargo --locked test -p zbus --no-default-features
           cargo --locked test -p zbus --no-default-features `
@@ -333,10 +396,10 @@ jobs:
             --features option-as-array,serde_bytes,time,url,uuid
 
   # WASI has no Unix domain sockets, no threads and no processes, and its preview 1 cannot create a
-  # socket. This lints the builds of zbus there, the wire-format-only one, the default one, the
-  # external-runtime-only one and the Tokio one, whose sockets need `--cfg tokio_unstable` there,
-  # and runs a peer-to-peer connection over TCP on preview 2 under wasmtime, on zruntime and on
-  # Tokio, with the network granted.
+  # socket. This lints the builds of zbus there, the wire-format-only one, the one without
+  # connections, the default one, the external-runtime-only one and the Tokio one, whose sockets
+  # need `--cfg tokio_unstable` there, and runs a peer-to-peer connection over TCP on preview 2
+  # under wasmtime, on zruntime and on Tokio, with the network granted.
   wasi:
     runs-on: ubuntu-latest
     needs: [fmt, clippy]
@@ -360,6 +423,8 @@ jobs:
           EXT=proxy,service,object-manager,tracing,p2p,bus-impl
           for target in wasm32-wasip1 wasm32-wasip2; do
             cargo --locked clippy -p zbus --no-default-features --target $target
+            cargo --locked clippy -p zbus --no-default-features --features core,core-p2p \
+              --target $target
             cargo --locked clippy -p zbus --target $target
             cargo --locked clippy -p zbus --features p2p,bus-impl,handover --target $target
             cargo --locked clippy -p zbus --no-default-features --features $EXT --target $target
@@ -418,6 +483,10 @@ jobs:
         run: cargo --locked doc --all-features -p zbus
       - name: Check wire-format-only documentation build
         run: cargo --locked doc --no-default-features -p zbus
+      - name: Check the documentation build without connections
+        run: |
+          cargo --locked doc --no-default-features --features core -p zbus
+          cargo --locked doc --no-default-features --features core,core-p2p -p zbus
       - name: Check documentation build with the proxy or service API disabled
         run: |
           cargo --locked doc --no-default-features --features default-rt,proxy -p zbus
@@ -452,6 +521,11 @@ jobs:
           rust-target: ${{ matrix.target }}
           # The action keys its cache of the released API by job, and not by target.
           prefix-key: ${{ matrix.target }}
+          # Only a breaking change fails the check. The version in the manifests is that of the
+          # latest release until release-plz bumps it, and the action would take that for a patch
+          # release, failing changes that need a minor one, such as a deprecation. The work towards
+          # a major release sets `major` here instead.
+          release-type: minor
 
   # The one check for the branch protection of `main` to require, so that the platforms above can
   # change without the protection having to. It runs whatever came of their jobs: a job that needs

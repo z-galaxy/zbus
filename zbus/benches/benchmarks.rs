@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "bus-impl")]
-use std::collections::BTreeMap;
-use std::{collections::HashMap, hint::black_box, vec};
+use std::{
+    collections::{BTreeMap, HashMap},
+    hint::black_box,
+    vec,
+};
 use zbus::Message;
 
 use criterion::{Criterion, criterion_group, criterion_main};
@@ -50,8 +52,7 @@ fn msg_de(c: &mut Criterion) {
     let data = msg.data().clone();
     g.bench_function("received", |b| {
         b.iter(|| {
-            // SAFETY: The bytes are those of a message that zbus built.
-            let msg = unsafe { Message::from_bytes(black_box(data.clone())) }.unwrap();
+            let msg = Message::try_from_bytes(black_box(data.clone())).unwrap();
             black_box(msg);
         })
     });
@@ -71,7 +72,6 @@ fn msg_de(c: &mut Criterion) {
 }
 
 /// Checking bodies as a bus does before passing them on.
-#[cfg(feature = "bus-impl")]
 fn msg_validate(c: &mut Criterion) {
     let mut g = c.benchmark_group("message-validate");
     // A method call as a bus delivers it, with the name of its sender.
@@ -113,7 +113,6 @@ fn msg_validate(c: &mut Criterion) {
 /// The properties of an object, by the name of their interface, `a{sa{sv}}`: 10 interfaces of 10
 /// properties each, whose values cycle through a number, a string, a boolean and an array of
 /// strings, as the properties of real objects mix them.
-#[cfg(feature = "bus-impl")]
 fn object_properties() -> BTreeMap<String, BTreeMap<String, Variant<'static>>> {
     (0..10u32)
         .map(|i| {
@@ -138,8 +137,10 @@ fn object_properties() -> BTreeMap<String, BTreeMap<String, Variant<'static>>> {
         .collect()
 }
 
-/// Setting the sender of messages, as a bus does to those of peers that leave it out.
+/// Setting the sender of messages, as a bus does to those of peers that leave it out, with
+/// `Message::with_sender`, which is deprecated, and benchmarked until zbus 7 removes it.
 #[cfg(feature = "bus-impl")]
+#[allow(deprecated)]
 fn msg_with_sender(c: &mut Criterion) {
     let mut g = c.benchmark_group("message-with-sender");
     let sender = zbus::names::UniqueName::from_static_str_unchecked(":busd.42");
@@ -234,7 +235,7 @@ fn address_parse(c: &mut Criterion) {
 }
 
 #[cfg(not(feature = "bus-impl"))]
-criterion_group!(benches, msg_ser, msg_de, address_parse);
+criterion_group!(benches, msg_ser, msg_de, msg_validate, address_parse);
 #[cfg(feature = "bus-impl")]
 criterion_group!(
     benches,

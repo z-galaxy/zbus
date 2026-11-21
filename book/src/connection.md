@@ -75,6 +75,47 @@ up on. A stream of another kind is handed over as the socket it wraps: `into_std
 **Note:** the `p2p` and `server` methods of `connection::Builder` are only available when `p2p`
 cargo feature of `zbus` is enabled.
 
+## Doing the I/O yourself
+
+A program with an event loop of its own, such as a bus, can read and write D-Bus messages on its
+sockets itself, with no connection of zbus's, and so with no runtime of zbus's either. The `core`
+cargo feature of `zbus` has the part of the API that this takes, and none of the rest:
+
+* [`PrimaryHeader::read_with_len`] tells how many bytes a message has from its first 16, so as to
+  read up to its end.
+* [`Message::take_from`] takes a message out of the bytes that came in, once it is whole, along
+  with the file descriptors that it carries.
+* A message goes out as the bytes and the file descriptors of [`Message::data`].
+* [`sasl::Command`] parses and writes the commands of the authentication handshake, which comes
+  before the messages.
+* With the `core-p2p` cargo feature, [`ConnectionCredentials::from_socket`] tells who the peer of
+  a unix socket is, and [`Guid::generate`] gives a server a GUID of its own.
+
+```rust,noplayground
+# #[cfg(unix)]
+# fn main() -> zbus::Result<()> {
+use zbus::message::Message;
+
+// What the reads of a socket brought, and the file descriptors that came with it, which are yet
+// to be taken as messages: here, a call.
+let mut bytes = Message::method_call("/org/zbus/Example", "Ping").build(&())?.data().to_vec();
+let mut fds = vec![];
+
+while let Some(call) = Message::take_from(&mut bytes, &mut fds)? {
+    let reply = Message::method_return(&call.header()).build(&())?;
+    // What goes out on the socket: the bytes of `reply.data()`, and its `fds()` along with them.
+#   let _ = reply;
+}
+# Ok(())
+# }
+#
+# #[cfg(not(unix))]
+# fn main() {}
+```
+
+The [`own_io`] fixture of the zbus repository is a whole server made so, which a zbus connection
+talks to as to its bus, in its test.
+
 ## Runtimes
 
 A connection takes its readiness notifications, timers, spawned tasks and blocking work from one
@@ -156,5 +197,12 @@ has how to write one.
 [`Builder::socket`]: https://docs.rs/zbus/latest/zbus/connection/struct.Builder.html#method.socket
 [`Builder::authenticated_socket`]: https://docs.rs/zbus/latest/zbus/connection/struct.Builder.html#method.authenticated_socket
 [`Socket`]: https://docs.rs/zbus/latest/zbus/connection/socket/trait.Socket.html
+[`PrimaryHeader::read_with_len`]: https://docs.rs/zbus/latest/zbus/message/struct.PrimaryHeader.html#method.read_with_len
+[`Message::take_from`]: https://docs.rs/zbus/latest/zbus/message/struct.Message.html#method.take_from
+[`Message::data`]: https://docs.rs/zbus/latest/zbus/message/struct.Message.html#method.data
+[`sasl::Command`]: https://docs.rs/zbus/latest/zbus/sasl/enum.Command.html
+[`ConnectionCredentials::from_socket`]: https://docs.rs/zbus/latest/zbus/fdo/struct.ConnectionCredentials.html#method.from_socket
+[`Guid::generate`]: https://docs.rs/zbus/latest/zbus/struct.Guid.html#method.generate
+[`own_io`]: https://github.com/z-galaxy/zbus/tree/main/test_fixtures/own_io
 
 [^bus-less]: Unless you implemented them, none of the bus methods will exist.

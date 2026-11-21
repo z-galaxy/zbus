@@ -34,8 +34,14 @@ GVariant support, deprecated in zvariant 5.15, is gone; it lives on in the [zgva
 A lot of the API is now behind new Cargo features. Those marked as default are on with a plain
 `zbus = "6"`; the others have to be enabled explicitly:
 
-* `comms`: the D-Bus API, i.e. connections, messages and `fdo`. Every other D-Bus feature, such as
-  `tokio`, `proxy` or `p2p`, enables it. Without it, zbus is the wire format and the name types.
+* `comms`: the D-Bus API, i.e. connections, messages and `fdo`. Every other D-Bus feature but
+  `core` and `core-p2p`, such as `tokio`, `proxy` or `p2p`, enables it. Without it (or `core`),
+  zbus is the wire format and the name types.
+* `core` (since 6.6): the part of the D-Bus API that needs no connection, i.e. messages, match
+  rules, addresses, GUIDs, the commands of the authentication handshake (`zbus::sasl`) and the
+  `fdo` errors and types, for a program that does its own I/O.
+  `comms` enables it, and `core-p2p` (which `p2p` enables) adds `Guid::generate` and, on Unix,
+  `fdo::ConnectionCredentials::from_socket` to it.
 * `proxy` (default): the client-side API, i.e. `Proxy`, `#[proxy]` and the `fdo::*Proxy` types.
 * `service` (default): the service-side API, i.e. `ObjectServer` and `#[interface]`.
 * `object-manager` (default): the service-side `fdo::ObjectManager`.
@@ -44,6 +50,11 @@ A lot of the API is now behind new Cargo features. Those marked as default are o
 * `tokio-multithread`: runs `zbus::block_on` on a multi-threaded Tokio runtime.
 * `unixexec` and `ibus`: the `unixexec:` and `ibus:` transports. Without them, an address of that
   transport is rejected, including in `DBUS_SESSION_BUS_ADDRESS`.
+* `bus-impl` (deprecated since 6.6): the API for bus implementations, which they implement
+  themselves, and which zbus 7 removes along with the feature: `connection::Builder::unique_name`
+  and `validate_bodies`, `Connection::set_unique_name` and `Message::with_sender`.
+  `message::Body::validate`, `connection::Builder::build_message_stream` and
+  `fdo::ConnectionCredentials::of_peer` no longer need it, since 6.6.
 
 These features are gone and have to be removed from your dependency entry:
 
@@ -96,7 +107,7 @@ keeps working. Besides that:
 * `Error::MissingFramingOffset` and `Error::IncompatibleFormat` are gone with GVariant.
 * `Error::Connection` holds a `Box<Address>`.
 * `Error::MethodError`, `Error::FDO`, `Error::Connection` and the new `Error::DBus` only exist
-  with `comms`.
+  with `comms`, or, since 6.6, with `core`, which `comms` enables.
 * The `Invalid*Name` variants that `zbus_names` 4.1 deprecated are gone; `Error::InvalidName` is
   what you get.
 * `zbus::Error` no longer implements `From<hex::FromHexError>`.

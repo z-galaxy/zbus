@@ -62,9 +62,6 @@ impl Body {
     /// included. For that, a variant counts as holding any value of its type, and an array as
     /// holding one even if it's empty, unless its elements are neither numbers nor file
     /// descriptors and it's not in a variant, as GLib has it.
-    ///
-    /// This is only available when the `bus-impl` feature is enabled.
-    #[cfg(feature = "bus-impl")]
     pub fn validate(&self) -> Result<()> {
         self.msg.validate_body()
     }

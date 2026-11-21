@@ -8,9 +8,11 @@ use std::{
     str::from_utf8_unchecked,
 };
 
-#[cfg(windows)]
+#[cfg(all(windows, feature = "comms"))]
 use crate::win32::autolaunch_bus_address;
-use crate::{Address, Error, Result, connection::socket::BoxedSplit, runtime::Runtime};
+#[cfg(feature = "comms")]
+use crate::{Address, connection::socket::BoxedSplit, runtime::Runtime};
+use crate::{Error, Result};
 #[cfg(all(target_os = "linux", feature = "handover"))]
 use crate::{connection::handover::SocketKind, runtime::IoSource};
 
@@ -66,6 +68,7 @@ pub enum Transport {
 }
 
 impl Transport {
+    #[cfg(feature = "comms")]
     pub(super) async fn connect(&self, address: &Address, runtime: &Runtime) -> Result<Stream> {
         match self {
             Transport::Unix(unix) => unix.connect(address, runtime).await,
@@ -135,6 +138,7 @@ impl Transport {
 
 /// The socket [`Transport::connect`] created, split into the halves a connection reads and
 /// writes through.
+#[cfg(feature = "comms")]
 #[derive(Debug)]
 pub(crate) enum Stream {
     // WASI has no unix-domain sockets.
@@ -155,6 +159,7 @@ pub(crate) enum Stream {
     },
 }
 
+#[cfg(feature = "comms")]
 impl Stream {
     /// The socket itself, and its kind, which a connection that is handed over gives a descriptor
     /// of, if zbus drives it.

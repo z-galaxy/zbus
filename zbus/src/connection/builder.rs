@@ -16,14 +16,12 @@ use std::os::unix::net::UnixStream;
 #[cfg(windows)]
 use uds_windows::UnixStream;
 
-#[cfg(any(feature = "bus-impl", feature = "handover"))]
-use crate::MessageStream;
 #[cfg(all(target_os = "linux", feature = "handover"))]
 use crate::runtime::IoSource;
 #[cfg(any(unix, windows))]
 use crate::runtime::io::UnixOps;
 use crate::{
-    Connection, Error, Guid, OwnedGuid, Result,
+    Connection, Error, Guid, MessageStream, OwnedGuid, Result,
     address::Address,
     fdo::RequestNameFlags,
     message::Message,
@@ -315,8 +313,10 @@ impl<'a> Builder<'a> {
     /// Nothing else gets them: no stream for a match rule, such as that of a proxy, and no method
     /// call that waits for its reply. [The module of the
     /// hand-over](crate::connection::handover#who-gets-each-message) tells more. Then the
-    /// connection reads the socket from where the other one stopped. With the `bus-impl` feature,
-    /// `Builder::validate_bodies` has it check the bodies of all of these messages.
+    /// connection reads the socket from where the other one stopped. To check the bodies of the
+    /// messages that the stream yields, call [`Body::validate`](crate::message::Body::validate) on
+    /// each. With the `bus-impl` feature, the deprecated `Builder::validate_bodies` has the
+    /// connection check the bodies of all of these messages.
     ///
     /// The connection yields the messages of the hand-over as soon as it is built, so a
     /// [`MessageStream`] made from it once it is built can miss them. Build it with
@@ -597,6 +597,11 @@ impl<'a> Builder<'a> {
     ///
     /// An invalid name is reported by [`Builder::build`].
     #[cfg(feature = "bus-impl")]
+    #[deprecated(
+        since = "6.6.0",
+        note = "Only a bus gives a connection a unique name of its choosing, and a bus implements \
+                that itself. This will be removed in zbus 7."
+    )]
     pub fn unique_name<U>(mut self, unique_name: U) -> Self
     where
         U: TryInto<crate::names::UniqueName<'a>>,
@@ -628,6 +633,11 @@ impl<'a> Builder<'a> {
     ///
     /// [`Body::validate`]: crate::message::Body::validate
     #[cfg(feature = "bus-impl")]
+    #[deprecated(
+        since = "6.6.0",
+        note = "Call `Body::validate` on the messages that you take off the connection's stream \
+                instead. This will be removed in zbus 7."
+    )]
     pub fn validate_bodies(mut self) -> Self {
         self.validate_bodies = true;
 
@@ -698,8 +708,6 @@ impl<'a> Builder<'a> {
     /// stream made from it once it is built can miss them, while one built with this gets every one
     /// of them.
     ///
-    /// This method is only available when the `bus-impl` or the `handover` feature is enabled.
-    ///
     /// # Errors
     ///
     /// The same errors as [`Builder::build`].
@@ -748,7 +756,6 @@ impl<'a> Builder<'a> {
     /// # });
     /// # }
     /// ```
-    #[cfg(any(feature = "bus-impl", feature = "handover"))]
     pub async fn build_message_stream(self) -> Result<MessageStream> {
         let (conn, msg_receiver) = self.build_inner(true).await?;
         let msg_receiver = msg_receiver.expect("build_inner(true) always returns Some");

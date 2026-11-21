@@ -1084,12 +1084,7 @@ impl Connection {
 
     /// The unique name of the connection, if set/applicable.
     ///
-    /// The unique name is assigned by the message bus, or set manually using
-    #[cfg_attr(feature = "bus-impl", doc = "[`Connection::set_unique_name`].")]
-    #[cfg_attr(
-        not(feature = "bus-impl"),
-        doc = "`Connection::set_unique_name` (requires the `bus-impl` feature)."
-    )]
+    /// The unique name is assigned by the message bus.
     pub fn unique_name(&self) -> Option<&OwnedUniqueName> {
         self.inner.unique_name.get()
     }
@@ -1104,6 +1099,11 @@ impl Connection {
     /// This method panics if the unique name is already set. It will always panic if the connection
     /// is to a message bus as it's the bus that assigns peers their unique names.
     #[cfg(feature = "bus-impl")]
+    #[deprecated(
+        since = "6.6.0",
+        note = "Only a bus gives a connection a unique name of its choosing, and a bus implements \
+                that itself. This will be removed in zbus 7."
+    )]
     pub fn set_unique_name<U>(&self, unique_name: U) -> Result<()>
     where
         U: TryInto<OwnedUniqueName>,

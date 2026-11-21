@@ -24,6 +24,11 @@ cargo test -p zbus_xml
 # Test the wire-format-only build (the D-Bus API, i.e. the `comms` feature, off)
 cargo test -p zbus --no-default-features
 
+# Test the build without connections (the part of the D-Bus API that needs none, `comms` off),
+# and a server that does its own I/O on it, which a zbus client talks to
+cargo test -p zbus --no-default-features --features core,core-p2p
+cargo test -p own_io_fixture
+
 # Test with specific features
 cargo test --no-default-features --features tokio
 cargo test --features uuid,url,time,chrono,option-as-array,bus-impl,unixexec,ibus
@@ -89,8 +94,10 @@ threads. A target holds benchmarks of one kind only, and a new one goes in the l
 
 ### Core Crates
 - **zbus**: Everything a user sees. The D-Bus API (connection, proxy, object server) sits behind
-  the `comms` feature; the `wire` module (D-Bus wire format) and the `names` module (D-Bus name
-  types) are always compiled
+  the `comms` feature; the part of it that needs no connection (messages, match rules, addresses,
+  GUIDs, the SASL commands, `DBusError`, the `fdo` errors and types) behind `core`, which `comms`
+  enables, for a program that does its own I/O, such as busd; the `wire` module (D-Bus wire
+  format) and the `names` module (D-Bus name types) are always compiled
 - **zbus_macros**: Procedural macros: `#[interface]`, `#[proxy]`, `#[derive(DBusError)]` and the
   wire derives (`Type`, `Variant`, `OwnedVariant`, `SerializeDict`, `DeserializeDict`, `signature!`)
 - **zbus_utils**: Signature parser, D-Bus name validators and the derive codegen shared by zbus
@@ -128,12 +135,15 @@ zbus/src/
 ├── proxy/              # Client-side proxy objects with #[proxy] macro
 ├── object_server/      # Service-side interface implementation
 ├── message/            # D-Bus message serialization/parsing
+├── sasl/               # The commands of the authentication handshake (SASL)
 ├── address/            # Transport layer abstraction
 ├── fdo/                # Standard D-Bus interfaces (Peer, Properties, etc.)
 └── runtime/            # Async runtime integration: zruntime, Tokio and `traits::Runtime`
 ```
 
-Everything below `error.rs` in that list is behind the `comms` feature.
+Everything below `error.rs` in that list is behind the `comms` feature, but for `message/`,
+`sasl/`, the parsing and formatting of `address/`, and the errors and types of `fdo/`, which are
+behind `core`.
 
 **Message Flow**: Connection ↔ Message ↔ `zbus::wire` serialization ↔ Transport
 

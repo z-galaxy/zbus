@@ -206,8 +206,8 @@ use super::{ConnectionInner, socket_write::Unwritten};
 use crate::connection::socket::{Channel, Writes};
 use crate::{
     Connection, Error, Guid, MatchRule, Message, OwnedGuid, Result,
-    connection::socket::{BoxedSplit, ReadHalf, Split, read_primary_header},
-    message::{self, header::MIN_MESSAGE_SIZE},
+    connection::socket::{BoxedSplit, ReadHalf, Split},
+    message::{self, PrimaryHeader},
     names::OwnedUniqueName,
     runtime::IoSource,
     wire::{
@@ -2444,10 +2444,10 @@ fn framed(
     let (msg, rest) = bytes.split_at_checked(len).ok_or_else(malformed)?;
     *bytes = rest;
     // The table gives each message the length that its primary header says that it has.
-    if len < MIN_MESSAGE_SIZE {
+    if len < PrimaryHeader::LEN_WITH_FIELDS_LEN {
         return Err(malformed());
     }
-    let (primary_header, whole) = read_primary_header(msg).map_err(|_| malformed())?;
+    let (primary_header, whole) = PrimaryHeader::read_with_len(msg).map_err(|_| malformed())?;
     let msg_fds: Vec<_> = fds.by_ref().take(count).collect();
     if whole != len || msg_fds.len() != count {
         return Err(malformed());
@@ -4947,6 +4947,7 @@ mod tests {
                     handover.tail = concat(&[valid.clone(), invalid]);
                 }
 
+                #[allow(deprecated)]
                 let mut stream = on(Builder::take_over(handover).validate_bodies(), &runtime)
                     .build_message_stream()
                     .await

@@ -34,13 +34,34 @@ time = ["dep:time"]
 url = ["dep:url"]
 uuid = ["dep:uuid"]
 
-# The D-Bus API: connection, message, proxy, object server, fdo and friends.
-comms = [
+# The part of the D-Bus API that needs no connection and no runtime, for a program that reads and
+# writes D-Bus messages on sockets of its own, such as a bus: messages (`zbus::message`), match
+# rules, GUIDs, addresses (parsed and written, not connected to), the commands of the
+# authentication handshake (`zbus::sasl`), `DBusError`, the errors and types of `zbus::fdo`, and
+# every variant of `zbus::Error` that `comms` has. `comms` enables it.
+core = [
     "dep:bitflags",
     "zbus_macros/comms",
     "dep:serde_repr",
-    "dep:futures-core",
+    # `guid::validate_guid` parses GUIDs with `uuid` outside any `p2p` gate, so the dependency is
+    # needed here. `dep:uuid` rather than `uuid` keeps the `Uuid` wire impls opt-in, as today.
+    "dep:uuid",
+    # `Address::session` asks for the user's ID through it on Unix.
+    "dep:rustix",
+    # `zbus::sasl` hex-encodes the data of the commands of the handshake with it.
     "dep:hex",
+]
+# The part of the `p2p` API that needs no connection, for a server that does its own I/O:
+# `Guid::generate`, and on Unix `fdo::ConnectionCredentials::from_socket`. `p2p` enables it. It is
+# a feature of its own, as generating GUIDs takes the `v4` feature of `uuid`, which adds
+# `getrandom` to the build, and the credentials of a peer take `libc`, which `getrandom` takes too
+# on Linux.
+core-p2p = ["core", "uuid?/v4", "dep:libc"]
+# The D-Bus API: connection, message, proxy, object server, fdo and friends (enables `core`, which
+# holds the part of it that needs no connection).
+comms = [
+    "core",
+    "dep:futures-core",
     "dep:ordered-stream",
     # Without `dep:zruntime`, Cargo would also make `zruntime` a feature of zbus.
     "dep:zruntime",
@@ -48,14 +69,10 @@ comms = [
     "zruntime/lock",
     "zruntime/unblock",
     "dep:async-trait",
-    "dep:rustix",
     "dep:libc",
     "dep:windows-sys",
     "dep:uds_windows",
     "dep:socket2",
-    # `guid::validate_guid` parses GUIDs with `uuid` outside any `p2p` gate, so the dependency is
-    # needed here. `dep:uuid` rather than `uuid` keeps the `Uuid` wire impls opt-in, as today.
-    "dep:uuid",
 ]
 # The runtime zbus ships, provided by zruntime: one runtime per thread that runs
 # `zbus::block_on`, driven by that thread (default). The feature is named for the role, not for
@@ -94,9 +111,12 @@ unixexec = ["comms", "tokio?/process"]
 # The `ibus:` transport, which asks the IBus daemon for its bus address by running `ibus address`.
 # The Tokio backend runs the command with Tokio's `process` feature.
 ibus = ["comms", "tokio?/process"]
-# Enables API that is only needed for peer-to-peer (p2p) connections.
-p2p = ["comms", "uuid?/v4"]
-# Enables API that is only needed for bus implementations (enables `p2p`).
+# Enables API that is only needed for peer-to-peer (p2p) connections (enables `core-p2p`).
+p2p = ["comms", "core-p2p"]
+# Deprecated: the API for bus implementations, which they implement themselves,
+# `connection::Builder::unique_name` and `validate_bodies`, `Connection::set_unique_name` and
+# `Message::with_sender`, all of them deprecated. It still enables them, and `p2p`, until zbus 7
+# removes them and the feature.
 bus-impl = ["p2p"]
 # Enables API, on Linux, to hand a connection over, for it to go on in this process or in another
 # one, as a service or a bus that restarts through systemd's file descriptor store does.
@@ -106,7 +126,8 @@ handover = ["comms", "dep:zoter"]
 zbus_macros = { path = "../zbus_macros", version = "6.5.0", default-features = false }
 zcheapstr.workspace = true
 endi.workspace = true
-zbus_utils = { path = "../zbus_utils", version = "6.1.0" }
+# Without the code generation of the derives, which only zbus_macros needs: it is what needs syn.
+zbus_utils = { path = "../zbus_utils", version = "6.1.0", default-features = false }
 
 serde.workspace = true
 serde_repr = { workspace = true, optional = true }

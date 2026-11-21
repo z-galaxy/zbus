@@ -1,10 +1,12 @@
-use std::{collections::HashMap, process::Command};
+use std::collections::HashMap;
+#[cfg(feature = "comms")]
+use std::process::Command;
 
+#[cfg(feature = "comms")]
 use super::{Transport, Unix, UnixSocket};
-use crate::{
-    Result,
-    runtime::{Runtime, process},
-};
+use crate::Result;
+#[cfg(feature = "comms")]
+use crate::runtime::{Runtime, process};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -29,6 +31,7 @@ impl Launchd {
     /// Determine the actual transport details behind a launchd address.
     ///
     /// The `launchctl` command runs on `runtime`, which is also what waits for it to exit.
+    #[cfg(feature = "comms")]
     pub(super) async fn bus_address(&self, runtime: &Runtime) -> Result<Transport> {
         let mut command = Command::new("launchctl");
         command.args(["getenv", self.env()]);
