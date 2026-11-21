@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "bus-impl")]
-use std::collections::BTreeMap;
-use std::{collections::HashMap, hint::black_box, vec};
+use std::{
+    collections::{BTreeMap, HashMap},
+    hint::black_box,
+    vec,
+};
 use zbus::Message;
 
 use criterion::{Criterion, criterion_group, criterion_main};
@@ -71,7 +73,6 @@ fn msg_de(c: &mut Criterion) {
 }
 
 /// Checking bodies as a bus does before passing them on.
-#[cfg(feature = "bus-impl")]
 fn msg_validate(c: &mut Criterion) {
     let mut g = c.benchmark_group("message-validate");
     // A method call as a bus delivers it, with the name of its sender.
@@ -113,7 +114,6 @@ fn msg_validate(c: &mut Criterion) {
 /// The properties of an object, by the name of their interface, `a{sa{sv}}`: 10 interfaces of 10
 /// properties each, whose values cycle through a number, a string, a boolean and an array of
 /// strings, as the properties of real objects mix them.
-#[cfg(feature = "bus-impl")]
 fn object_properties() -> BTreeMap<String, BTreeMap<String, Variant<'static>>> {
     (0..10u32)
         .map(|i| {
@@ -234,7 +234,7 @@ fn address_parse(c: &mut Criterion) {
 }
 
 #[cfg(not(feature = "bus-impl"))]
-criterion_group!(benches, msg_ser, msg_de, address_parse);
+criterion_group!(benches, msg_ser, msg_de, msg_validate, address_parse);
 #[cfg(feature = "bus-impl")]
 criterion_group!(
     benches,

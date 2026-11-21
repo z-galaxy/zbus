@@ -356,7 +356,6 @@ impl Message {
 
     /// Check the body against its signature, as [`Body::validate`] does, without making a [`Body`]
     /// of it, which takes more than a check of a small body does.
-    #[cfg(feature = "bus-impl")]
     pub(crate) fn validate_body(&self) -> Result<()> {
         let bytes = self.inner.bytes.bytes();
         let quick_fields = self.quick_fields();

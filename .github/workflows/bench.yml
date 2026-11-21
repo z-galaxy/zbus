@@ -27,7 +27,7 @@ jobs:
   #
   # Each job builds the features that its targets need between them beyond the default ones, as
   # their `required-features` say (`connection` needs `bus-impl` and `serde_bytes`), and
-  # `bus-impl`, which `benchmarks` measures the bus API of where it's enabled, so that
+  # `bus-impl`, which the `message-with-sender` benchmarks of `benchmarks` need, so that
   # `serde_bytes` turns on none of the benchmarks of the simulation, such as those of byte arrays
   # in `wire`.
   #
