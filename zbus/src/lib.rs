@@ -20,7 +20,8 @@
     doc = "# zbus\n\nThis build has connections (the `comms` feature) disabled. Only the part \
            of the D-Bus API that needs no connection (the `core` feature) is compiled in: \
            [messages](crate::message), [match rules](crate::match_rule), \
-           [addresses](crate::address), [GUIDs](crate::Guid), [`DBusError`], the \
+           [addresses](crate::address), [GUIDs](crate::Guid), the commands of the \
+           [authentication handshake](crate::connection::handshake), [`DBusError`], the \
            [standard errors and types](crate::fdo) and the \
            [ID of the machine](fn@crate::fdo::machine_id), along with the D-Bus \
            [wire format](crate::wire) and the [bus name types](crate::names).\n"
@@ -110,10 +111,10 @@ pub mod message;
 #[cfg(feature = "core")]
 pub use message::Message;
 
-#[cfg(feature = "comms")]
+#[cfg(feature = "core")]
 pub mod connection;
 /// Alias for `connection` module, for convenience.
-#[cfg(feature = "comms")]
+#[cfg(feature = "core")]
 pub use connection as conn;
 #[cfg(feature = "comms")]
 pub use connection::Connection;

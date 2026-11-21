@@ -1,24 +1,50 @@
+//! The handshake that opens a connection, before any message: the D-Bus authentication protocol.
+//!
+//! The protocol is a profile of [SASL]. Each command is one line, which [`Command`] parses and
+//! writes. The client authenticates with `AUTH`, which names a mechanism ([`AuthMechanism`]) and
+//! holds the client's initial response. The server answers with `OK` and its GUID, or with
+//! `REJECTED` and the mechanisms that it supports, which the client can try next. Once
+//! authenticated, the client can ask to pass file descriptors with `NEGOTIATE_UNIX_FD`, which the
+//! server accepts with `AGREE_UNIX_FD`. The client ends the handshake with `BEGIN`, and messages
+//! follow on the same socket.
+//!
+//! Before its first command, the client sends a 0 byte, which is not part of any command. On some
+//! platforms, the server gets the credentials of the client from it.
+//!
+//! A zbus connection does the handshake by itself. A program that does its own I/O, such as a bus,
+//! does it with these commands.
+//!
+//! [SASL]: https://dbus.freedesktop.org/doc/dbus-specification.html#auth-protocol
+
 mod auth_mechanism;
+#[cfg(feature = "comms")]
 mod client;
 mod command;
+#[cfg(feature = "comms")]
 mod common;
 #[cfg(feature = "p2p")]
 mod server;
 
+#[cfg(feature = "comms")]
 use async_trait::async_trait;
-#[cfg(unix)]
+#[cfg(all(unix, feature = "comms"))]
 use rustix::process::geteuid;
+#[cfg(feature = "comms")]
 use std::fmt::Debug;
 
-#[cfg(windows)]
+#[cfg(all(windows, feature = "comms"))]
 use crate::win32;
+#[cfg(feature = "comms")]
 use crate::{Error, OwnedGuid, Result, fdo::ConnectionCredentials, names::OwnedUniqueName};
 
+#[cfg(feature = "comms")]
 use super::socket::{BoxedSplit, ReadHalf, WriteHalf};
 
 pub use auth_mechanism::AuthMechanism;
+#[cfg(feature = "comms")]
 use client::Client;
-use command::Command;
+pub use command::Command;
+#[cfg(feature = "comms")]
 use common::Common;
 #[cfg(feature = "p2p")]
 use server::Server;
@@ -29,8 +55,9 @@ use server::Server;
 ///
 /// [`ClientHandshake`]: struct.ClientHandshake.html
 /// [`ServerHandshake`]: struct.ServerHandshake.html
+#[cfg(feature = "comms")]
 #[derive(Debug)]
-pub struct Authenticated {
+pub(crate) struct Authenticated {
     pub(crate) socket_write: Box<dyn WriteHalf>,
     /// The server Guid
     pub(crate) server_guid: OwnedGuid,
@@ -47,9 +74,10 @@ pub struct Authenticated {
     pub(crate) peer_credentials: Option<ConnectionCredentials>,
 }
 
+#[cfg(feature = "comms")]
 impl Authenticated {
     /// Create a client-side `Authenticated` for the given `socket`.
-    pub async fn client(
+    pub(crate) async fn client(
         socket: BoxedSplit,
         server_guid: Option<OwnedGuid>,
         mechanism: Option<AuthMechanism>,
@@ -66,7 +94,7 @@ impl Authenticated {
     /// The function takes `client_uid` on Unix and WASI only. On Windows, it takes `client_sid`
     /// instead.
     #[cfg(feature = "p2p")]
-    pub async fn server(
+    pub(crate) async fn server(
         socket: BoxedSplit,
         guid: OwnedGuid,
         #[cfg(any(unix, target_os = "wasi"))] client_uid: Option<u32>,
@@ -89,8 +117,9 @@ impl Authenticated {
     }
 }
 
+#[cfg(feature = "comms")]
 #[async_trait]
-pub trait Handshake {
+pub(crate) trait Handshake {
     /// Perform the handshake.
     ///
     /// On a successful handshake, you get an `Authenticated`. If you need to send a Bus Hello,
@@ -98,6 +127,7 @@ pub trait Handshake {
     async fn perform(mut self) -> Result<Authenticated>;
 }
 
+#[cfg(feature = "comms")]
 fn sasl_auth_id() -> Result<String> {
     #[cfg(unix)]
     {

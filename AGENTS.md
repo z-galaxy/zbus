@@ -93,9 +93,9 @@ threads. A target holds benchmarks of one kind only, and a new one goes in the l
 ### Core Crates
 - **zbus**: Everything a user sees. The D-Bus API (connection, proxy, object server) sits behind
   the `comms` feature; the part of it that needs no connection (messages, match rules, addresses,
-  GUIDs, `DBusError`, the `fdo` errors and types, `fdo::machine_id`) behind `core`, which `comms`
-  enables, for a program that does its own I/O, such as busd; the `wire` module (D-Bus wire
-  format) and the `names` module (D-Bus name types) are always compiled
+  GUIDs, the SASL commands, `DBusError`, the `fdo` errors and types, `fdo::machine_id`) behind
+  `core`, which `comms` enables, for a program that does its own I/O, such as busd; the `wire`
+  module (D-Bus wire format) and the `names` module (D-Bus name types) are always compiled
 - **zbus_macros**: Procedural macros: `#[interface]`, `#[proxy]`, `#[derive(DBusError)]` and the
   wire derives (`Type`, `Variant`, `OwnedVariant`, `SerializeDict`, `DeserializeDict`, `signature!`)
 - **zbus_utils**: Signature parser, D-Bus name validators and the derive codegen shared by zbus
@@ -139,8 +139,8 @@ zbus/src/
 ```
 
 Everything below `error.rs` in that list is behind the `comms` feature, but for `message/`, the
-parsing and formatting of `address/`, and the errors, types and machine ID of `fdo/`, which are
-behind `core`.
+commands of the authentication handshake in `connection/handshake/`, the parsing and formatting of
+`address/`, and the errors, types and machine ID of `fdo/`, which are behind `core`.
 
 **Message Flow**: Connection ↔ Message ↔ `zbus::wire` serialization ↔ Transport
 

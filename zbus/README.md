@@ -45,8 +45,9 @@ connection:
 zbus = { version = "6.6", default-features = false, features = ["core"] }
 ```
 
-The `core` feature adds D-Bus messages (`zbus::message`), match rules, GUIDs, addresses (parsed
-and written, but not connected to), `DBusError`, the errors and types of `zbus::fdo`, and
+The `core` feature adds D-Bus messages (`zbus::message`), match rules, GUIDs, addresses (parsed and
+written, but not connected to), the commands of the authentication handshake
+(`zbus::connection::handshake`), `DBusError`, the errors and types of `zbus::fdo`, and
 `fdo::machine_id` to the wire format and the bus name types. It compiles no connection, proxy,
 object server or runtime, and none of the crates that only they need, such as zruntime or socket2.
 `core-p2p` adds the part of the `p2p` API that a server needs without a connection,
@@ -56,7 +57,8 @@ A program that reads messages off its own socket finds the length of each from i
 `message::PrimaryHeader::parse_with_len`. Once a message is whole, `Message::from_parts` makes a
 `Message` of its bytes and of the file descriptors that its header counts, which
 `message::Header::parse` tells. A message goes out as the bytes and the file descriptors of
-`Message::data`.
+`Message::data`. The authentication handshake comes before the messages:
+`zbus::connection::handshake::Command` parses and writes its commands.
 
 ## Example code
 
