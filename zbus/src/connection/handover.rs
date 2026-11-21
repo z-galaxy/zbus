@@ -206,8 +206,8 @@ use super::{ConnectionInner, socket_write::Unwritten};
 use crate::connection::socket::{Channel, Writes};
 use crate::{
     Connection, Error, Guid, MatchRule, Message, OwnedGuid, Result,
-    connection::socket::{BoxedSplit, ReadHalf, Split, read_primary_header},
-    message::{self, header::MIN_MESSAGE_SIZE},
+    connection::socket::{BoxedSplit, ReadHalf, Split},
+    message::{self, PrimaryHeader, header::MIN_MESSAGE_SIZE},
     names::OwnedUniqueName,
     runtime::IoSource,
     wire::{
@@ -2447,7 +2447,7 @@ fn framed(
     if len < MIN_MESSAGE_SIZE {
         return Err(malformed());
     }
-    let (primary_header, whole) = read_primary_header(msg).map_err(|_| malformed())?;
+    let (primary_header, whole) = PrimaryHeader::parse_with_len(msg).map_err(|_| malformed())?;
     let msg_fds: Vec<_> = fds.by_ref().take(count).collect();
     if whole != len || msg_fds.len() != count {
         return Err(malformed());

@@ -30,7 +30,7 @@ mod quick_fields;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use body::validate as validate_body;
+pub(crate) use body::{MAX_ARRAY_LEN, validate as validate_body};
 pub(crate) use quick_fields::QuickFields;
 
 use winnow::{LocatingSlice, Parser, binary::length_and_then};
@@ -67,7 +67,6 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<(PrimaryHeader, usize, QuickFields)>
 }
 
 /// Parse the primary header at the start of `bytes`, and the length of the header fields after it.
-#[cfg(feature = "comms")]
 pub(super) fn parse_primary_header(bytes: &[u8]) -> Result<(PrimaryHeader, u32)> {
     let input = &mut Input::new(bytes);
     match bytes.first() {

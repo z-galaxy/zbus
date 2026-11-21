@@ -52,6 +52,9 @@ object server or runtime, and none of the crates that only they need, such as zr
 `core-p2p` adds the part of the `p2p` API that a server needs without a connection,
 `Guid::generate`. Every other D-Bus feature enables `core`, and `p2p` enables `core-p2p`.
 
+A program that reads messages off its own socket finds the length of each from its first bytes with
+`message::PrimaryHeader::parse_with_len`.
+
 ## Example code
 
 We'll create a simple D-Bus service and client to demonstrate the usage of zbus. Note that these

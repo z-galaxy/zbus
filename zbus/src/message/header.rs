@@ -9,7 +9,7 @@ use serde_repr::{Deserialize_repr, Serialize_repr};
 
 use crate::{
     Basic, Error, ObjectPath, OwnedVariant, Signature, Type as VariantType, Variant,
-    message::Fields,
+    message::{Fields, parser::MAX_ARRAY_LEN},
     names::{BusName, ErrorName, InterfaceName, MemberName, UniqueName},
     utils::fmt_bitflags,
     wire::Endian,
@@ -172,6 +172,54 @@ impl PrimaryHeader {
         }
     }
 
+    /// The primary header at the start of `bytes`, and the length of the whole message, from the
+    /// first byte of its header to the last byte of its body.
+    ///
+    /// A program that reads messages off its own socket uses this to find where each message
+    /// ends. The first 16 bytes of a message hold its primary header and the length of its header
+    /// fields. Once they are in, this gives the length of the message. The header fields and the
+    /// body are not read.
+    ///
+    /// # Errors
+    ///
+    /// * [`Error::OutOfBounds`] if `bytes` is shorter than 16 bytes.
+    /// * [`Error::ExcessData`] if the message is longer than 128 MiB, or its header fields longer
+    ///   than 64 MiB, the most that the D-Bus specification allows.
+    /// * [`Error::IncorrectEndian`], [`Error::InvalidField`] or [`Error::InvalidSerial`] if the
+    ///   primary header has an unknown endian signature or message type, or a serial number of 0.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use zbus::message::{Message, PrimaryHeader};
+    ///
+    /// let msg = Message::method_call("/org/zbus/Example", "Ping").build(&"pong")?;
+    /// let bytes = msg.data().bytes();
+    ///
+    /// let start = &bytes[..16];
+    /// let (primary_header, len) = PrimaryHeader::parse_with_len(start)?;
+    /// assert_eq!(len, bytes.len());
+    /// assert_eq!(primary_header.serial_num(), msg.primary_header().serial_num());
+    /// # Ok::<(), zbus::Error>(())
+    /// ```
+    pub fn parse_with_len(bytes: &[u8]) -> Result<(PrimaryHeader, usize), Error> {
+        let (primary_header, fields_len) = Self::read(bytes)?;
+        let body_len = primary_header.body_len();
+        // Within the limits of the specification, the lengths add up to no more than a 32-bit
+        // `usize` holds.
+        if fields_len > MAX_ARRAY_LEN || body_len as usize > MAX_MESSAGE_SIZE {
+            return Err(Error::ExcessData);
+        }
+        let header_len = MIN_MESSAGE_SIZE + fields_len as usize;
+        // The body starts on an 8-byte boundary.
+        let len = header_len.next_multiple_of(8) + body_len as usize;
+        if len > MAX_MESSAGE_SIZE {
+            return Err(Error::ExcessData);
+        }
+
+        Ok((primary_header, len))
+    }
+
     /// A primary header with the given contents.
     pub(super) fn from_parts(
         endian_sig: EndianSig,
@@ -192,7 +240,6 @@ impl PrimaryHeader {
     }
 
     /// Read the primary header at the start of `buf`, and the length of the header fields after it.
-    #[cfg(feature = "comms")]
     pub(crate) fn read(buf: &[u8]) -> Result<(PrimaryHeader, u32), Error> {
         super::parser::parse_primary_header(buf)
     }
@@ -373,12 +420,14 @@ static SERIAL_NUM: AtomicU32 = AtomicU32::new(0);
 
 #[cfg(test)]
 mod tests {
-    use crate::message::{Fields, Flags, Header, PrimaryHeader, Type};
+    use super::{MAX_ARRAY_LEN, MAX_MESSAGE_SIZE, MIN_MESSAGE_SIZE};
+    use crate::message::{EndianSig, Fields, Flags, Header, Message, PrimaryHeader, Type};
 
     use crate::{
         ObjectPath, Signature, Type as _,
         names::{InterfaceName, MemberName},
         signature,
+        wire::{BE, LE},
     };
     use std::{borrow::Cow, error::Error};
     use test_log::test;
@@ -453,7 +502,6 @@ mod tests {
         assert_eq!(Flags::try_from(value).unwrap(), flags);
     }
 
-    #[cfg(feature = "comms")]
     #[test]
     fn unknown_flags_are_retained() {
         // The primary header of a method call, followed by the length of its (empty) header
@@ -470,5 +518,72 @@ mod tests {
             format!("{:?}", primary.flags()),
             "Flags(NO_REPLY_EXPECTED | 0x8)"
         );
+    }
+
+    /// The first bytes of a message tell how long it is, in either byte order.
+    #[test]
+    fn length_of_a_message() {
+        for endian in [LE, BE] {
+            let msg = Message::method_call("/org/zbus/Test", "Test")
+                .interface("org.zbus.Test")
+                .endian(endian)
+                .build(&(7u32, "seven"))
+                .unwrap();
+            let bytes = msg.data().bytes();
+
+            let start = &bytes[..MIN_MESSAGE_SIZE];
+            let (primary, len) = PrimaryHeader::parse_with_len(start).unwrap();
+            assert_eq!(len, bytes.len(), "{endian:?}");
+            let endian_sig: EndianSig = endian.into();
+            assert_eq!(primary.endian_sig(), endian_sig);
+            assert_eq!(primary.serial_num(), msg.primary_header().serial_num());
+        }
+    }
+
+    /// Too few bytes to hold the length of a message give no length.
+    #[test]
+    fn length_of_too_few_bytes() {
+        let bytes = primary_header(0, 0);
+        PrimaryHeader::parse_with_len(&bytes).unwrap();
+
+        for len in 0..MIN_MESSAGE_SIZE {
+            let error = PrimaryHeader::parse_with_len(&bytes[..len]).unwrap_err();
+            assert_eq!(error, crate::Error::OutOfBounds, "{len} bytes");
+        }
+    }
+
+    /// A message longer than the D-Bus specification allows is an error, as are header fields
+    /// longer than it allows, even where the lengths add up to more than a 32-bit `usize` holds.
+    #[test]
+    fn length_of_a_message_too_long() {
+        let longest = (MAX_MESSAGE_SIZE - MIN_MESSAGE_SIZE) as u32;
+        let (_, len) = PrimaryHeader::parse_with_len(&primary_header(longest, 0)).unwrap();
+        assert_eq!(len, MAX_MESSAGE_SIZE);
+        let (_, len) = PrimaryHeader::parse_with_len(&primary_header(0, MAX_ARRAY_LEN)).unwrap();
+        assert_eq!(len, MIN_MESSAGE_SIZE + MAX_ARRAY_LEN as usize);
+
+        for (body_len, fields_len) in [
+            (longest + 1, 0),
+            (0, MAX_ARRAY_LEN + 1),
+            (u32::MAX, 0),
+            (0, u32::MAX),
+            (u32::MAX, u32::MAX),
+        ] {
+            let bytes = primary_header(body_len, fields_len);
+            let error = PrimaryHeader::parse_with_len(&bytes).unwrap_err();
+            assert_eq!(error, crate::Error::ExcessData, "{body_len}, {fields_len}");
+        }
+    }
+
+    /// The primary header of a little-endian method call with a body of `body_len` bytes,
+    /// followed by `fields_len`, the length of its header fields.
+    fn primary_header(body_len: u32, fields_len: u32) -> [u8; MIN_MESSAGE_SIZE] {
+        let mut bytes = [0; MIN_MESSAGE_SIZE];
+        bytes[..4].copy_from_slice(&[b'l', 1, 0, 1]);
+        bytes[4..8].copy_from_slice(&body_len.to_le_bytes());
+        bytes[8..12].copy_from_slice(&1u32.to_le_bytes());
+        bytes[12..].copy_from_slice(&fields_len.to_le_bytes());
+
+        bytes
     }
 }
