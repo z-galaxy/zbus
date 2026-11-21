@@ -4947,6 +4947,7 @@ mod tests {
                     handover.tail = concat(&[valid.clone(), invalid]);
                 }
 
+                #[allow(deprecated)]
                 let mut stream = on(Builder::take_over(handover).validate_bodies(), &runtime)
                     .build_message_stream()
                     .await
