@@ -137,8 +137,10 @@ fn object_properties() -> BTreeMap<String, BTreeMap<String, Variant<'static>>> {
         .collect()
 }
 
-/// Setting the sender of messages, as a bus does to those of peers that leave it out.
+/// Setting the sender of messages, as a bus does to those of peers that leave it out, with
+/// `Message::with_sender`, which is deprecated, and benchmarked until zbus 7 removes it.
 #[cfg(feature = "bus-impl")]
+#[allow(deprecated)]
 fn msg_with_sender(c: &mut Criterion) {
     let mut g = c.benchmark_group("message-with-sender");
     let sender = zbus::names::UniqueName::from_static_str_unchecked(":busd.42");

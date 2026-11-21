@@ -99,8 +99,10 @@ fn check(data: &[u8], endian: Endian) {
     assert_eq!(header.unix_fds(), decoded.unix_fds());
 
     // A bus that sets the sender of the message gets the same header but for its sender, which a
-    // recipient reads from the bytes of the new message as well.
+    // recipient reads from the bytes of the new message as well. `Message::with_sender` is
+    // deprecated, and checked until zbus 7 removes it.
     let sender = UniqueName::from_static_str_unchecked(":busd.42");
+    #[allow(deprecated)]
     let new = received.with_sender(&sender).unwrap();
     let reread = Message::try_from_bytes(new.data().clone()).unwrap();
     for new in [&new, &reread] {
