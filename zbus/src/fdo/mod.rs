@@ -33,6 +33,9 @@ pub(crate) use introspectable::Introspectable;
 #[cfg(feature = "proxy")]
 pub use introspectable::IntrospectableProxy;
 
+mod machine_id;
+pub use machine_id::machine_id;
+
 #[cfg(feature = "proxy")]
 pub(crate) mod monitoring;
 #[cfg(feature = "proxy")]
