@@ -270,6 +270,8 @@ fn socket_credentials(fd: BorrowedFd<'_>) -> io::Result<(ConnectionCredentials, 
             let mut pidfd = MaybeUninit::<c_int>::zeroed();
             let mut len = size_of::<c_int>() as socklen_t;
 
+            // SAFETY: `pidfd` has room for the `len` bytes of the descriptor that `SO_PEERPIDFD`
+            // fills in, and `fd` stays open for as long as the call lasts.
             let ret = unsafe {
                 libc::getsockopt(
                     fd.as_raw_fd(),
@@ -281,8 +283,11 @@ fn socket_credentials(fd: BorrowedFd<'_>) -> io::Result<(ConnectionCredentials, 
             };
 
             if ret == 0 {
+                // SAFETY: `pidfd` was zeroed, and any bytes make a valid `c_int`.
                 let pidfd = unsafe { pidfd.assume_init() };
-                creds = creds.set_process_fd(unsafe { OwnedFd::from_raw_fd(pidfd).into() });
+                // SAFETY: The call opened `pidfd` for this process, and nothing else owns it.
+                let pidfd = unsafe { OwnedFd::from_raw_fd(pidfd) };
+                creds = creds.set_process_fd(pidfd.into());
             } else if ret < 0 {
                 let err = io::Error::last_os_error();
                 // The kernel may have no descriptor to give, which leaves it out, as dbus-broker
@@ -332,6 +337,8 @@ fn socket_credentials(fd: BorrowedFd<'_>) -> io::Result<(ConnectionCredentials, 
         let mut uid: libc::uid_t = 0;
         let mut gid: libc::gid_t = 0;
 
+        // SAFETY: `uid` and `gid` are valid for the writes of the call, and `fd` stays open for as
+        // long as it lasts.
         let ret = unsafe { libc::getpeereid(fd.as_raw_fd(), &mut uid, &mut gid) };
         if ret != 0 {
             return Err(io::Error::last_os_error());
@@ -457,10 +464,13 @@ impl GroupLookup {
         // `sysinfo` crate though.
         //
         // [will not]: https://docs.rs/rustix/latest/rustix/not_implemented/higher_level/index.html
+        // SAFETY: `passwd` holds integers and pointers, which zeroes make valid.
         let mut passwd: libc::passwd = unsafe { std::mem::zeroed() };
         let mut buf = vec![0u8; 16384];
         let mut result: *mut libc::passwd = std::ptr::null_mut();
 
+        // SAFETY: `passwd` and `result` are valid for the writes of the call, and `buf` has room
+        // for the `buf.len()` bytes of the strings of the entry that it writes there.
         unsafe {
             libc::getpwuid_r(
                 uid,
@@ -475,6 +485,8 @@ impl GroupLookup {
             return vec![];
         }
 
+        // SAFETY: A `result` that isn't null points to `passwd`, whose name is a string in `buf`
+        // that a 0 ends, and `buf` outlives `username`.
         let username = unsafe { std::ffi::CStr::from_ptr((*result).pw_name) };
         let mut groups = vec![0u32; INITIAL_GROUPS];
         loop {
