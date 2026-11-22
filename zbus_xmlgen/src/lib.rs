@@ -989,13 +989,12 @@ fn hide_clippy_lints<W: Write>(
     }
 
     // check for <https://rust-lang.github.io/rust-clippy/master/index.html#/type_complexity>
-    for arg in method.args() {
+    if method.args().iter().any(|arg|
         // A named type keeps the written-out type simple, no matter the signature.
-        if types.resolve(arg.tp_type(), arg.ty(), false).is_some() {
-            continue;
-        }
-        let signature = arg.ty();
-        hide_clippy_type_complexity_lint(write, signature)?;
+        types.resolve(arg.tp_type(), arg.ty(), false).is_none()
+            && estimate_type_complexity(arg.ty()) >= 1700)
+    {
+        writeln!(write, "    #[allow(clippy::type_complexity)]")?;
     }
 
     Ok(())

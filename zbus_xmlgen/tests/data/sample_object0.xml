@@ -31,6 +31,11 @@
        <arg direction="in" name="rule" type="(aiia{ss}iaiiasib)"/>
        <arg direction="out" type="a(so)"/>
      </method>
+     <method name="ComplexType">
+       <arg name="not_complex" type="a((sisis)a(siiddada{sv}))" direction="in"/>
+       <arg name="somewhat_complex" type="a((ssss)a(siiddada{sv})a{sv})" direction="out"/>
+       <arg name="very_complex" type="a(iiduba(ssss)a{sv})" direction="out"/>
+     </method>
      <method name="Odyssey">
        <arg name="odysseus" type="i"/>
        <arg name="penelope" type="s"/>

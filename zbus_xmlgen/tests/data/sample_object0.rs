@@ -35,6 +35,47 @@ pub trait SampleInterface0 {
         ),
     ) -> zbus::Result<Vec<(String, zbus::OwnedObjectPath)>>;
 
+    /// ComplexType method
+    #[allow(clippy::type_complexity)]
+    fn complex_type(
+        &self,
+        not_complex: &[&(
+            &(&str, i32, &str, i32, &str),
+            &[&(
+                &str,
+                i32,
+                i32,
+                f64,
+                f64,
+                &[f64],
+                std::collections::HashMap<&str, &zbus::Variant<'_>>,
+            )],
+        )],
+    ) -> zbus::Result<(
+        Vec<(
+            (String, String, String, String),
+            Vec<(
+                String,
+                i32,
+                i32,
+                f64,
+                f64,
+                Vec<f64>,
+                std::collections::HashMap<String, zbus::OwnedVariant>,
+            )>,
+            std::collections::HashMap<String, zbus::OwnedVariant>,
+        )>,
+        Vec<(
+            i32,
+            i32,
+            f64,
+            u32,
+            bool,
+            Vec<(String, String, String, String)>,
+            std::collections::HashMap<String, zbus::OwnedVariant>,
+        )>,
+    )>;
+
     /// Odyssey method
     #[allow(clippy::too_many_arguments)]
     fn odyssey(
