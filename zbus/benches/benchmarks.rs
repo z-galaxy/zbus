@@ -6,7 +6,7 @@ use std::{
 };
 use zbus::Message;
 
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 
 use zbus::{Type, Variant};
 
@@ -49,13 +49,21 @@ fn msg_de(c: &mut Criterion) {
         .sender(":1.42")
         .build(&(42u32, "Testtest"))
         .unwrap();
-    let data = msg.data().clone();
+    let bytes = msg.data().to_vec();
     g.bench_function("received", |b| {
-        b.iter(|| {
-            // SAFETY: The bytes are those of a message that zbus built.
-            let msg = unsafe { Message::from_bytes(black_box(data.clone())) }.unwrap();
-            black_box(msg);
-        })
+        b.iter_batched(
+            || bytes.clone(),
+            |bytes| {
+                let msg = Message::from_parts(
+                    black_box(bytes),
+                    #[cfg(unix)]
+                    vec![],
+                )
+                .unwrap();
+                black_box(msg);
+            },
+            BatchSize::SmallInput,
+        )
     });
 
     let mut strings = Vec::new();
