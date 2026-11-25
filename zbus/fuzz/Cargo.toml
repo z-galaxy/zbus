@@ -15,8 +15,8 @@ serde = "1.0.229"
 [dependencies.zbus]
 path = ".."
 default-features = false
-# The D-Bus API, for the `header` target to decode messages with, and the bus API, for the `body`
-# target to check bodies with.
+# `comms` for the D-Bus API: the `header` target decodes messages with it, and the `body` target
+# checks bodies with it. `bus-impl` for `Message::with_sender`, which the `header` target checks.
 features = ["comms", "bus-impl"]
 
 # Prevent this from interfering with workspaces

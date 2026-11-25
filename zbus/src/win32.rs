@@ -9,8 +9,6 @@ use std::{
     ptr,
 };
 
-#[cfg(feature = "service")]
-use windows_sys::Win32::System::WindowsProgramming::{GetCurrentHwProfileA, HW_PROFILE_INFOA};
 use windows_sys::Win32::{
     Foundation::{
         ERROR_INSUFFICIENT_BUFFER, FALSE, HANDLE, LocalFree, NO_ERROR, WAIT_ABANDONED,
@@ -307,26 +305,6 @@ pub fn autolaunch_bus_address() -> Result<Address, crate::Error> {
     addr.parse()
 }
 
-/// Get the machine ID using the hardware profile GUID.
-///
-/// As per the D-Bus specification, on Windows we use the `GetCurrentHwProfile` API.
-#[cfg(feature = "service")]
-pub fn machine_id() -> Result<String, Error> {
-    let mut hw_profile: HW_PROFILE_INFOA = unsafe { std::mem::zeroed() };
-
-    let ret = unsafe { GetCurrentHwProfileA(&mut hw_profile) };
-    if ret == 0 {
-        return Err(Error::last_os_error());
-    }
-
-    let guid = unsafe { CStr::from_ptr(hw_profile.szHwProfileGuid.as_ptr().cast()) };
-    let guid = guid
-        .to_str()
-        .map_err(|_| Error::other("Invalid hardware profile GUID"))?;
-
-    Ok(guid.replace(['{', '}', '-'], ""))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -342,16 +320,5 @@ mod tests {
         let process_token = ProcessToken::open(if pid != 0 { Some(pid) } else { None }).unwrap();
         let sid = process_token.sid().unwrap();
         assert!(!sid.is_empty());
-    }
-
-    #[cfg(feature = "service")]
-    #[test]
-    fn machine_id() {
-        let id = super::machine_id().expect("machine_id should succeed");
-        assert_eq!(id.len(), 32, "machine ID should be 32 hex characters");
-        assert!(
-            id.chars().all(|c| c.is_ascii_hexdigit()),
-            "machine ID should only contain hex characters"
-        );
     }
 }

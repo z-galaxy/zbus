@@ -75,6 +75,61 @@ up on. A stream of another kind is handed over as the socket it wraps: `into_std
 **Note:** the `p2p` and `server` methods of `connection::Builder` are only available when `p2p`
 cargo feature of `zbus` is enabled.
 
+## Doing the I/O yourself
+
+A program with its own event loop, such as a bus, can read and write D-Bus messages on its sockets
+itself, without a zbus connection, and so without a zbus runtime either. The `core` cargo feature
+of `zbus` has only the part of the API that this needs:
+
+* [`PrimaryHeader::parse_with_len`] gives the length of a message from its first 16 bytes, so that
+  the program can read up to its end.
+* [`Message::from_parts`] makes a message of its bytes once they are all in, with the file
+  descriptors that its header counts, the first of those that came in. [`Header::parse`] tells how
+  many, from the bytes of the message.
+* A message goes out as the bytes and the file descriptors of [`Message::data`].
+* [`connection::handshake::Command`] parses and writes the commands of the authentication handshake,
+  which comes before the messages.
+* With the `core-p2p` cargo feature, [`ConnectionCredentials::from_socket`] tells who the peer of
+  a unix socket is, and [`Guid::generate`] gives a server its own GUID.
+
+```rust,noplayground
+# #[cfg(unix)]
+# fn main() -> zbus::Result<()> {
+use zbus::message::{Header, Message, PrimaryHeader};
+
+// The bytes and the file descriptors that came in on a socket, not made into messages yet: here, a
+// call.
+let mut bytes = Message::method_call("/org/zbus/Example", "Ping").build(&())?.data().to_vec();
+let mut fds = vec![];
+
+// The first 16 bytes of a message tell its length.
+if bytes.len() >= 16 {
+    let (_, len) = PrimaryHeader::parse_with_len(&bytes)?;
+    if bytes.len() >= len {
+        // The call takes its bytes, and as many of the file descriptors as its header counts. If
+        // fewer came in, the call is an error.
+        let rest = bytes.split_off(len);
+        let count = Header::parse(&bytes)?.unix_fds().unwrap_or(0) as usize;
+        let call = Message::from_parts(
+            std::mem::replace(&mut bytes, rest),
+            fds.drain(..count.min(fds.len())).collect(),
+        )?;
+        let reply = Message::method_return(&call.header()).build(&())?;
+        // What goes out on the socket: the bytes of `reply.data()`, and its `fds()` along with
+        // them.
+#       let _ = reply;
+    }
+}
+# Ok(())
+# }
+#
+# #[cfg(not(unix))]
+# fn main() {}
+```
+
+The [`own_io`] fixture of the zbus repository is a complete server built this way. In its test, a
+zbus connection talks to it as to a bus.
+
 ## Runtimes
 
 A connection takes its readiness notifications, timers, spawned tasks and blocking work from one
@@ -156,5 +211,13 @@ has how to write one.
 [`Builder::socket`]: https://docs.rs/zbus/latest/zbus/connection/struct.Builder.html#method.socket
 [`Builder::authenticated_socket`]: https://docs.rs/zbus/latest/zbus/connection/struct.Builder.html#method.authenticated_socket
 [`Socket`]: https://docs.rs/zbus/latest/zbus/connection/socket/trait.Socket.html
+[`PrimaryHeader::parse_with_len`]: https://docs.rs/zbus/latest/zbus/message/struct.PrimaryHeader.html#method.parse_with_len
+[`Message::from_parts`]: https://docs.rs/zbus/latest/zbus/message/struct.Message.html#method.from_parts
+[`Header::parse`]: https://docs.rs/zbus/latest/zbus/message/struct.Header.html#method.parse
+[`Message::data`]: https://docs.rs/zbus/latest/zbus/message/struct.Message.html#method.data
+[`connection::handshake::Command`]: https://docs.rs/zbus/latest/zbus/connection/handshake/enum.Command.html
+[`ConnectionCredentials::from_socket`]: https://docs.rs/zbus/latest/zbus/fdo/struct.ConnectionCredentials.html#method.from_socket
+[`Guid::generate`]: https://docs.rs/zbus/latest/zbus/struct.Guid.html#method.generate
+[`own_io`]: https://github.com/z-galaxy/zbus/tree/main/test_fixtures/own_io
 
 [^bus-less]: Unless you implemented them, none of the bus methods will exist.

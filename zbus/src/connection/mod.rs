@@ -1,4 +1,5 @@
 //! Connection API.
+#[cfg(feature = "comms")]
 use std::{
     borrow::Cow,
     collections::HashMap,
@@ -11,6 +12,7 @@ use std::{
     },
     time::Duration,
 };
+#[cfg(feature = "comms")]
 use zruntime::{
     Event, EventListener,
     broadcast::{InactiveReceiver, Receiver, Sender as Broadcaster, channel},
@@ -24,6 +26,7 @@ use crate::log::debug;
 use crate::object_server::{Calls, CallsSlot, UnderWay};
 #[cfg(all(target_os = "linux", feature = "handover"))]
 use crate::runtime::IoSource;
+#[cfg(feature = "comms")]
 use crate::{
     DBusError, Error, MatchRule, ObjectPath, OwnedGuid, OwnedMatchRule, Result,
     fdo::{ConnectionCredentials, ReleaseNameReply, RequestNameFlags, RequestNameReply},
@@ -34,13 +37,19 @@ use crate::{
     utils::next,
 };
 
+#[cfg(feature = "comms")]
 mod activity_listener;
+#[cfg(feature = "comms")]
 pub use activity_listener::ActivityListener;
 
+#[cfg(feature = "comms")]
 mod builder;
+#[cfg(feature = "comms")]
 pub use builder::Builder;
 
+#[cfg(feature = "comms")]
 pub mod socket;
+#[cfg(feature = "comms")]
 pub use socket::Socket;
 
 #[cfg(all(target_os = "linux", feature = "handover"))]
@@ -50,22 +59,31 @@ pub use handover::Handover;
 #[cfg(all(target_os = "linux", feature = "handover"))]
 use handover::{Had, SocketKind, StopStatus};
 
+#[cfg(feature = "comms")]
 mod socket_reader;
+#[cfg(feature = "comms")]
 use socket_reader::{SocketReader, SocketStatus};
 
+#[cfg(feature = "comms")]
 mod socket_write;
+#[cfg(feature = "comms")]
 use socket_write::SocketWrite;
 
+#[cfg(feature = "comms")]
 mod pending_method_calls;
+#[cfg(feature = "comms")]
 use pending_method_calls::{PendingMethodCall, PendingMethodCalls};
 
-pub(crate) mod handshake;
+pub mod handshake;
 pub use handshake::AuthMechanism;
+#[cfg(feature = "comms")]
 use handshake::Authenticated;
 
+#[cfg(feature = "comms")]
 const DEFAULT_MAX_QUEUED: NonZeroUsize = NonZeroUsize::new(64).unwrap();
 
 /// Inner state shared by Connection and WeakConnection
+#[cfg(feature = "comms")]
 #[derive(Debug)]
 pub(crate) struct ConnectionInner {
     server_guid: OwnedGuid,
@@ -113,6 +131,7 @@ pub(crate) struct ConnectionInner {
     credentials: OnceLock<Arc<ConnectionCredentials>>,
 }
 
+#[cfg(feature = "comms")]
 impl ConnectionInner {
     /// Whether the connection is closed, in the sense [`Connection::is_closed`] reports.
     ///
@@ -131,6 +150,7 @@ impl ConnectionInner {
     }
 }
 
+#[cfg(feature = "comms")]
 impl Drop for ConnectionInner {
     fn drop(&mut self) {
         // Notify anyone waiting that the connection is going away. Since we're being dropped, it's
@@ -140,8 +160,10 @@ impl Drop for ConnectionInner {
     }
 }
 
+#[cfg(feature = "comms")]
 type Subscriptions = HashMap<OwnedMatchRule, (u64, InactiveReceiver<Result<Message>>)>;
 
+#[cfg(feature = "comms")]
 pub(crate) type MsgBroadcaster = Broadcaster<Result<Message>>;
 
 /// A D-Bus connection.
@@ -273,12 +295,14 @@ pub(crate) type MsgBroadcaster = Broadcaster<Result<Message>>;
 /// ```
 ///
 /// [Monitor]: https://dbus.freedesktop.org/doc/dbus-specification.html#bus-messages-become-monitor
+#[cfg(feature = "comms")]
 #[derive(Clone, Debug)]
 #[must_use = "Dropping a `Connection` will close the underlying socket."]
 pub struct Connection {
     pub(crate) inner: Arc<ConnectionInner>,
 }
 
+#[cfg(feature = "comms")]
 impl Connection {
     /// Send `msg` to the peer.
     ///
@@ -1084,12 +1108,7 @@ impl Connection {
 
     /// The unique name of the connection, if set/applicable.
     ///
-    /// The unique name is assigned by the message bus, or set manually using
-    #[cfg_attr(feature = "bus-impl", doc = "[`Connection::set_unique_name`].")]
-    #[cfg_attr(
-        not(feature = "bus-impl"),
-        doc = "`Connection::set_unique_name` (requires the `bus-impl` feature)."
-    )]
+    /// The unique name is assigned by the message bus.
     pub fn unique_name(&self) -> Option<&OwnedUniqueName> {
         self.inner.unique_name.get()
     }
@@ -1104,6 +1123,11 @@ impl Connection {
     /// This method panics if the unique name is already set. It will always panic if the connection
     /// is to a message bus as it's the bus that assigns peers their unique names.
     #[cfg(feature = "bus-impl")]
+    #[deprecated(
+        since = "6.6.0",
+        note = "Only a bus gives a connection a unique name of its choosing, and a bus implements \
+                that itself. This will be removed in zbus 7."
+    )]
     pub fn set_unique_name<U>(&self, unique_name: U) -> Result<()>
     where
         U: TryInto<OwnedUniqueName>,
@@ -1770,11 +1794,13 @@ impl Connection {
 }
 
 // Internal API that allows keeping a weak connection ref around.
+#[cfg(feature = "comms")]
 #[derive(Debug, Clone)]
 pub(crate) struct WeakConnection {
     inner: Weak<ConnectionInner>,
 }
 
+#[cfg(feature = "comms")]
 impl WeakConnection {
     /// Upgrade to a Connection.
     pub fn upgrade(&self) -> Option<Connection> {
@@ -1782,6 +1808,7 @@ impl WeakConnection {
     }
 }
 
+#[cfg(feature = "comms")]
 impl From<&Connection> for WeakConnection {
     fn from(conn: &Connection) -> Self {
         Self {
@@ -1790,6 +1817,7 @@ impl From<&Connection> for WeakConnection {
     }
 }
 
+#[cfg(feature = "comms")]
 #[derive(Debug)]
 enum NameStatus {
     // The task waits for name lost signal if owner allows replacement.
@@ -1798,6 +1826,7 @@ enum NameStatus {
     Queued(#[allow(unused)] Task<()>),
 }
 
+#[cfg(feature = "comms")]
 #[cfg(test)]
 mod tests {
     #[cfg(all(feature = "service", any(feature = "default-rt", feature = "tokio")))]

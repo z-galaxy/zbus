@@ -71,7 +71,7 @@ impl Common {
         let mut send_buffer =
             commands
                 .iter()
-                .map(Vec::<u8>::from)
+                .map(|c| c.to_string().into_bytes())
                 .fold(vec![], |mut acc, mut c| {
                     if self.first_command {
                         // The first command is sent by the client so we can assume it's the client.

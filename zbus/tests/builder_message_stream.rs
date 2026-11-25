@@ -3,16 +3,11 @@
 //! Tests for [`zbus::connection::Builder::build_message_stream`].
 //!
 //! Simulates the busd scenario: a bus client pipelines a `Hello` method call as part of its
-//! SASL handshake, before the server (bus-impl) has started polling for messages. With plain
+//! SASL handshake, before the server (the bus) has started polling for messages. With plain
 //! `build()` + `MessageStream::from`, the Hello can be lost; `build_message_stream` fixes
 //! this by setting up the stream before the socket reader task starts.
 
-#![cfg(all(
-    unix,
-    feature = "p2p",
-    any(feature = "bus-impl", feature = "handover"),
-    any(feature = "default-rt", feature = "tokio")
-))]
+#![cfg(all(unix, feature = "p2p", any(feature = "default-rt", feature = "tokio")))]
 
 use futures_util::StreamExt;
 use ntest::timeout;

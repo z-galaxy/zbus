@@ -27,11 +27,53 @@ zbus = { version = "6", default-features = false }
 That build compiles `zbus::wire` and `zbus::names` and nothing else — no connection, proxy or
 object server. The optional wire-format features keep zvariant's names (`arrayvec`, `camino`,
 `chrono`, `heapless`, `option-as-array`, `serde_bytes`, `time`, `url`, `uuid`), and enabling any
-D-Bus feature (`comms`, `default-rt`, `tokio`, `tokio-multithread`, `p2p`, `bus-impl`, `handover`,
-`proxy`, `service`, `object-manager`, `unixexec`, `ibus`) brings the D-Bus API back.
+D-Bus feature (`comms`, `default-rt`, `tokio`, `tokio-multithread`, `p2p`, `handover`, `proxy`,
+`service`, `object-manager`, `unixexec`, `ibus`, or the deprecated `bus-impl`) brings the D-Bus
+API back. `core` and `core-p2p` bring back the part of it that needs no connection, as below.
 
 zbus logs through [`tracing`], behind the default `tracing` feature; a `default-features =
 false` build that wants zbus's logs must re-enable it explicitly.
+
+## Without connections
+
+A program that reads and writes D-Bus messages on its own sockets, such as a bus, or a
+peer-to-peer server with its own event loop, can use only the part of the D-Bus API that needs no
+connection:
+
+```toml
+[dependencies]
+zbus = { version = "6.6", default-features = false, features = ["core"] }
+```
+
+The `core` feature adds D-Bus messages (`zbus::message`), match rules, GUIDs, addresses (parsed and
+written, but not connected to), the commands of the authentication handshake
+(`zbus::connection::handshake`), `DBusError`, the errors and types of `zbus::fdo`, and
+`fdo::machine_id` to the wire format and the bus name types. It compiles no connection, proxy,
+object server or runtime, and none of the crates that only they need, such as zruntime or socket2.
+`core-p2p` adds the part of the `p2p` API that a server needs without a connection:
+`Guid::generate`, and on Unix `fdo::ConnectionCredentials::from_socket`. Every other D-Bus feature
+enables `core`, and `p2p` enables `core-p2p`.
+
+A program that reads messages off its own socket finds the length of each from its first bytes with
+`message::PrimaryHeader::parse_with_len`. Once a message is whole, `Message::from_parts` makes a
+`Message` of its bytes and of the file descriptors that its header counts, which
+`message::Header::parse` tells. A message goes out as the bytes and the file descriptors of
+`Message::data`. The authentication handshake comes before the messages:
+`zbus::connection::handshake::Command` parses and writes its commands.
+`fdo::ConnectionCredentials::from_socket` tells who the peer of a unix socket is, with no runtime.
+
+## Deprecated: `bus-impl`
+
+The `bus-impl` feature is deprecated, and zbus 7 removes it. The API that only it enables is for
+bus implementations, which implement it themselves, and it is deprecated along with the feature:
+`connection::Builder::unique_name` and `validate_bodies`, `Connection::set_unique_name` and
+`Message::with_sender`. Until zbus 7, the feature still enables them, and `p2p`.
+
+The rest of what it enabled is of general use, and no longer needs it. `message::Body::validate`,
+which checks a body as `validate_bodies` has a connection do, comes with `core`.
+`connection::Builder::build_message_stream` and, on Unix, `fdo::ConnectionCredentials::of_peer`
+come with `comms`. A bus that does its own I/O has all that it needs of zbus with `core` and
+`core-p2p`, as above.
 
 ## Example code
 

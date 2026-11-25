@@ -21,7 +21,6 @@
 //! at once: winnow's parsers of integers build them a byte at a time, which takes more
 //! instructions.
 
-#[cfg(feature = "bus-impl")]
 mod body;
 mod byte_order;
 mod error;
@@ -31,8 +30,7 @@ mod quick_fields;
 #[cfg(test)]
 mod tests;
 
-#[cfg(feature = "bus-impl")]
-pub(crate) use body::validate as validate_body;
+pub(crate) use body::{MAX_ARRAY_LEN, validate as validate_body};
 pub(crate) use quick_fields::QuickFields;
 
 use winnow::{LocatingSlice, Parser, binary::length_and_then};

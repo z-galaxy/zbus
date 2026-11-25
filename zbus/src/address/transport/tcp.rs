@@ -1,21 +1,28 @@
 use std::{
     collections::HashMap,
     fmt::{Display, Formatter},
+    str::FromStr,
+};
+#[cfg(feature = "comms")]
+use std::{
     net::{IpAddr, SocketAddr, ToSocketAddrs},
     path::PathBuf,
-    str::FromStr,
     sync::Arc,
 };
 
-use super::{Stream, encode_percents};
+#[cfg(feature = "comms")]
+use super::Stream;
+use super::encode_percents;
+#[cfg(feature = "comms")]
 use crate::{
-    Address, Error, Result,
+    Address,
     connection::socket::{BoxedSplit, WriteHalf},
     runtime::{
         Runtime,
         io::{RegisteredIo, TcpOps},
     },
 };
+use crate::{Error, Result};
 
 /// A TCP transport in a D-Bus address.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -133,6 +140,7 @@ impl Tcp {
     }
 
     /// Connects to this address, passing the nonce it names along where there is one.
+    #[cfg(feature = "comms")]
     pub(super) async fn connect(&self, address: &Address, runtime: &Runtime) -> Result<Stream> {
         let nonce = match self.nonce_file() {
             Some(path) => Some(read_nonce(path, runtime).await?),
@@ -168,6 +176,7 @@ impl Tcp {
     ///
     /// A host written as an IP address is one already. Anything else is a name for the resolver,
     /// which goes to `runtime` because looking it up blocks.
+    #[cfg(feature = "comms")]
     async fn resolve(&self, address: &Address, runtime: &Runtime) -> Result<Vec<SocketAddr>> {
         let port = self.port();
         let addresses = match self.host().parse::<IpAddr>() {
@@ -196,6 +205,7 @@ impl Tcp {
     }
 
     /// The error a connection attempt that found nowhere to go reports.
+    #[cfg(feature = "comms")]
     fn nothing_found(&self, address: &Address) -> Error {
         Error::Address(match self.family() {
             Some(family) => format!("no `{family}` addresses found for `{address}`"),
@@ -205,6 +215,7 @@ impl Tcp {
 }
 
 /// The nonce the server expects before anything else, read off `path`.
+#[cfg(feature = "comms")]
 async fn read_nonce(path: &[u8], runtime: &Runtime) -> Result<Vec<u8>> {
     let path = nonce_path(path)?;
 
@@ -215,6 +226,7 @@ async fn read_nonce(path: &[u8], runtime: &Runtime) -> Result<Vec<u8>> {
 }
 
 /// `path`, as this platform names files.
+#[cfg(feature = "comms")]
 fn nonce_path(path: &[u8]) -> Result<PathBuf> {
     #[cfg(unix)]
     {
@@ -233,6 +245,7 @@ fn nonce_path(path: &[u8]) -> Result<PathBuf> {
 }
 
 /// Writes the whole of `bytes` to `half`, however many writes that takes.
+#[cfg(feature = "comms")]
 async fn write_all(half: &mut impl WriteHalf, bytes: &[u8]) -> Result<()> {
     let mut rest = bytes;
 

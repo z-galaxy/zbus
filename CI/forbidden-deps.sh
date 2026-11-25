@@ -17,7 +17,11 @@
 # `launchd:` does). `fastrand`, which blocking and async-executor are built on, is not on the
 # list either: on Windows, `uds_windows` brings it in through `tempfile`.
 #
-# Usage: forbidden-deps.sh <label> [cargo tree arguments...]
+# A build that leaves connections out, such as one with only the `core` feature of the D-Bus API,
+# has no use for zruntime or for any other crate that only connections need, so the caller can
+# forbid those too, through `FORBIDDEN_EXTRA`, an alternation of crate names like `FORBIDDEN`'s.
+#
+# Usage: [FORBIDDEN_EXTRA=<names>] forbidden-deps.sh <label> [cargo tree arguments...]
 #
 # <label> names the build being checked, for the failure message (e.g. "default",
 # "tokio-only", "external-only"). Everything after it is passed straight to `cargo tree`, e.g.:
@@ -34,6 +38,9 @@ shift
 
 FORBIDDEN="async-io|async-executor|async-task|async-lock|async-process|blocking"
 FORBIDDEN="$FORBIDDEN|polling|async-channel|async-signal|piper|futures-lite"
+if [ -n "${FORBIDDEN_EXTRA:-}" ]; then
+    FORBIDDEN="$FORBIDDEN|$FORBIDDEN_EXTRA"
+fi
 
 tree_file=$(mktemp)
 trap 'rm -f "$tree_file"' EXIT
@@ -41,6 +48,6 @@ trap 'rm -f "$tree_file"' EXIT
 cargo --locked tree -e normal -p zbus --target all "$@" > "$tree_file"
 
 if grep -E "^[^a-zA-Z0-9]*($FORBIDDEN) v" "$tree_file"; then
-    echo "a crate zbus's runtimes do not need is in the $label graph" >&2
+    echo "a crate that the $label build does not need is in its graph" >&2
     exit 1
 fi

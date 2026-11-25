@@ -613,7 +613,7 @@ impl Invalid {
 const MAX_DEPTH: u8 = 64;
 
 /// The length of an array, at most, in bytes, as the specification has it.
-const MAX_ARRAY_LEN: u32 = 64 * 1024 * 1024;
+pub(crate) const MAX_ARRAY_LEN: u32 = 64 * 1024 * 1024;
 
 // What a step of the parser returns fits in two registers.
 const _: () = assert!(size_of::<Check<&[u8]>>() <= 16);

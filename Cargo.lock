@@ -1034,6 +1034,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "own_io_fixture"
+version = "0.0.0"
+dependencies = [
+ "rustix",
+ "zbus",
+]
+
+[[package]]
 name = "parking"
 version = "2.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

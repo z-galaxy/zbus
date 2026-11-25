@@ -541,6 +541,7 @@ mod tests {
         let (c1, c2) = Channel::pair();
         futures_lite::future::block_on(async {
             let guid = Guid::generate();
+            #[allow(deprecated)]
             let (receiver, sender) = futures_util::try_join!(
                 Builder::authenticated_socket(c1, guid.clone())
                     .p2p()

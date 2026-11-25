@@ -8,9 +8,9 @@ use super::{RegisteredIo, SocketOps};
 use crate::{
     Message,
     conn::AuthMechanism,
-    connection::socket::{ReadHalf, RecvmsgResult, read_primary_header},
+    connection::socket::{ReadHalf, RecvmsgResult},
     fdo::ConnectionCredentials,
-    message::header::MIN_MESSAGE_SIZE,
+    message::{PrimaryHeader, header::MIN_MESSAGE_SIZE},
     wire::{
         Endian,
         serialized::{self, Context},
@@ -116,7 +116,7 @@ where
         if self.start < self.end || !self.long.is_empty() || bytes.len() < MIN_MESSAGE_SIZE {
             return None;
         }
-        let (_, len) = read_primary_header(bytes).ok()?;
+        let (_, len) = PrimaryHeader::parse_with_len(bytes).ok()?;
 
         (len > BUFFER_SIZE && bytes.len() <= len).then_some(len)
     }
@@ -239,12 +239,12 @@ where
                 let bytes = mem::take(&mut self.long);
                 self.long_filled = 0;
 
-                break (read_primary_header(&bytes)?.0, bytes);
+                break (PrimaryHeader::parse_with_len(&bytes)?.0, bytes);
             }
 
             let buffered = &self.buffer[self.start..self.end];
             if buffered.len() >= MIN_MESSAGE_SIZE {
-                let (primary_header, len) = read_primary_header(buffered)?;
+                let (primary_header, len) = PrimaryHeader::parse_with_len(buffered)?;
                 if buffered.len() >= len {
                     let bytes = buffered[..len].to_vec();
                     self.start += len;

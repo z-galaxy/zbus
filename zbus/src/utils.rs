@@ -1,8 +1,11 @@
-use std::{fmt, future::poll_fn, pin::Pin};
+use std::fmt;
+#[cfg(feature = "comms")]
+use std::{future::poll_fn, pin::Pin};
 
+#[cfg(feature = "comms")]
 use futures_core::Stream;
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "comms"))]
 pub(crate) const FDS_MAX: usize = 1024; // this is hardcoded in sdbus - nothing in the spec
 
 pub(crate) fn padding_for_8_bytes(value: usize) -> usize {
@@ -36,6 +39,7 @@ where
 }
 
 /// The next item of `stream`, or `None` once it has ended.
+#[cfg(feature = "comms")]
 pub(crate) async fn next<S>(stream: &mut S) -> Option<S::Item>
 where
     S: Stream + Unpin,
@@ -105,7 +109,7 @@ pub fn block_on<F: std::future::Future>(future: F) -> F::Output {
 /// connection there with that runtime's own `block_on` instead.
 ///
 /// [`Builder::runtime`]: crate::connection::Builder::runtime
-#[cfg(not(any(feature = "default-rt", feature = "tokio")))]
+#[cfg(all(feature = "comms", not(any(feature = "default-rt", feature = "tokio"))))]
 pub fn block_on<F: std::future::Future>(future: F) -> F::Output {
     use std::{
         pin::pin,
@@ -185,14 +189,14 @@ pub fn block_on<F: std::future::Future>(future: F) -> F::Output {
 
 /// The waker of [`block_on`] in a build with no runtime of zbus's own: it unparks the thread the
 /// call blocks.
-#[cfg(not(any(feature = "default-rt", feature = "tokio")))]
+#[cfg(all(feature = "comms", not(any(feature = "default-rt", feature = "tokio"))))]
 struct Unparker {
     thread: std::thread::Thread,
     // Set by a wake-up, and cleared by the blocked thread as it polls the future again.
     woken: std::sync::atomic::AtomicBool,
 }
 
-#[cfg(not(any(feature = "default-rt", feature = "tokio")))]
+#[cfg(all(feature = "comms", not(any(feature = "default-rt", feature = "tokio"))))]
 impl std::task::Wake for Unparker {
     fn wake(self: std::sync::Arc<Self>) {
         self.wake_by_ref();
@@ -206,7 +210,11 @@ impl std::task::Wake for Unparker {
     }
 }
 
-#[cfg(all(test, not(any(feature = "default-rt", feature = "tokio"))))]
+#[cfg(all(
+    test,
+    feature = "comms",
+    not(any(feature = "default-rt", feature = "tokio"))
+))]
 mod tests {
     use std::{future::poll_fn, task::Poll, thread, time::Duration};
 
