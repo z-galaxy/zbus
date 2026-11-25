@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     fmt,
     num::NonZeroU32,
     sync::atomic::{AtomicU32, Ordering::Relaxed},
@@ -331,6 +332,50 @@ impl<'m> Header<'m> {
         Self { primary, fields }
     }
 
+    /// The header of the message that `bytes` start with.
+    ///
+    /// `bytes` hold at least the whole header: the primary header, the length of the header
+    /// fields, which [`PrimaryHeader::parse_with_len`] reads along with it, and the fields. What
+    /// follows them isn't read. The names in the fields are borrowed from `bytes`.
+    ///
+    /// A program that reads messages off its own socket uses this to look at a message before it
+    /// makes a [`Message`] of it, such as to tell how many of the file descriptors that came in it
+    /// takes ([`Header::unix_fds`]).
+    ///
+    /// The header is checked as a connection checks the header of a message that it receives:
+    /// each of its fields, its protocol version, and the fields that its type requires. A field
+    /// whose value is of the wrong type is refused from its signature, before its value is read.
+    ///
+    /// [`Message`]: super::Message
+    ///
+    /// # Errors
+    ///
+    /// The error that tells what is wrong with the header, such as [`Error::OutOfBounds`] if
+    /// `bytes` end before it does, or [`Error::InvalidField`] if a field holds a value of the wrong
+    /// type.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use zbus::message::{Header, Message};
+    ///
+    /// let msg = Message::method_call("/org/zbus/Example", "Ping").build(&())?;
+    ///
+    /// let header = Header::parse(msg.data().bytes())?;
+    /// assert_eq!(header.member().unwrap().as_str(), "Ping");
+    /// assert_eq!(header.unix_fds(), None);
+    /// # Ok::<(), zbus::Error>(())
+    /// ```
+    pub fn parse(bytes: &'m [u8]) -> Result<Self, Error> {
+        let (primary, _, quick_fields) = super::parser::parse(bytes)?;
+        super::check_header(&primary, &quick_fields)?;
+        let signature = Cow::Owned(quick_fields.signature().clone());
+        // SAFETY: `quick_fields` were parsed from `bytes`.
+        let fields = unsafe { quick_fields.fields_with(bytes, signature) };
+
+        Ok(Self::new(primary, fields))
+    }
+
     /// Get a reference to the primary header.
     pub fn primary(&self) -> &PrimaryHeader {
         &self.primary
@@ -431,6 +476,79 @@ mod tests {
     };
     use std::{borrow::Cow, error::Error};
     use test_log::test;
+
+    /// The header of a message parses from its bytes, or from those of the header alone, as the
+    /// message has it.
+    #[test]
+    fn parse() {
+        for endian in [LE, BE] {
+            let msg = Message::method_call("/org/zbus/Test", "Test")
+                .interface("org.zbus.Test")
+                .destination(":1.42")
+                .endian(endian)
+                .build(&(7u32, "seven"))
+                .unwrap();
+            let bytes = msg.data().bytes();
+            let (_, fields_len) = PrimaryHeader::read(bytes).unwrap();
+            let header_len = MIN_MESSAGE_SIZE + fields_len as usize;
+
+            for bytes in [bytes, &bytes[..header_len]] {
+                let header = Header::parse(bytes).unwrap();
+
+                assert_eq!(format!("{header:?}"), format!("{:?}", msg.header()));
+            }
+            let error = Header::parse(&bytes[..header_len - 1]).unwrap_err();
+            assert_eq!(error, crate::Error::OutOfBounds);
+        }
+    }
+
+    /// The header of a message tells the file descriptors that the message carries.
+    #[cfg(unix)]
+    #[test]
+    fn parse_unix_fds() {
+        let stdout = std::io::stdout();
+        let msg = Message::method_call("/org/zbus/Test", "Test")
+            .build(&(crate::Fd::from(&stdout), crate::Fd::from(&stdout)))
+            .unwrap();
+
+        let header = Header::parse(msg.data().bytes()).unwrap();
+
+        assert_eq!(header.unix_fds(), Some(2));
+    }
+
+    /// A header of another version of the protocol, or that lacks a field that the type of its
+    /// message requires, or with a field whose value is of the wrong type, is an error.
+    #[test]
+    fn parse_invalid() {
+        let msg = Message::method_call("/org/zbus/Test", "Test")
+            .endian(LE)
+            .build(&())
+            .unwrap();
+        let mut bytes = msg.data().to_vec();
+        bytes[3] = 2;
+        assert_eq!(
+            Header::parse(&bytes).unwrap_err(),
+            crate::Error::InvalidField
+        );
+
+        // A method call with nothing but its path, and one whose path holds an array of 4 bytes.
+        for (field, expected) in [
+            (
+                &b"\x01\x01o\x00\x01\x00\x00\x00/\x00"[..],
+                crate::Error::MissingField,
+            ),
+            (
+                &b"\x01\x02ay\x00\x00\x00\x00\x04\x00\x00\x00abcd"[..],
+                crate::Error::InvalidField,
+            ),
+        ] {
+            let mut bytes = vec![b'l', 1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0];
+            bytes.extend_from_slice(&(field.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(field);
+
+            assert_eq!(Header::parse(&bytes).unwrap_err(), expected);
+        }
+    }
 
     #[test]
     fn header() -> Result<(), Box<dyn Error>> {

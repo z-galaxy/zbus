@@ -450,23 +450,16 @@ impl Message {
     }
 }
 
-/// Check what makes the message in `bytes` whole, beyond each field of its header, which parsing
-/// the header checks: its protocol version, the fields that its type requires, the padding between
-/// its header and its body, at `padding`, which must be 0, and, on Unix, that it brought as many
-/// file descriptors as its header says.
-///
-/// Only a received message is checked so: one that zbus builds may lack a field that the
-/// specification requires, if it was built so.
+/// Check what makes the message in `bytes` whole: its header, as [`check_header`] checks it, the
+/// padding between its header and its body, at `padding`, which must be 0, and, on Unix, that it
+/// brought as many file descriptors as its header says.
 fn check_whole(
     primary_header: &PrimaryHeader,
     quick_fields: &QuickFields,
     bytes: &serialized::Data<'static, 'static>,
     padding: Range<usize>,
 ) -> Result<()> {
-    if primary_header.protocol_version() != PROTOCOL_VERSION {
-        return Err(Error::InvalidField);
-    }
-    quick_fields.check_required(primary_header.msg_type())?;
+    check_header(primary_header, quick_fields)?;
     let Some(padding) = bytes.get(padding) else {
         return Err(Error::OutOfBounds);
     };
@@ -479,6 +472,19 @@ fn check_whole(
     }
 
     Ok(())
+}
+
+/// Check what makes the header of a message whole, beyond each of its fields, which parsing the
+/// header checks: its protocol version, and the fields that its type requires.
+///
+/// Only a received message is checked so: one that zbus builds may lack a field that the
+/// specification requires, if it was built so.
+fn check_header(primary_header: &PrimaryHeader, quick_fields: &QuickFields) -> Result<()> {
+    if primary_header.protocol_version() != PROTOCOL_VERSION {
+        return Err(Error::InvalidField);
+    }
+
+    quick_fields.check_required(primary_header.msg_type())
 }
 
 impl fmt::Debug for Message {

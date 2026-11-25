@@ -65,6 +65,21 @@ impl QuickFields {
     ///
     /// `bytes` must be the bytes that `self` was parsed from.
     pub(in crate::message) unsafe fn fields<'m>(&'m self, bytes: &'m [u8]) -> Fields<'m> {
+        // SAFETY: The caller ensures that `bytes` are those that `self` was parsed from.
+        unsafe { self.fields_with(bytes, Cow::Borrowed(&self.signature)) }
+    }
+
+    /// The fields, borrowed from the bytes of the message, but for the signature of the body,
+    /// which is `signature`.
+    ///
+    /// # Safety
+    ///
+    /// `bytes` must be the bytes that `self` was parsed from.
+    pub(in crate::message) unsafe fn fields_with<'m>(
+        &self,
+        bytes: &'m [u8],
+        signature: Cow<'m, Signature>,
+    ) -> Fields<'m> {
         let read = |pos: Option<FieldPos>| {
             pos.map(|pos| {
                 // SAFETY: The caller ensures that `bytes` are those that `pos` was parsed from, as
@@ -87,7 +102,7 @@ impl QuickFields {
                 }
             }),
             sender: read(self.sender).map(UniqueName::from_str_unchecked),
-            signature: Cow::Borrowed(&self.signature),
+            signature,
             unix_fds: self.unix_fds,
         }
     }
