@@ -71,7 +71,10 @@ fn check(data: &[u8], endian: Endian) {
             (received, decoded)
         }
         (Err(_), Err(_)) => return,
-        (Err(_), Ok((decoded, len))) if !whole(&decoded, len, data, endian) => return,
+        (Err(e), Ok((decoded, len))) if !whole(&decoded, len, data, endian) || lax(&e) => return,
+        // Decoding `Header` through serde counts the outer `Header` struct toward container depth
+        // (1 more than the D-Bus wire `a(yv)` header).
+        (Ok(_), Err(zbus::Error::MaxDepthExceeded(_))) => return,
         (received, decoded) => panic!(
             "decoded as a message: {:?}, as a header: {:?}",
             received.map(|_| ()),
@@ -129,12 +132,22 @@ fn check(data: &[u8], endian: Endian) {
     }
 }
 
+/// Whether `e` is of what decoding a header through serde doesn't check for an unknown field's
+/// variant: an object path, the 0 that ends a string or signature, and whether a variant's
+/// signature is a single complete type.
+fn lax(e: &zbus::Error) -> bool {
+    matches!(
+        e,
+        zbus::Error::InvalidObjectPath | zbus::Error::SignatureParse(_)
+    ) || e.to_string().ends_with("expected the 0 that ends a string")
+}
+
 /// Whether a message whose header, `len` bytes long, decodes to `header` from the start of `data`,
 /// in byte order `endian`, is whole, as a received message has to be beyond what decoding a header
 /// through serde checks of its fields: of the only version of the protocol, with the fields that
-/// its type requires, none of which comes twice, with a 0 that ends each string and signature in
-/// them, with padding of 0s after its header, with a body that ends where `data` does, and with the
-/// file descriptors that its header says it brought, of which `data` has none.
+/// its type requires, none of the known ones coming twice, with a 0 that ends each string and
+/// signature in them, with padding of 0s after its header, with a body that ends where `data` does,
+/// and with the file descriptors that its header says it brought, of which `data` has none.
 fn whole(header: &Header<'_>, len: usize, data: &[u8], endian: Endian) -> bool {
     let required = match header.message_type() {
         Type::MethodCall => header.path().is_some() && header.member().is_some(),
@@ -159,16 +172,32 @@ fn whole(header: &Header<'_>, len: usize, data: &[u8], endian: Endian) -> bool {
         && fds
 }
 
-/// Whether the fields of the header at the start of `data`, which decodes through serde, end each
-/// of their strings and signatures with a 0, none of them coming twice.
+/// Whether the known fields of the header at the start of `data`, which decodes through serde, end
+/// each of their strings and signatures with a 0, none of them coming twice.
 fn canonical_fields(data: &[u8], endian: Endian) -> bool {
     let end = FIELDS_LEN.end + endian.read_u32(&data[FIELDS_LEN]) as usize;
     let byte = |i: usize| data.get(i).copied();
     let mut codes = std::collections::HashSet::new();
     let mut field = FIELDS_LEN.end;
     while field < end {
-        // A field starts with its code, and the signature of its value: 1 type, and a 0. Its value
-        // comes next, on a 4-byte boundary, as the field starts on an 8-byte one.
+        let Some(code) = byte(field) else {
+            return false;
+        };
+        if code > 9 {
+            let Some(rest) = data.get(field + 1..end) else {
+                return false;
+            };
+            let ctxt = Context::new(endian, field + 1);
+            let Ok((_, variant_len)) = Data::new(rest, ctxt)
+                .deserialize_for_signature::<_, serde::de::IgnoredAny>(&zbus::Signature::Variant)
+            else {
+                return false;
+            };
+            field = (field + 1 + variant_len).next_multiple_of(8);
+            continue;
+        }
+        // A known field starts with its code, and the signature of its value: 1 type, and a 0. Its
+        // value comes next, on a 4-byte boundary, as the field starts on an 8-byte one.
         let value = field + 4;
         let value_end = match byte(field + 2) {
             Some(b'u') => value + 4,
@@ -183,7 +212,7 @@ fn canonical_fields(data: &[u8], endian: Endian) -> bool {
         };
         let ends_with_0 = byte(field + 3) == Some(0)
             && (byte(field + 2) == Some(b'u') || byte(value_end - 1) == Some(0));
-        if !codes.insert(byte(field)) || !ends_with_0 {
+        if !codes.insert(code) || !ends_with_0 {
             return false;
         }
         field = value_end.next_multiple_of(8);

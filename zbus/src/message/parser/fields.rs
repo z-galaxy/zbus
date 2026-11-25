@@ -1,11 +1,12 @@
 //! The header fields: an array of `(code, variant)` structures, whose code tells the one type that
-//! the variant can hold.
+//! the variant can hold, or that it's a field the parser doesn't know and ignores after checking
+//! that its variant is well formed.
 
 use std::num::NonZeroU32;
 
 use winnow::{
     Parser,
-    combinator::{dispatch, eof, preceded, repeat_till},
+    combinator::{eof, preceded, repeat_till},
     stream::{Location, Stream},
     token::{any, take},
 };
@@ -15,7 +16,7 @@ use zbus_utils::{
 };
 
 use super::{
-    ByteOrder, Input, PResult, ParseError, QuickFields,
+    ByteOrder, Input, PResult, ParseError, QuickFields, body,
     quick_fields::{Field, FieldPos},
 };
 use crate::{Signature, message::FieldCode};
@@ -44,27 +45,45 @@ fn padding(input: &mut Input<'_>) -> PResult<()> {
 
 /// A header field: its code and the signature of the variant that holds its value, then the value.
 ///
-/// A field starts on an 8-byte boundary, and its code and the signature of its variant take 4
-/// bytes, so a `u32` value, or the length of a string, needs no padding before it.
+/// A field starts on an 8-byte boundary, and for every known field its code and the signature of
+/// its variant take 4 bytes, so a `u32` value, or the length of a string, needs no padding before
+/// it.
 #[inline(always)]
 fn field<O: ByteOrder>(input: &mut Input<'_>) -> PResult<Field> {
-    dispatch! {(any, variant_signature);
-        (PATH, b'o') => path::<O>.map(Field::Path),
-        (INTERFACE, b's') => name::<O, _>(names::validate_interface_name).map(Field::Interface),
-        (MEMBER, b's') => name::<O, _>(names::validate_member_name).map(Field::Member),
-        (ERROR_NAME, b's') => name::<O, _>(names::validate_error_name).map(Field::ErrorName),
-        (REPLY_SERIAL, b'u') => O::u32.try_map(reply_serial).map(Field::ReplySerial),
-        (DESTINATION, b's') => bus_name::<O>.map(|(pos, unique)| Field::Destination { pos, unique }),
-        (SENDER, b's') => name::<O, _>(names::validate_unique_name).map(Field::Sender),
-        (SIGNATURE, b'g') => body_signature,
-        (UNIX_FDS, b'u') => O::u32.map(Field::UnixFds),
-        _ => unknown,
+    let code = any(input)?;
+    if code > UNIX_FDS {
+        return unknown::<O>(input);
     }
-    .parse_next(input)
+
+    match (code, variant_signature(input)?) {
+        (PATH, b'o') => path::<O>(input).map(Field::Path),
+        (INTERFACE, b's') => name::<O, _>(names::validate_interface_name)
+            .map(Field::Interface)
+            .parse_next(input),
+        (MEMBER, b's') => name::<O, _>(names::validate_member_name)
+            .map(Field::Member)
+            .parse_next(input),
+        (ERROR_NAME, b's') => name::<O, _>(names::validate_error_name)
+            .map(Field::ErrorName)
+            .parse_next(input),
+        (REPLY_SERIAL, b'u') => O::u32
+            .try_map(reply_serial)
+            .map(Field::ReplySerial)
+            .parse_next(input),
+        (DESTINATION, b's') => bus_name::<O>
+            .map(|(pos, unique)| Field::Destination { pos, unique })
+            .parse_next(input),
+        (SENDER, b's') => name::<O, _>(names::validate_unique_name)
+            .map(Field::Sender)
+            .parse_next(input),
+        (SIGNATURE, b'g') => body_signature(input),
+        (UNIX_FDS, b'u') => O::u32.map(Field::UnixFds).parse_next(input),
+        _ => Err(ParseError::Field),
+    }
 }
 
-/// The signature of the variant that holds the value of a field, which is a single type for every
-/// field: the code of that type.
+/// The signature of the variant that holds the value of a known field, which is a single type for
+/// every known field: the code of that type.
 #[inline(always)]
 fn variant_signature(input: &mut Input<'_>) -> PResult<u8> {
     take(3usize)
@@ -149,10 +168,18 @@ fn nul_terminated<'i>(input: &mut Input<'i>, len: usize) -> PResult<(FieldPos, &
     }
 }
 
-/// A field whose code is unknown, or whose value is of another type than its code calls for.
-fn unknown(_input: &mut Input<'_>) -> PResult<Field> {
-    Err(ParseError::Field)
+/// A field whose code is beyond `UNIX_FDS`, which the specification asks to ignore.
+///
+/// Its variant is checked to be well formed, and skipped so parsing goes on with the next field.
+fn unknown<O: ByteOrder>(input: &mut Input<'_>) -> PResult<Field> {
+    body::validate_variant::<O>(input, HEADER_FIELD_DEPTH, 0).map_err(ParseError::Variant)?;
+
+    Ok(Field::Unknown)
 }
+
+/// The array of header fields `a(yv)` and the field structure `(yv)` are 2 containers around the
+/// field's variant value.
+const HEADER_FIELD_DEPTH: u8 = 2;
 
 const PATH: u8 = FieldCode::Path as u8;
 const INTERFACE: u8 = FieldCode::Interface as u8;

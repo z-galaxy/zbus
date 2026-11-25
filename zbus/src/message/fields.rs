@@ -121,7 +121,10 @@ impl<'de> Visitor<'de> for FieldsVisitor {
         V: SeqAccess<'de>,
     {
         let mut fields = Fields::new();
-        while let Some((code, value)) = visitor.next_element::<(FieldCode, Variant<'de>)>()? {
+        while let Some(entry) = visitor.next_element::<DecodedField<'de>>()? {
+            let DecodedField::Known(code, value) = entry else {
+                continue;
+            };
             match code {
                 FieldCode::Path => {
                     let path = ObjectPath::try_from(value).map_err(V::Error::custom)?;
@@ -163,5 +166,58 @@ impl<'de> Visitor<'de> for FieldsVisitor {
         }
 
         Ok(fields)
+    }
+}
+
+enum DecodedField<'de> {
+    Known(FieldCode, Variant<'de>),
+    Unknown,
+}
+
+impl<'de> Deserialize<'de> for DecodedField<'de> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct FieldEntryVisitor;
+
+        impl<'de> Visitor<'de> for FieldEntryVisitor {
+            type Value = DecodedField<'de>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a D-Bus message header field")
+            }
+
+            fn visit_seq<V>(self, mut visitor: V) -> Result<Self::Value, V::Error>
+            where
+                V: SeqAccess<'de>,
+            {
+                let code: u8 = visitor.next_element()?.ok_or_else(|| {
+                    serde::de::Error::invalid_length(0, &"a header field code and value")
+                })?;
+                match FieldCode::try_from(code) {
+                    Ok(code) => {
+                        let value = visitor.next_element()?.ok_or_else(|| {
+                            serde::de::Error::invalid_length(1, &"a header field value")
+                        })?;
+
+                        Ok(DecodedField::Known(code, value))
+                    }
+                    Err(()) if code == 0 => {
+                        Err(serde::de::Error::custom(crate::Error::InvalidField))
+                    }
+                    Err(()) => {
+                        let _: serde::de::IgnoredAny =
+                            visitor.next_element()?.ok_or_else(|| {
+                                serde::de::Error::invalid_length(1, &"a header field value")
+                            })?;
+
+                        Ok(DecodedField::Unknown)
+                    }
+                }
+            }
+        }
+
+        deserializer.deserialize_tuple(2, FieldEntryVisitor)
     }
 }

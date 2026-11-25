@@ -12,10 +12,10 @@
 //! those that libdbus rejects as well: one with a string or a signature that a 0 doesn't end, or
 //! with a field that comes more than once, which serde takes the last value of. It also rejects one
 //! that runs past the end of its bytes, which serde takes if all that's missing is the byte that
-//! ends its last string. Like serde, it rejects a field with an unknown code, rather than ignoring
-//! it as the specification asks, and it doesn't check the padding after the header. That padding is
-//! checked as a message is received, along with the rest of what makes a message whole, such as
-//! the fields that its type requires.
+//! ends its last string. Like serde, it ignores a field whose code is beyond `UNIX_FDS` (9),
+//! checking only that its variant is well formed, as the specification asks, and it doesn't check
+//! the padding after the header. That padding is checked as a message is received, along with the
+//! rest of what makes a message whole, such as the fields that its type requires.
 //!
 //! It's made of winnow's combinators, but for the `u32`s, which are taken as 4 bytes and converted
 //! at once: winnow's parsers of integers build them a byte at a time, which takes more
@@ -37,7 +37,7 @@ use winnow::{LocatingSlice, Parser, binary::length_and_then};
 
 use crate::{
     Error, Result,
-    message::{PrimaryHeader, header::MIN_MESSAGE_SIZE},
+    message::{EndianSig, PrimaryHeader, header::MIN_MESSAGE_SIZE},
 };
 use byte_order::{BigEndian, ByteOrder, LittleEndian};
 use error::ParseError;
@@ -49,33 +49,40 @@ use primary_header::primary_header;
 /// What follows the fields, from the padding before the body on, isn't looked at.
 pub(crate) fn parse(bytes: &[u8]) -> Result<(PrimaryHeader, usize, QuickFields)> {
     let input = &mut Input::new(bytes);
-    let header = match bytes.first() {
-        Some(b'l') => header::<LittleEndian>(input),
-        Some(b'B') => header::<BigEndian>(input),
-        Some(_) => Err(ParseError::Endian),
-        None => Err(ParseError::Truncated),
+    let (header, endian_sig) = match bytes.first() {
+        Some(b'l') => (header::<LittleEndian>(input), EndianSig::Little),
+        Some(b'B') => (header::<BigEndian>(input), EndianSig::Big),
+        Some(_) => return Err(Error::IncorrectEndian),
+        None => return Err(Error::OutOfBounds),
     };
     // A field that comes more than once makes the header invalid, as it does with libdbus, rather
     // than one of its values be taken for that of the field.
     if let Ok((_, _, fields)) = &header
         && fields.repeated()
     {
-        return Err(ParseError::Field.into());
+        return Err(Error::InvalidField);
     }
 
-    header.map_err(Error::from)
+    header.map_err(|error| error.into_error(bytes, endian_sig))
 }
 
 /// Parse the primary header at the start of `bytes`, and the length of the header fields after it.
 pub(super) fn parse_primary_header(bytes: &[u8]) -> Result<(PrimaryHeader, u32)> {
     let input = &mut Input::new(bytes);
-    match bytes.first() {
-        Some(b'l') => (primary_header::<LittleEndian>, LittleEndian::u32).parse_next(input),
-        Some(b'B') => (primary_header::<BigEndian>, BigEndian::u32).parse_next(input),
-        Some(_) => Err(ParseError::Endian),
-        None => Err(ParseError::Truncated),
-    }
-    .map_err(Error::from)
+    let (header, endian_sig) = match bytes.first() {
+        Some(b'l') => (
+            (primary_header::<LittleEndian>, LittleEndian::u32).parse_next(input),
+            EndianSig::Little,
+        ),
+        Some(b'B') => (
+            (primary_header::<BigEndian>, BigEndian::u32).parse_next(input),
+            EndianSig::Big,
+        ),
+        Some(_) => return Err(Error::IncorrectEndian),
+        None => return Err(Error::OutOfBounds),
+    };
+
+    header.map_err(|error| error.into_error(bytes, endian_sig))
 }
 
 /// The header of a message in byte order `O`: its primary header, then its fields, parsed from the

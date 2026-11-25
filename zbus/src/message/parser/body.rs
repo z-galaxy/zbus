@@ -56,6 +56,20 @@ pub(crate) fn validate(
     .map_err(|invalid| invalid.into_error(body, endian_sig))
 }
 
+/// Check a single variant value at the start of `input`, in `depth` containers, advancing `input`
+/// past it.
+///
+/// `input` must track its offset from an 8-byte boundary (such as the start of a message or a
+/// body), as the alignment of each value is reckoned from there.
+pub(super) fn validate_variant<O: ByteOrder>(
+    input: &mut Input<'_>,
+    depth: u8,
+    fds: u32,
+) -> Check<()> {
+    let mut signature = &b"v"[..];
+    value::<O>(input, &mut signature, depth, fds)
+}
+
 /// Values of the types of `signature` in turn, in byte order `O`, which fill `body`.
 fn values<O: ByteOrder>(body: &[u8], mut signature: &[u8], fds: u32) -> Check<()> {
     let input = &mut Input::new(body);
@@ -542,7 +556,7 @@ type Check<T> = std::result::Result<T, Invalid>;
 
 /// Why a body is invalid, as the parser finds it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Invalid {
+pub(super) enum Invalid {
     /// The values run past the end of the body, or of the array that they're in.
     OutOfBounds,
     /// Bytes are left after the values.
@@ -570,7 +584,7 @@ enum Invalid {
 impl Invalid {
     /// The error that this is, of `body`, in the byte order of `endian_sig`.
     #[cold]
-    fn into_error(self, body: &[u8], endian_sig: EndianSig) -> Error {
+    pub(super) fn into_error(self, body: &[u8], endian_sig: EndianSig) -> Error {
         match self {
             Self::OutOfBounds => Error::OutOfBounds,
             Self::ExcessData => Error::ExcessData,

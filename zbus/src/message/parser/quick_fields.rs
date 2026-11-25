@@ -149,8 +149,11 @@ impl Accumulate<Field> for QuickFields {
 
     #[inline(always)]
     fn accumulate(&mut self, field: Field) {
+        let Some(field_code) = field.code() else {
+            return;
+        };
         // Without a branch, as fields seldom come more than once.
-        let code = 1 << field.code() as u16;
+        let code = 1 << field_code as u16;
         self.codes |= code | (u16::from(self.codes & code != 0) * REPEATED);
 
         match field {
@@ -169,6 +172,7 @@ impl Accumulate<Field> for QuickFields {
                 self.signature_pos = Some(pos);
             }
             Field::UnixFds(unix_fds) => self.unix_fds = Some(unix_fds),
+            Field::Unknown => unreachable!(),
         }
     }
 }
@@ -196,22 +200,25 @@ pub(super) enum Field {
         pos: FieldPos,
     },
     UnixFds(u32),
+    /// A field whose code is beyond `UNIX_FDS`, which the specification asks to ignore.
+    Unknown,
 }
 
 impl Field {
-    /// The code of the field.
+    /// The code of the field, if it's a known one.
     #[inline(always)]
-    fn code(&self) -> FieldCode {
+    fn code(&self) -> Option<FieldCode> {
         match self {
-            Self::Path(_) => FieldCode::Path,
-            Self::Interface(_) => FieldCode::Interface,
-            Self::Member(_) => FieldCode::Member,
-            Self::ErrorName(_) => FieldCode::ErrorName,
-            Self::ReplySerial(_) => FieldCode::ReplySerial,
-            Self::Destination { .. } => FieldCode::Destination,
-            Self::Sender(_) => FieldCode::Sender,
-            Self::Signature { .. } => FieldCode::Signature,
-            Self::UnixFds(_) => FieldCode::UnixFDs,
+            Self::Path(_) => Some(FieldCode::Path),
+            Self::Interface(_) => Some(FieldCode::Interface),
+            Self::Member(_) => Some(FieldCode::Member),
+            Self::ErrorName(_) => Some(FieldCode::ErrorName),
+            Self::ReplySerial(_) => Some(FieldCode::ReplySerial),
+            Self::Destination { .. } => Some(FieldCode::Destination),
+            Self::Sender(_) => Some(FieldCode::Sender),
+            Self::Signature { .. } => Some(FieldCode::Signature),
+            Self::UnixFds(_) => Some(FieldCode::UnixFDs),
+            Self::Unknown => None,
         }
     }
 

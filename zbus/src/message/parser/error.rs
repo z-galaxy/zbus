@@ -2,8 +2,8 @@
 
 use winnow::error::{FromExternalError, ParserError};
 
-use super::Input;
-use crate::{Error, wire};
+use super::{Input, body};
+use crate::{Error, message::EndianSig, wire};
 
 /// Why parsing a header failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -12,16 +12,14 @@ pub(super) enum ParseError {
     Truncated,
     /// The header is too large for where its fields lie to be kept.
     TooLarge,
-    /// The first byte isn't an endian signature.
-    Endian,
     /// The message type is unknown.
     MessageType,
     /// The serial number is 0.
     Serial,
     /// A padding byte isn't 0.
     PaddingNot0(u8),
-    /// A field has an unknown code, a value of the wrong type, or a string or a signature that a 0
-    /// doesn't end, comes more than once, or is a reply serial of 0.
+    /// A field has the invalid code 0, a value of the wrong type, or a string or a signature that
+    /// a 0 doesn't end, comes more than once, or is a reply serial of 0.
     Field,
     /// A name is invalid, for the reason given.
     Name(&'static str),
@@ -29,6 +27,8 @@ pub(super) enum ParseError {
     ObjectPath,
     /// The signature of the body is invalid.
     Signature,
+    /// The variant value of a field with an unknown code is invalid.
+    Variant(body::Invalid),
 }
 
 impl ParserError<Input<'_>> for ParseError {
@@ -51,20 +51,20 @@ impl FromExternalError<Input<'_>, ParseError> for ParseError {
     }
 }
 
-impl From<ParseError> for Error {
-    fn from(error: ParseError) -> Self {
-        match error {
-            ParseError::Truncated => Error::OutOfBounds,
-            ParseError::TooLarge => Error::ExcessData,
-            ParseError::Endian => Error::IncorrectEndian,
-            ParseError::MessageType | ParseError::Field => Error::InvalidField,
-            ParseError::Serial => Error::InvalidSerial,
-            ParseError::PaddingNot0(byte) => Error::PaddingNot0(byte),
-            ParseError::Name(reason) => Error::InvalidName(reason),
-            ParseError::ObjectPath => Error::InvalidObjectPath,
-            ParseError::Signature => {
-                Error::SignatureParse(wire::signature::Error::InvalidSignature)
-            }
+impl ParseError {
+    /// The [`Error`] that this is, of `bytes` in the byte order of `endian_sig`.
+    #[cold]
+    pub(super) fn into_error(self, bytes: &[u8], endian_sig: EndianSig) -> Error {
+        match self {
+            Self::Truncated => Error::OutOfBounds,
+            Self::TooLarge => Error::ExcessData,
+            Self::MessageType | Self::Field => Error::InvalidField,
+            Self::Serial => Error::InvalidSerial,
+            Self::PaddingNot0(byte) => Error::PaddingNot0(byte),
+            Self::Name(reason) => Error::InvalidName(reason),
+            Self::ObjectPath => Error::InvalidObjectPath,
+            Self::Signature => Error::SignatureParse(wire::signature::Error::InvalidSignature),
+            Self::Variant(invalid) => invalid.into_error(bytes, endian_sig),
         }
     }
 }

@@ -1,4 +1,4 @@
-use serde_repr::{Deserialize_repr, Serialize_repr};
+use serde_repr::Serialize_repr;
 
 use crate::Type;
 
@@ -12,7 +12,7 @@ use crate::Type;
 /// [retrieve a specific field]: struct.Fields.html#method.get_field
 /// [`Fields`]: struct.Fields.html
 #[repr(u8)]
-#[derive(Copy, Clone, Debug, Deserialize_repr, PartialEq, Eq, Serialize_repr, Type)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize_repr, Type)]
 pub(crate) enum FieldCode {
     /// Code for [`Field::Path`](enum.Field.html#variant.Path).
     Path = 1,
@@ -32,4 +32,23 @@ pub(crate) enum FieldCode {
     Signature = 8,
     /// Code for [`Field::UnixFDs`](enum.Field.html#variant.UnixFDs).
     UnixFDs = 9,
+}
+
+impl TryFrom<u8> for FieldCode {
+    type Error = ();
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(Self::Path),
+            2 => Ok(Self::Interface),
+            3 => Ok(Self::Member),
+            4 => Ok(Self::ErrorName),
+            5 => Ok(Self::ReplySerial),
+            6 => Ok(Self::Destination),
+            7 => Ok(Self::Sender),
+            8 => Ok(Self::Signature),
+            9 => Ok(Self::UnixFDs),
+            _ => Err(()),
+        }
+    }
 }

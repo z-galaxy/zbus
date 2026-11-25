@@ -49,10 +49,191 @@ fn fields_of_another_type() {
 
 #[test]
 fn unknown_fields() {
-    // The specification asks for a field with an unknown code to be ignored, but decoding a
-    // header through serde rejects it, and so does the parser.
-    let bytes = raw_header(&[10, 1, b's', 0, 1, 0, 0, 0, b'a', 0]);
-    assert_eq!(parse(&bytes).unwrap_err(), Error::InvalidField);
+    // Field code 0 is invalid and must still be rejected by both the parser and serde.
+    let invalid_zero = raw_header(&[0, 1, b's', 0, 1, 0, 0, 0, b'a', 0]);
+    assert_eq!(parse(&invalid_zero).unwrap_err(), Error::InvalidField);
+    let data = Data::new(&invalid_zero, Context::new(Endian::Little, 0));
+    assert!(data.deserialize::<Header<'_>>().is_err());
+
+    // Unknown field codes (> UNIX_FDS = 9) are ignored after validating their variant values,
+    // including complex container types, 8-byte aligned values, repeated unknown codes, and both
+    // byte orders.
+    for endian in [Endian::Little, Endian::Big] {
+        let base = Message::method_call("/org/zbus/Test", "Ping")
+            .interface("org.zbus.Test")
+            .sender(":1.42")
+            .endian(endian)
+            .build(&(42u32, "hello"))
+            .unwrap();
+
+        let unknown_values: Vec<(u8, Variant<'_>)> = vec![
+            (10, Variant::from(7u8)),
+            (10, Variant::from(true)),
+            (11, Variant::from(0x0102_0304_0506_0708u64)),
+            (12, Variant::from("unknown")),
+            (
+                13,
+                Variant::from(crate::ObjectPath::from_static_str_unchecked(
+                    "/org/zbus/Extra",
+                )),
+            ),
+            (14, Variant::from(Signature::try_from("a{sv}").unwrap())),
+            (15, Variant::from(vec![1u8, 2, 3, 4, 5])),
+            (16, Variant::from((99u32, "nested"))),
+            (
+                200,
+                Variant::from(HashMap::from([
+                    ("a", Variant::from(1u32)),
+                    ("b", Variant::from(vec!["x", "y"])),
+                ])),
+            ),
+            (
+                255,
+                Variant::Variant(Box::new(Variant::from(HashMap::from([(
+                    "k",
+                    Variant::from(true),
+                )])))),
+            ),
+        ];
+
+        // Interleave unknown fields before, between, and after the known fields.
+        let bytes = message_with_unknown_fields(&base, endian, &unknown_values);
+        assert_same(&bytes);
+
+        let msg = Message::from_parts(
+            bytes.clone(),
+            #[cfg(unix)]
+            vec![],
+        )
+        .unwrap();
+        let hdr = msg.header();
+        assert_eq!(hdr.path().unwrap(), "/org/zbus/Test");
+        assert_eq!(hdr.interface().unwrap(), "org.zbus.Test");
+        assert_eq!(hdr.member().unwrap(), "Ping");
+        assert_eq!(hdr.sender().unwrap(), ":1.42");
+        assert_eq!(
+            msg.body().deserialize::<(u32, String)>().unwrap(),
+            (42, "hello".into())
+        );
+
+        let parsed = Header::parse(&bytes).unwrap();
+        assert_eq!(parsed.path(), hdr.path());
+        assert_eq!(parsed.interface(), hdr.interface());
+        assert_eq!(parsed.member(), hdr.member());
+        assert_eq!(parsed.sender(), hdr.sender());
+
+        #[cfg(feature = "bus-impl")]
+        {
+            let new_sender = UniqueName::from_static_str_unchecked(":bus.99");
+            #[allow(deprecated)]
+            let relayed = msg.with_sender(&new_sender).unwrap();
+            let reparsed = Message::from_parts(
+                relayed.data().to_vec(),
+                #[cfg(unix)]
+                vec![],
+            )
+            .unwrap();
+            assert_eq!(reparsed.header().sender(), Some(&new_sender));
+            assert_eq!(reparsed.header().path(), hdr.path());
+            assert_eq!(reparsed.header().member(), hdr.member());
+            assert_eq!(
+                reparsed.body().deserialize::<(u32, String)>().unwrap(),
+                (42, "hello".into())
+            );
+        }
+    }
+
+    // Malformed variants in unknown fields must still be rejected.
+    // Truncated variant (missing value byte for `y`).
+    let truncated = raw_header(&[10, 1, b'y', 0]);
+    assert_eq!(parse(&truncated).unwrap_err(), Error::OutOfBounds);
+
+    // Empty variant signature `""`.
+    let empty_sig = raw_header(&[10, 0, 0]);
+    assert!(matches!(
+        parse(&empty_sig).unwrap_err(),
+        Error::SignatureParse(_)
+    ));
+
+    // Multi-type variant signature `"yy"`.
+    let multi_sig = raw_header(&[10, 2, b'y', b'y', 0, 1, 2]);
+    assert!(matches!(
+        parse(&multi_sig).unwrap_err(),
+        Error::SignatureParse(_)
+    ));
+
+    // Invalid signature character `'z'`.
+    let bad_sig = raw_header(&[10, 1, b'z', 0, 0]);
+    assert!(matches!(
+        parse(&bad_sig).unwrap_err(),
+        Error::SignatureParse(_)
+    ));
+
+    // Signature not terminated with 0.
+    let bad_sig_end = raw_header(&[10, 1, b'y', b'x', 1]);
+    assert!(
+        parse(&bad_sig_end)
+            .unwrap_err()
+            .to_string()
+            .ends_with("expected the 0 that ends a string")
+    );
+
+    // Invalid boolean value (2).
+    let bad_bool = raw_header(&[10, 1, b'b', 0, 2, 0, 0, 0]);
+    assert!(parse(&bad_bool).is_err());
+
+    // Invalid UTF-8 in an unknown field string.
+    let bad_utf8 = raw_header(&[10, 1, b's', 0, 1, 0, 0, 0, 0xff, 0]);
+    assert!(matches!(parse(&bad_utf8).unwrap_err(), Error::Utf8(_)));
+
+    // Interior NUL byte in an unknown field string.
+    let interior_nul = raw_header(&[10, 1, b's', 0, 2, 0, 0, 0, b'a', 0, 0]);
+    assert!(parse(&interior_nul).is_err());
+
+    // String not terminated with 0.
+    let bad_str_end = raw_header(&[10, 1, b's', 0, 1, 0, 0, 0, b'a', b'x']);
+    assert!(
+        parse(&bad_str_end)
+            .unwrap_err()
+            .to_string()
+            .ends_with("expected the 0 that ends a string")
+    );
+
+    // Invalid object path in an unknown field.
+    let bad_path = raw_header(&[10, 1, b'o', 0, 3, 0, 0, 0, b'b', b'a', b'd', 0]);
+    assert_eq!(parse(&bad_path).unwrap_err(), Error::InvalidObjectPath);
+
+    // Non-zero padding byte before an 8-byte aligned `u64` (`x`) inside an unknown field.
+    // Field starts at offset 16: code(16), sig len 1(17), 'x'(18), nul(19), pad(20..24),
+    // u64(24..32).
+    let bad_pad = raw_header(&[10, 1, b'x', 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(parse(&bad_pad).unwrap_err(), Error::PaddingNot0(1));
+
+    // File descriptor `h` inside an unknown field with no FDs attached.
+    let bad_fd = raw_header(&[10, 1, b'h', 0, 0, 0, 0, 0]);
+    #[cfg(unix)]
+    assert_eq!(parse(&bad_fd).unwrap_err(), Error::UnknownFd);
+    #[cfg(not(unix))]
+    assert!(matches!(
+        parse(&bad_fd).unwrap_err(),
+        Error::SignatureParse(_)
+    ));
+
+    // Container nesting depth: `a(yv)` already accounts for 2 containers, so 62 nested variants
+    // (total 64) are valid while 63 nested variants (total 65) exceed MAX_DEPTH.
+    let make_nested_variants = |variants: usize| {
+        let mut field = vec![10];
+        for _ in 1..variants {
+            field.extend([1, b'v', 0]);
+        }
+        field.extend([1, b'y', 0, 42]);
+        raw_header(&field)
+    };
+    assert!(parse(&make_nested_variants(62)).is_ok());
+    assert!(matches!(
+        parse(&make_nested_variants(63)).unwrap_err(),
+        Error::MaxDepthExceeded(_)
+    ));
 }
 
 #[test]
@@ -183,9 +364,14 @@ fn assert_same(bytes: &[u8]) {
             assert_eq_headers(&Header::new(primary, fields), &decoded, bytes);
         }
         (Err(_), Err(_)) => (),
-        // Decoding through serde doesn't check that strings end with a 0, nor that no field comes
-        // twice.
+        // Decoding through serde doesn't check that strings end with a 0, nor that no known field
+        // comes twice, nor strict variant checks on unknown fields (object paths, 0-terminated
+        // strings, single-complete-type variant signatures).
         (Err(Error::InvalidField), Ok(_)) if !canonical_fields(bytes, endian) => (),
+        (Err(e), Ok(_)) if lax_variant_error(&e) => (),
+        // Decoding `Header` through serde counts the outer `Header` struct toward container depth
+        // (1 more than the D-Bus wire `a(yv)` header).
+        (Ok(_), Err(Error::MaxDepthExceeded(_))) => (),
         // Where zbus_utils is built for GVariant as well, as building the whole workspace with all
         // its features has it, the parser takes the maybe type of GVariant in the signature of the
         // body, which decoding through serde rejects.
@@ -194,16 +380,47 @@ fn assert_same(bytes: &[u8]) {
     }
 }
 
+/// Whether `e` is of what decoding a header through serde doesn't check for an unknown field's
+/// variant: an object path, the 0 that ends a string or signature, and whether a variant's
+/// signature is a single complete type.
+fn lax_variant_error(e: &Error) -> bool {
+    matches!(e, Error::InvalidObjectPath | Error::SignatureParse(_))
+        || e.to_string().ends_with("expected the 0 that ends a string")
+}
+
 /// Whether the fields of the header in `bytes`, which decodes through serde, end each of their
-/// strings and signatures with a 0, none of them coming twice, which decoding through serde doesn't
-/// check.
+/// strings and signatures with a 0, none of the known ones coming twice, which decoding through
+/// serde doesn't check.
 fn canonical_fields(bytes: &[u8], endian: Endian) -> bool {
+    use winnow::{Parser, stream::Location, token::take};
+
     let end = MIN_MESSAGE_SIZE + endian.read_u32(&bytes[MIN_MESSAGE_SIZE - 4..]) as usize;
     let byte = |i: usize| bytes.get(i).copied();
     let mut codes = HashSet::new();
     let mut field = MIN_MESSAGE_SIZE;
     while field < end {
-        // A field starts with its code, and the signature of its value: 1 type, and a 0. Its
+        let Some(code) = byte(field) else {
+            return false;
+        };
+        if code > 9 {
+            let mut input = super::Input::new(&bytes[..end]);
+            let Ok(_): Result<&[u8], ()> = take::<_, _, ()>(field + 1).parse_next(&mut input)
+            else {
+                return false;
+            };
+            let valid = match endian {
+                Endian::Little => {
+                    super::body::validate_variant::<super::LittleEndian>(&mut input, 2, 0)
+                }
+                Endian::Big => super::body::validate_variant::<super::BigEndian>(&mut input, 2, 0),
+            };
+            if valid.is_err() {
+                return false;
+            }
+            field = input.current_token_start().next_multiple_of(8);
+            continue;
+        }
+        // A known field starts with its code, and the signature of its value: 1 type, and a 0. Its
         // value comes next, on a 4-byte boundary, as the field starts on an 8-byte one.
         let value = field + 4;
         let value_end = match byte(field + 2) {
@@ -219,7 +436,7 @@ fn canonical_fields(bytes: &[u8], endian: Endian) -> bool {
         };
         let ends_with_0 = byte(field + 3) == Some(0)
             && (byte(field + 2) == Some(b'u') || byte(value_end - 1) == Some(0));
-        if !codes.insert(byte(field)) || !ends_with_0 {
+        if !codes.insert(code) || !ends_with_0 {
             return false;
         }
         field = value_end.next_multiple_of(8);
@@ -297,6 +514,53 @@ fn raw_header(fields: &[u8]) -> Vec<u8> {
     bytes
 }
 
+/// Return a copy of `msg`'s wire bytes with `unknown_fields` inserted before, inside, and after
+/// its existing header fields.
+fn message_with_unknown_fields(
+    msg: &Message,
+    endian: Endian,
+    unknown_fields: &[(u8, Variant<'_>)],
+) -> Vec<u8> {
+    let orig = msg.data().bytes();
+    let orig_fields_len = endian.read_u32(&orig[MIN_MESSAGE_SIZE - 4..MIN_MESSAGE_SIZE]) as usize;
+    let orig_fields = &orig[MIN_MESSAGE_SIZE..MIN_MESSAGE_SIZE + orig_fields_len];
+    let orig_body_start = (MIN_MESSAGE_SIZE + orig_fields_len).next_multiple_of(8);
+    let orig_body = &orig[orig_body_start..];
+
+    let append_unknown = |buf: &mut Vec<u8>, code: u8, value: &Variant<'_>| {
+        let pad = buf.len().wrapping_neg() % 8;
+        buf.resize(buf.len() + pad, 0);
+        let ctxt = Context::new(endian, MIN_MESSAGE_SIZE + buf.len());
+        let encoded = to_bytes(ctxt, &(code, value)).unwrap();
+        buf.extend_from_slice(encoded.bytes());
+    };
+
+    let mut new_fields = Vec::new();
+    let (first, rest) = unknown_fields.split_at(unknown_fields.len().min(1));
+    for (code, value) in first {
+        append_unknown(&mut new_fields, *code, value);
+    }
+    if !orig_fields.is_empty() {
+        let pad = new_fields.len().wrapping_neg() % 8;
+        new_fields.resize(new_fields.len() + pad, 0);
+        new_fields.extend_from_slice(orig_fields);
+    }
+    for (code, value) in rest {
+        append_unknown(&mut new_fields, *code, value);
+    }
+
+    let mut out = orig[..MIN_MESSAGE_SIZE - 4].to_vec();
+    let mut len_bytes = [0u8; 4];
+    endian.write_u32(&mut len_bytes, u32::try_from(new_fields.len()).unwrap());
+    out.extend_from_slice(&len_bytes);
+    out.extend_from_slice(&new_fields);
+    let header_pad = out.len().wrapping_neg() % 8;
+    out.resize(out.len() + header_pad, 0);
+    out.extend_from_slice(orig_body);
+
+    out
+}
+
 /// Headers with every field, of every type of message, in both byte orders.
 fn headers() -> Vec<Vec<u8>> {
     let mut headers = vec![];
@@ -328,6 +592,18 @@ fn headers() -> Vec<Vec<u8>> {
         for msg in [&call, &signal, &method_return, &error] {
             headers.push(msg.data().bytes().to_vec());
         }
+
+        // A message with unknown header fields (including repeated codes and containers).
+        let with_unknown = message_with_unknown_fields(
+            &method_return,
+            endian,
+            &[
+                (10, Variant::from((7u32, "extra"))),
+                (10, Variant::from(vec![1u8, 2, 3])),
+                (255, Variant::from(0x0102_0304_0506_0708u64)),
+            ],
+        );
+        headers.push(with_unknown);
 
         // Every field at once, which the builder doesn't make: the number of file descriptors
         // is only set by passing them.
