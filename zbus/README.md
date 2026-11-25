@@ -53,7 +53,10 @@ object server or runtime, and none of the crates that only they need, such as zr
 `Guid::generate`. Every other D-Bus feature enables `core`, and `p2p` enables `core-p2p`.
 
 A program that reads messages off its own socket finds the length of each from its first bytes with
-`message::PrimaryHeader::parse_with_len`.
+`message::PrimaryHeader::parse_with_len`. Once a message is whole, `Message::from_parts` makes a
+`Message` of its bytes and of the file descriptors that its header counts, which
+`message::Header::parse` tells. A message goes out as the bytes and the file descriptors of
+`Message::data`.
 
 ## Example code
 
