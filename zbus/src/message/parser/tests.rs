@@ -48,6 +48,52 @@ fn fields_of_another_type() {
 }
 
 #[test]
+fn decoding_fields_of_another_type() {
+    // Decoding a header through serde refuses a field whose value is of another type than its code
+    // calls for from the signature of its variant, before it reads the value, as the parser does: a
+    // path field that holds an `ay` of 1 GiB, of which no byte follows, is refused for its type
+    // rather than for running past the end of the bytes.
+    let bytes = raw_header(&[1, 2, b'a', b'y', 0, 0, 0, 0, 0, 0, 0, 0x40]);
+    let data = Data::new(&bytes[..], Context::new(LE, 0));
+    let decoded = data.deserialize::<Header<'_>>();
+    assert_eq!(
+        decoded.unwrap_err(),
+        Error::Failure("invalid value: string \"ay\", expected a value of signature `o`".into())
+    );
+    assert_eq!(parse(&bytes).unwrap_err(), Error::InvalidField);
+}
+
+#[test]
+fn decoding_fields_in_a_self_describing_format() {
+    // In a self-describing format, such as JSON, a variant is a map of its signature and its value.
+    // A header goes through one and back, and the value of each field is read as the type that its
+    // code calls for there too: a path field that holds an array of bytes, the last of which isn't
+    // one, is refused as the array starts, rather than for that element.
+    let msg = Message::method_call("/org/zbus/Test", "Ping")
+        .interface("org.zbus.Test")
+        .build(&(42u32, "Testtest"))
+        .unwrap();
+    let header = msg.header();
+    let json = serde_json::to_string(&header).unwrap();
+    let decoded: Header<'_> = serde_json::from_str(&json).unwrap();
+    assert_eq!(decoded.path(), header.path());
+    assert_eq!(decoded.interface(), header.interface());
+    assert_eq!(decoded.member(), header.member());
+    assert_eq!(decoded.signature(), header.signature());
+
+    let path = r#"{"signature":"o","value":"/org/zbus/Test"}"#;
+    assert!(json.contains(path), "{json}");
+    let json = json.replace(path, r#"{"signature":"ay","value":[1,2,"x"]}"#);
+    let error = serde_json::from_str::<Header<'_>>(&json).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .starts_with("invalid type: sequence, expected a string"),
+        "{error}"
+    );
+}
+
+#[test]
 fn unknown_fields() {
     // The specification asks for a field with an unknown code to be ignored, but decoding a
     // header through serde rejects it, and so does the parser.
