@@ -23,11 +23,7 @@ use crate::{
     conn::AuthMechanism,
     fdo::ConnectionCredentials,
     log::trace,
-    message::{PrimaryHeader, header::MIN_MESSAGE_SIZE},
-    wire::{
-        Endian,
-        serialized::{self, Context},
-    },
+    message::{PrimaryHeader, Received, header::MIN_MESSAGE_SIZE},
 };
 #[cfg(unix)]
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
@@ -241,14 +237,14 @@ pub trait ReadHalf: std::fmt::Debug + Send + Sync + 'static {
         // and the message gets an allocation of its exact length once it is in. Each read is
         // straight into `already_received_bytes`, no further than the end of the message, and
         // into room for no more than `READ_MAX` bytes of it.
-        let (primary_header, len) = loop {
+        let len = loop {
             let have = already_received_bytes.len();
             let want = if have < MIN_MESSAGE_SIZE {
                 MIN_MESSAGE_SIZE
             } else {
-                let (primary_header, len) = PrimaryHeader::parse_with_len(already_received_bytes)?;
+                let (_, len) = PrimaryHeader::parse_with_len(already_received_bytes)?;
                 if have >= len {
-                    break (primary_header, len);
+                    break len;
                 }
 
                 len
@@ -284,7 +280,6 @@ pub trait ReadHalf: std::fmt::Debug + Send + Sync + 'static {
 
         take_message(
             seq,
-            &primary_header,
             len,
             already_received_bytes,
             #[cfg(unix)]
@@ -570,37 +565,40 @@ pub trait WriteHalf: std::fmt::Debug + Send + Sync + 'static {
     }
 }
 
-/// Take the message that `bytes` start with, which is whole in them, `len` bytes long as
-/// `primary_header` says, out of them, with as many of `fds` as its header counts.
+/// Take the message that `bytes` start with, `len` bytes long, which is whole in them, out of them,
+/// with as many of `fds` as its header counts.
+///
+/// The message is checked where it lies, so that an error leaves both `bytes` and `fds` as they
+/// are, and its header is parsed once.
 pub(crate) fn take_message(
     seq: u64,
-    primary_header: &PrimaryHeader,
     len: usize,
     bytes: &mut Vec<u8>,
     #[cfg(unix)] fds: &mut Vec<OwnedFd>,
 ) -> crate::Result<Message> {
+    let received = Received::check(
+        &bytes[..len],
+        #[cfg(unix)]
+        fds.len(),
+    )?;
     // Nothing is allocated when nothing follows the message.
     let rest = bytes.split_off(len);
     let bytes = mem::replace(bytes, rest);
-
     // The message takes as many of the descriptors that wait as its header counts, whichever of
     // its bytes they came with, as the reference implementation of D-Bus does.
     #[cfg(unix)]
-    let fds = if fds.is_empty() {
-        vec![]
-    } else {
-        let (_, _, fields) = crate::message::parser::parse(&bytes)?;
-        let count = (fields.unix_fds().unwrap_or(0) as usize).min(fds.len());
-
-        fds.drain(..count).collect()
+    let fds = fds.drain(..received.fds()).collect();
+    // SAFETY: `bytes` are the `len` that were checked, split off what followed them.
+    let msg = unsafe {
+        received.into_message(
+            bytes,
+            #[cfg(unix)]
+            fds,
+            seq,
+        )
     };
-    let endian = Endian::from(primary_header.endian_sig());
-    let ctxt = Context::new(endian, 0);
-    #[cfg(unix)]
-    let bytes = serialized::Data::new_fds(bytes, ctxt, fds);
-    #[cfg(not(unix))]
-    let bytes = serialized::Data::new(bytes, ctxt);
-    Message::from_raw_parts(bytes, seq)
+
+    Ok(msg)
 }
 
 /// The most that a read of the default [`ReadHalf::receive_message`] has room for.
@@ -926,7 +924,8 @@ mod tests {
     }
 
     /// A message whose header counts more file descriptors than came in is an error, rather than
-    /// a panic, whichever of them the handshake read.
+    /// a panic, whichever of them the handshake read, and so is an invalid one. Either stays where
+    /// it is, with the descriptors.
     #[cfg(unix)]
     #[test]
     #[timeout(15000)]
@@ -935,19 +934,29 @@ mod tests {
         let msg = Message::method_call("/", "Test")
             .build(&(Fd::from(pipes[0].as_fd()), Fd::from(pipes[1].as_fd())))
             .unwrap();
-        let mut half = Scripted::default();
-        half.push(msg.data().to_vec());
-        // The handshake read one of the descriptors, and the other never comes.
-        let mut fds = clones(&pipes[..1]);
+        // A protocol version that doesn't exist makes the message invalid.
+        let mut invalid = msg.data().to_vec();
+        invalid[3] = 2;
 
-        let received = half
-            .receive(&mut vec![], &mut fds)
-            .expect("a call waits with the message read");
+        for sent in [msg.data().to_vec(), invalid] {
+            let mut half = Scripted::default();
+            half.push(sent.clone());
+            let mut bytes = vec![];
+            // The handshake read one of the descriptors, and the other never comes.
+            let mut fds = clones(&pipes[..1]);
 
-        assert!(
-            matches!(received, Err(Error::MissingParameter(_))),
-            "{received:?}",
-        );
+            let received = half
+                .receive(&mut bytes, &mut fds)
+                .expect("a call waits with the message read");
+
+            match received {
+                Err(Error::MissingParameter(_)) if sent == msg.data().bytes() => (),
+                Err(Error::InvalidField) if sent != msg.data().bytes() => (),
+                received => panic!("{received:?}"),
+            }
+            assert_eq!(bytes, sent);
+            assert_eq!(fds.len(), 1, "the descriptor was taken");
+        }
     }
 
     /// File descriptors that no header counts wait for the messages after them to take them, but

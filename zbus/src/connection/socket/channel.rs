@@ -125,17 +125,16 @@ impl super::ReadHalf for Reader {
         // first. Part of one can only have come in over some other socket, and can't go on over a
         // channel, so it is left where it is rather than lost.
         if !already_received_bytes.is_empty() {
-            let (primary_header, len) = match already_received_bytes.len() {
+            let len = match already_received_bytes.len() {
                 have if have < MIN_MESSAGE_SIZE => return Err(not_whole()),
                 have => match PrimaryHeader::parse_with_len(already_received_bytes)? {
                     (_, len) if have < len => return Err(not_whole()),
-                    whole => whole,
+                    (_, len) => len,
                 },
             };
 
             return take_message(
                 seq,
-                &primary_header,
                 len,
                 already_received_bytes,
                 #[cfg(unix)]

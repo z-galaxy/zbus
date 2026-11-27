@@ -1,7 +1,7 @@
 //! D-Bus Message.
 #[cfg(unix)]
 use std::os::fd::OwnedFd;
-use std::{fmt, num::NonZeroU32, ops::Range, sync::Arc};
+use std::{fmt, num::NonZeroU32, sync::Arc};
 
 use crate::{
     Error, ObjectPath, Result,
@@ -275,25 +275,33 @@ impl Message {
     /// # fn main() {}
     /// ```
     pub fn from_parts(bytes: Vec<u8>, #[cfg(unix)] fds: Vec<OwnedFd>) -> Result<Self> {
-        let (primary_header, len) = PrimaryHeader::parse_with_len(&bytes)?;
+        let (_, len) = PrimaryHeader::parse_with_len(&bytes)?;
         if bytes.len() < len {
             return Err(Error::OutOfBounds);
         }
         if bytes.len() > len {
             return Err(Error::ExcessData);
         }
-        let ctxt = Context::new(primary_header.endian_sig().into(), 0);
-        #[cfg(unix)]
-        let bytes = serialized::Data::new_fds(bytes, ctxt, fds);
-        #[cfg(not(unix))]
-        let bytes = serialized::Data::new(bytes, ctxt);
-        let msg = Self::from_raw_parts(bytes, 0)?;
-        // `from_raw_parts` checked that the message carries no fewer file descriptors than its
+        let received = Received::check(
+            &bytes,
+            #[cfg(unix)]
+            fds.len(),
+        )?;
+        // `Received::check` checked that the message carries no fewer file descriptors than its
         // header counts.
         #[cfg(unix)]
-        if msg.data().fds().len() > msg.quick_fields().unix_fds().unwrap_or(0) as usize {
+        if fds.len() > received.fds() {
             return Err(Error::ExcessData);
         }
+        // SAFETY: `bytes` are those that were just checked.
+        let msg = unsafe {
+            received.into_message(
+                bytes,
+                #[cfg(unix)]
+                fds,
+                0,
+            )
+        };
 
         Ok(msg)
     }
@@ -307,25 +315,17 @@ impl Message {
         if Endian::from(primary_header.endian_sig()) != bytes.context().endian() {
             return Err(Error::IncorrectEndian);
         }
-
-        let body_offset = header_len + padding_for_8_bytes(header_len);
-        check_whole(
-            &primary_header,
-            &quick_fields,
+        let received = Received::checked(
+            primary_header,
+            header_len,
+            quick_fields,
             &bytes,
-            header_len..body_offset,
+            #[cfg(unix)]
+            bytes.fds().len(),
         )?;
-        let quick_fields = quick_fields.into();
 
-        Ok(Self {
-            inner: Arc::new(Inner {
-                primary_header,
-                quick_fields,
-                bytes,
-                body_offset,
-                recv_seq: Sequence { recv_seq },
-            }),
-        })
+        // SAFETY: `bytes` are those that were just checked.
+        Ok(unsafe { received.message_of(bytes, recv_seq) })
     }
 
     /// The message, at position `recv_seq` of those that a connection received.
@@ -554,28 +554,118 @@ impl Message {
     }
 }
 
-/// Check what makes the message in `bytes` whole: its header, as [`check_header`] checks it, the
-/// padding between its header and its body, at `padding`, which must be 0, and, on Unix, that it
-/// brought as many file descriptors as its header says.
-fn check_whole(
-    primary_header: &PrimaryHeader,
-    quick_fields: &QuickFields,
-    bytes: &serialized::Data<'static, 'static>,
-    padding: Range<usize>,
-) -> Result<()> {
-    check_header(primary_header, quick_fields)?;
-    let Some(padding) = bytes.get(padding) else {
-        return Err(Error::OutOfBounds);
-    };
-    if let Some(byte) = padding.iter().find(|byte| **byte != 0) {
-        return Err(Error::PaddingNot0(*byte));
-    }
-    #[cfg(unix)]
-    if bytes.fds().len() < quick_fields.unix_fds().unwrap_or(0) as usize {
-        return Err(Error::MissingParameter("Missing file descriptors"));
+/// A message whose bytes were checked where they lie, before they are taken out of what was read,
+/// as a connection checks a message that it receives: what was parsed of them, which the message is
+/// then made of, so that its header is parsed once.
+pub(crate) struct Received {
+    primary_header: PrimaryHeader,
+    quick_fields: QuickFields,
+    body_offset: usize,
+}
+
+impl Received {
+    /// Check the message of `bytes`, which start with it and end where it does, with `fds` file
+    /// descriptors waiting for it, as [`Received::checked`] does.
+    pub(crate) fn check(bytes: &[u8], #[cfg(unix)] fds: usize) -> Result<Self> {
+        let (primary_header, header_len, quick_fields) = parser::parse(bytes)?;
+
+        Self::checked(
+            primary_header,
+            header_len,
+            quick_fields,
+            bytes,
+            #[cfg(unix)]
+            fds,
+        )
     }
 
-    Ok(())
+    /// How many file descriptors the message takes: as many as its header counts.
+    #[cfg(unix)]
+    pub(crate) fn fds(&self) -> usize {
+        self.quick_fields.unix_fds().unwrap_or(0) as usize
+    }
+
+    /// The message, of the bytes that were checked and of the file descriptors that it takes, at
+    /// position `recv_seq` of those that a connection received.
+    ///
+    /// # Safety
+    ///
+    /// `bytes` must be those that were checked, as the message reads the names in its header out
+    /// of them where they were found, without checking them again.
+    pub(crate) unsafe fn into_message(
+        self,
+        bytes: Vec<u8>,
+        #[cfg(unix)] fds: Vec<OwnedFd>,
+        recv_seq: u64,
+    ) -> Message {
+        #[cfg(unix)]
+        debug_assert_eq!(
+            fds.len(),
+            self.fds(),
+            "the message takes the FDs that it counts"
+        );
+        let ctxt = Context::new(self.primary_header.endian_sig().into(), 0);
+        #[cfg(unix)]
+        let bytes = serialized::Data::new_fds(bytes, ctxt, fds);
+        #[cfg(not(unix))]
+        let bytes = serialized::Data::new(bytes, ctxt);
+
+        // SAFETY: The caller ensures that `bytes` are those that were checked.
+        unsafe { self.message_of(bytes, recv_seq) }
+    }
+
+    /// Check what makes the message whose header, `header_len` bytes of `bytes`, was parsed into
+    /// `primary_header` and `quick_fields` whole: its header, as [`check_header`] checks it, the
+    /// padding between its header and its body, which must be 0, and, on Unix, that the `fds` file
+    /// descriptors that came with it are no fewer than its header counts.
+    fn checked(
+        primary_header: PrimaryHeader,
+        header_len: usize,
+        quick_fields: QuickFields,
+        bytes: &[u8],
+        #[cfg(unix)] fds: usize,
+    ) -> Result<Self> {
+        check_header(&primary_header, &quick_fields)?;
+        let body_offset = header_len + padding_for_8_bytes(header_len);
+        let Some(padding) = bytes.get(header_len..body_offset) else {
+            return Err(Error::OutOfBounds);
+        };
+        if let Some(byte) = padding.iter().find(|byte| **byte != 0) {
+            return Err(Error::PaddingNot0(*byte));
+        }
+        let received = Self {
+            primary_header,
+            quick_fields,
+            body_offset,
+        };
+        #[cfg(unix)]
+        if fds < received.fds() {
+            return Err(Error::MissingParameter("Missing file descriptors"));
+        }
+
+        Ok(received)
+    }
+
+    /// The message of `bytes`, at position `recv_seq`.
+    ///
+    /// # Safety
+    ///
+    /// `bytes` must be those that were checked, as for [`Received::into_message`].
+    unsafe fn message_of(
+        self,
+        bytes: serialized::Data<'static, 'static>,
+        recv_seq: u64,
+    ) -> Message {
+        Message {
+            inner: Arc::new(Inner {
+                primary_header: self.primary_header,
+                quick_fields: self.quick_fields.into(),
+                bytes,
+                body_offset: self.body_offset,
+                recv_seq: Sequence { recv_seq },
+            }),
+        }
+    }
 }
 
 /// Check what makes the header of a message whole, beyond each of its fields, which parsing the
