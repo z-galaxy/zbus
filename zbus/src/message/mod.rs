@@ -1,7 +1,7 @@
 //! D-Bus Message.
 #[cfg(unix)]
 use std::os::fd::OwnedFd;
-use std::{fmt, num::NonZeroU32, ops::Range, sync::Arc};
+use std::{fmt, num::NonZeroU32, sync::Arc};
 
 use crate::{
     Error, ObjectPath, Result,
@@ -192,8 +192,8 @@ impl Message {
     }
 
     /// Create a message from bytes, like [`Message::from_parts`], but without checking that the
-    /// bytes end where the header says, or that they carry no more file descriptors than the header
-    /// counts.
+    /// bytes end where the header says, and with all the file descriptors that `bytes` carry, where
+    /// [`Message::from_parts`] takes as many as the header counts and leaves the others.
     ///
     /// # Safety
     ///
@@ -210,20 +210,22 @@ impl Message {
 
     /// Create a message from its bytes and the file descriptors that it carries.
     ///
-    /// `bytes` are those of the whole message, and no more. `fds` are the file descriptors that its
-    /// header counts ([`Header::unix_fds`]), in their order.
+    /// `bytes` are those of the whole message, and no more. The message takes as many of the
+    /// first of `fds` as its header counts ([`Header::unix_fds`]), and leaves the others in `fds`.
     ///
     /// A program that reads messages off its own socket finds where each of them ends with
     /// [`PrimaryHeader::parse_with_len`]. The file descriptors that come in wait for the messages,
     /// in the order that they came in: each message takes as many of the first of them as its
     /// header counts, whichever of its bytes they came with, as the reference implementation of
-    /// D-Bus has it. [`Header::parse`] tells how many, from the bytes of the message.
+    /// D-Bus has it. So `fds` are those that wait, and those that the message doesn't take wait on
+    /// in `fds` for the messages after it. Only the header tells how many the message takes, which
+    /// is why this takes them out of `fds`, rather than be given exactly those of the message.
     ///
     /// The message is checked as a connection checks the messages that it receives: its whole
     /// header, its protocol version, the fields that its type requires, and the padding after the
-    /// header. The bytes must also end where the header says, and the file descriptors be as many
-    /// as the header counts. The body is not checked against its signature: [`Body::validate`]
-    /// does that.
+    /// header. The bytes must also end where the header says, and `fds` hold at least as many file
+    /// descriptors as the header counts. The body is not checked against its signature:
+    /// [`Body::validate`] does that.
     ///
     /// The message keeps the allocation of `bytes`. It is at receive position 0
     /// ([`Message::recv_position`]), as no connection received it.
@@ -236,8 +238,9 @@ impl Message {
     ///
     /// * [`Error::OutOfBounds`] if `bytes` are fewer than the header says, and
     ///   [`Error::ExcessData`] if they are more;
-    /// * [`Error::MissingParameter`] if `fds` are fewer than the header counts, and
-    ///   [`Error::ExcessData`] if they are more.
+    /// * [`Error::MissingParameter`] if `fds` are fewer than the header counts.
+    ///
+    /// On an error, nothing is taken out of `fds`.
     ///
     /// # Example
     ///
@@ -249,7 +252,7 @@ impl Message {
     /// # fn main() -> zbus::Result<()> {
     /// use std::os::fd::OwnedFd;
     /// use zbus::{
-    ///     message::{Header, Message, PrimaryHeader},
+    ///     message::{Message, PrimaryHeader},
     ///     wire::Fd,
     /// };
     ///
@@ -258,13 +261,12 @@ impl Message {
     /// let bytes = sent.data().to_vec();
     /// let mut fds: Vec<OwnedFd> = vec![input.into(), std::io::pipe()?.0.into()];
     ///
-    /// // The bytes hold the whole call, and its header counts the file descriptors that it takes.
-    /// // If fewer have come in, the call is an error.
+    /// // The bytes hold the whole call.
     /// let (_, len) = PrimaryHeader::parse_with_len(&bytes)?;
     /// assert_eq!(bytes.len(), len);
-    /// let count = Header::parse(&bytes)?.unix_fds().unwrap_or(0) as usize;
     ///
-    /// let call = Message::from_parts(bytes, fds.drain(..count.min(fds.len())).collect())?;
+    /// // The call takes the file descriptor that its header counts, and leaves the other.
+    /// let call = Message::from_parts(bytes, &mut fds)?;
     /// assert_eq!(call.header().member().unwrap().as_str(), "Read");
     /// assert_eq!(call.data().fds().len(), 1);
     /// assert_eq!(fds.len(), 1);
@@ -274,26 +276,30 @@ impl Message {
     /// # #[cfg(not(unix))]
     /// # fn main() {}
     /// ```
-    pub fn from_parts(bytes: Vec<u8>, #[cfg(unix)] fds: Vec<OwnedFd>) -> Result<Self> {
-        let (primary_header, len) = PrimaryHeader::parse_with_len(&bytes)?;
+    pub fn from_parts(bytes: Vec<u8>, #[cfg(unix)] fds: &mut Vec<OwnedFd>) -> Result<Self> {
+        let (_, len) = PrimaryHeader::parse_with_len(&bytes)?;
         if bytes.len() < len {
             return Err(Error::OutOfBounds);
         }
         if bytes.len() > len {
             return Err(Error::ExcessData);
         }
-        let ctxt = Context::new(primary_header.endian_sig().into(), 0);
+        let received = Received::check(
+            &bytes,
+            #[cfg(unix)]
+            fds.len(),
+        )?;
         #[cfg(unix)]
-        let bytes = serialized::Data::new_fds(bytes, ctxt, fds);
-        #[cfg(not(unix))]
-        let bytes = serialized::Data::new(bytes, ctxt);
-        let msg = Self::from_raw_parts(bytes, 0)?;
-        // `from_raw_parts` checked that the message carries no fewer file descriptors than its
-        // header counts.
-        #[cfg(unix)]
-        if msg.data().fds().len() > msg.quick_fields().unix_fds().unwrap_or(0) as usize {
-            return Err(Error::ExcessData);
-        }
+        let fds = fds.drain(..received.fds()).collect();
+        // SAFETY: `bytes` are those that were just checked.
+        let msg = unsafe {
+            received.into_message(
+                bytes,
+                #[cfg(unix)]
+                fds,
+                0,
+            )
+        };
 
         Ok(msg)
     }
@@ -307,25 +313,17 @@ impl Message {
         if Endian::from(primary_header.endian_sig()) != bytes.context().endian() {
             return Err(Error::IncorrectEndian);
         }
-
-        let body_offset = header_len + padding_for_8_bytes(header_len);
-        check_whole(
-            &primary_header,
-            &quick_fields,
+        let received = Received::checked(
+            primary_header,
+            header_len,
+            quick_fields,
             &bytes,
-            header_len..body_offset,
+            #[cfg(unix)]
+            bytes.fds().len(),
         )?;
-        let quick_fields = quick_fields.into();
 
-        Ok(Self {
-            inner: Arc::new(Inner {
-                primary_header,
-                quick_fields,
-                bytes,
-                body_offset,
-                recv_seq: Sequence { recv_seq },
-            }),
-        })
+        // SAFETY: `bytes` are those that were just checked.
+        Ok(unsafe { received.message_of(bytes, recv_seq) })
     }
 
     /// The message, at position `recv_seq` of those that a connection received.
@@ -554,28 +552,118 @@ impl Message {
     }
 }
 
-/// Check what makes the message in `bytes` whole: its header, as [`check_header`] checks it, the
-/// padding between its header and its body, at `padding`, which must be 0, and, on Unix, that it
-/// brought as many file descriptors as its header says.
-fn check_whole(
-    primary_header: &PrimaryHeader,
-    quick_fields: &QuickFields,
-    bytes: &serialized::Data<'static, 'static>,
-    padding: Range<usize>,
-) -> Result<()> {
-    check_header(primary_header, quick_fields)?;
-    let Some(padding) = bytes.get(padding) else {
-        return Err(Error::OutOfBounds);
-    };
-    if let Some(byte) = padding.iter().find(|byte| **byte != 0) {
-        return Err(Error::PaddingNot0(*byte));
-    }
-    #[cfg(unix)]
-    if bytes.fds().len() < quick_fields.unix_fds().unwrap_or(0) as usize {
-        return Err(Error::MissingParameter("Missing file descriptors"));
+/// A message whose bytes were checked where they lie, before they are taken out of what was read,
+/// as a connection checks a message that it receives: what was parsed of them, which the message is
+/// then made of, so that its header is parsed once.
+pub(crate) struct Received {
+    primary_header: PrimaryHeader,
+    quick_fields: QuickFields,
+    body_offset: usize,
+}
+
+impl Received {
+    /// Check the message of `bytes`, which start with it and end where it does, with `fds` file
+    /// descriptors waiting for it, as [`Received::checked`] does.
+    pub(crate) fn check(bytes: &[u8], #[cfg(unix)] fds: usize) -> Result<Self> {
+        let (primary_header, header_len, quick_fields) = parser::parse(bytes)?;
+
+        Self::checked(
+            primary_header,
+            header_len,
+            quick_fields,
+            bytes,
+            #[cfg(unix)]
+            fds,
+        )
     }
 
-    Ok(())
+    /// How many file descriptors the message takes: as many as its header counts.
+    #[cfg(unix)]
+    pub(crate) fn fds(&self) -> usize {
+        self.quick_fields.unix_fds().unwrap_or(0) as usize
+    }
+
+    /// The message, of the bytes that were checked and of the file descriptors that it takes, at
+    /// position `recv_seq` of those that a connection received.
+    ///
+    /// # Safety
+    ///
+    /// `bytes` must be those that were checked, as the message reads the names in its header out
+    /// of them where they were found, without checking them again.
+    pub(crate) unsafe fn into_message(
+        self,
+        bytes: Vec<u8>,
+        #[cfg(unix)] fds: Vec<OwnedFd>,
+        recv_seq: u64,
+    ) -> Message {
+        #[cfg(unix)]
+        debug_assert_eq!(
+            fds.len(),
+            self.fds(),
+            "the message takes the FDs that it counts"
+        );
+        let ctxt = Context::new(self.primary_header.endian_sig().into(), 0);
+        #[cfg(unix)]
+        let bytes = serialized::Data::new_fds(bytes, ctxt, fds);
+        #[cfg(not(unix))]
+        let bytes = serialized::Data::new(bytes, ctxt);
+
+        // SAFETY: The caller ensures that `bytes` are those that were checked.
+        unsafe { self.message_of(bytes, recv_seq) }
+    }
+
+    /// Check what makes the message whose header, `header_len` bytes of `bytes`, was parsed into
+    /// `primary_header` and `quick_fields` whole: its header, as [`check_header`] checks it, the
+    /// padding between its header and its body, which must be 0, and, on Unix, that the `fds` file
+    /// descriptors that came with it are no fewer than its header counts.
+    fn checked(
+        primary_header: PrimaryHeader,
+        header_len: usize,
+        quick_fields: QuickFields,
+        bytes: &[u8],
+        #[cfg(unix)] fds: usize,
+    ) -> Result<Self> {
+        check_header(&primary_header, &quick_fields)?;
+        let body_offset = header_len + padding_for_8_bytes(header_len);
+        let Some(padding) = bytes.get(header_len..body_offset) else {
+            return Err(Error::OutOfBounds);
+        };
+        if let Some(byte) = padding.iter().find(|byte| **byte != 0) {
+            return Err(Error::PaddingNot0(*byte));
+        }
+        let received = Self {
+            primary_header,
+            quick_fields,
+            body_offset,
+        };
+        #[cfg(unix)]
+        if fds < received.fds() {
+            return Err(Error::MissingParameter("Missing file descriptors"));
+        }
+
+        Ok(received)
+    }
+
+    /// The message of `bytes`, at position `recv_seq`.
+    ///
+    /// # Safety
+    ///
+    /// `bytes` must be those that were checked, as for [`Received::into_message`].
+    unsafe fn message_of(
+        self,
+        bytes: serialized::Data<'static, 'static>,
+        recv_seq: u64,
+    ) -> Message {
+        Message {
+            inner: Arc::new(Inner {
+                primary_header: self.primary_header,
+                quick_fields: self.quick_fields.into(),
+                bytes,
+                body_offset: self.body_offset,
+                recv_seq: Sequence { recv_seq },
+            }),
+        }
+    }
 }
 
 /// Check what makes the header of a message whole, beyond each of its fields, which parsing the
@@ -681,7 +769,7 @@ mod tests {
     use crate::Signature;
     use std::num::NonZeroU32;
     #[cfg(unix)]
-    use std::os::fd::{AsFd, AsRawFd};
+    use std::os::fd::{AsFd, AsRawFd, OwnedFd};
     use test_log::test;
 
     use super::{Message, Sequence, Type, parser};
@@ -996,7 +1084,7 @@ mod tests {
             let copy = Message::from_parts(
                 bytes.clone(),
                 #[cfg(unix)]
-                vec![],
+                &mut vec![],
             )
             .unwrap();
             assert_eq!(copy.data().bytes(), msg.data().bytes());
@@ -1018,7 +1106,7 @@ mod tests {
                 let error = Message::from_parts(
                     bytes,
                     #[cfg(unix)]
-                    vec![],
+                    &mut vec![],
                 )
                 .unwrap_err();
 
@@ -1027,29 +1115,52 @@ mod tests {
         }
     }
 
-    /// A message made of bytes carries as many file descriptors as its header counts: fewer or
-    /// more is an error.
+    /// A message made of bytes takes as many of the first file descriptors as its header counts,
+    /// and leaves the others for the messages after it. A message whose header counts more than
+    /// there are, or that is invalid, is an error that takes none of them.
     #[cfg(unix)]
     #[test]
     fn from_parts_with_fds() {
         let stdout = std::io::stdout();
-        let msg = Message::method_call("/org/zbus/Test", "Test")
-            .build(&Fd::from(&stdout))
-            .unwrap();
-        let from_parts = |count: usize| {
-            let fds = (0..count)
-                .map(|_| std::io::pipe().unwrap().0.into())
+        let fd = || Fd::from(&stdout);
+        let msgs = [
+            Message::method_call("/", "Two")
+                .build(&(fd(), fd()))
+                .unwrap(),
+            Message::method_call("/", "None").build(&()).unwrap(),
+            Message::method_call("/", "One").build(&fd()).unwrap(),
+        ];
+        // The descriptors of the three messages, and one more for a message after them.
+        let mut fds: Vec<OwnedFd> = (0..4).map(|_| std::io::pipe().unwrap().0.into()).collect();
+        let raw: Vec<_> = fds.iter().map(AsRawFd::as_raw_fd).collect();
+
+        for (msg, expected) in msgs.iter().zip([&raw[..2], &[], &raw[2..3]]) {
+            let copy = Message::from_parts(msg.data().to_vec(), &mut fds).unwrap();
+
+            let taken: Vec<_> = copy
+                .data()
+                .fds()
+                .iter()
+                .map(|fd| fd.as_fd().as_raw_fd())
                 .collect();
+            assert_eq!(taken, expected);
+        }
+        let left: Vec<_> = fds.iter().map(AsRawFd::as_raw_fd).collect();
+        assert_eq!(left, &raw[3..]);
 
-            Message::from_parts(msg.data().to_vec(), fds)
-        };
+        // A message that counts two descriptors, of which one is there, and one that counts the
+        // one that is there, but whose protocol version doesn't exist.
+        let mut invalid = msgs[2].data().to_vec();
+        invalid[3] = 2;
+        for bytes in [msgs[0].data().to_vec(), invalid] {
+            let error = Message::from_parts(bytes, &mut fds).unwrap_err();
 
-        let copy = from_parts(1).unwrap();
-        assert_eq!(copy.data().fds().len(), 1);
-        let error = from_parts(0).unwrap_err();
-        assert!(matches!(error, Error::MissingParameter(_)), "{error:?}");
-        let error = from_parts(2).unwrap_err();
-        assert_eq!(error, Error::ExcessData);
+            assert!(
+                matches!(error, Error::MissingParameter(_) | Error::InvalidField),
+                "{error:?}"
+            );
+            assert_eq!(fds.len(), 1, "a descriptor was taken");
+        }
     }
 
     /// Bytes that don't start with a valid message are an error.
@@ -1067,7 +1178,34 @@ mod tests {
             let error = Message::from_parts(
                 bytes,
                 #[cfg(unix)]
-                vec![],
+                &mut vec![],
+            )
+            .unwrap_err();
+
+            assert_eq!(error, expected);
+        }
+
+        // A method call with nothing but its path, and one whose path holds an array of 4 bytes.
+        for (field, expected) in [
+            (
+                &b"\x01\x01o\x00\x01\x00\x00\x00/\x00"[..],
+                Error::MissingField,
+            ),
+            (
+                &b"\x01\x02ay\x00\x00\x00\x00\x04\x00\x00\x00abcd"[..],
+                Error::InvalidField,
+            ),
+        ] {
+            let mut bytes = vec![b'l', 1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0];
+            bytes.extend_from_slice(&(field.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(field);
+            // The empty body starts on an 8-byte boundary.
+            bytes.resize(bytes.len().next_multiple_of(8), 0);
+
+            let error = Message::from_parts(
+                bytes,
+                #[cfg(unix)]
+                &mut vec![],
             )
             .unwrap_err();
 

@@ -10,11 +10,7 @@ use crate::{
     conn::AuthMechanism,
     connection::socket::{ReadHalf, RecvmsgResult},
     fdo::ConnectionCredentials,
-    message::{PrimaryHeader, header::MIN_MESSAGE_SIZE},
-    wire::{
-        Endian,
-        serialized::{self, Context},
-    },
+    message::{PrimaryHeader, Received, header::MIN_MESSAGE_SIZE},
 };
 
 /// The half of a [`RegisteredIo`] that a connection receives its messages through.
@@ -183,16 +179,17 @@ where
         Ok(read)
     }
 
-    /// The file descriptors of the message of `bytes`, which has just been taken out of the
-    /// buffer: as many of those that wait as its header says it has.
+    /// How many file descriptors wait for the messages to take them.
     #[cfg(unix)]
-    fn take_fds(&mut self, bytes: &[u8]) -> crate::Result<Vec<OwnedFd>> {
-        if self.fds.is_empty() {
-            return Ok(vec![]);
-        }
+    fn waiting_fds(&self) -> usize {
+        self.fds.iter().map(Vec::len).sum()
+    }
 
-        let (_, _, fields) = crate::message::parser::parse(bytes)?;
-        let count = fields.unix_fds().unwrap_or(0) as usize;
+    /// The first `count` of the file descriptors that wait, for the message that was just taken
+    /// out of the buffer, whose header counts that many. No fewer wait, as the message was checked
+    /// against those that do.
+    #[cfg(unix)]
+    fn take_fds(&mut self, count: usize) -> Vec<OwnedFd> {
         let mut fds = vec![];
         while fds.len() < count
             && let Some(set) = self.fds.front_mut()
@@ -206,7 +203,7 @@ where
             }
         }
 
-        Ok(fds)
+        fds
     }
 }
 
@@ -227,7 +224,10 @@ where
             already_received_fds,
         );
 
-        let (primary_header, bytes) = loop {
+        // A message is checked where it lies, in the buffer or in its own allocation, before it is
+        // taken out of there, so that an error leaves it in this half with the file descriptors
+        // that wait, and its header is parsed once.
+        let (received, bytes) = loop {
             if !self.long.is_empty() {
                 while self.long_filled < self.long.len() {
                     // Disjoint fields: the socket is borrowed shared, `long` mutably. What a read
@@ -236,16 +236,26 @@ where
                     let received = self.socket.recv(&mut self.long[self.long_filled..]).await;
                     self.long_filled += self.received(received)?;
                 }
+                let received = Received::check(
+                    &self.long,
+                    #[cfg(unix)]
+                    self.waiting_fds(),
+                )?;
                 let bytes = mem::take(&mut self.long);
                 self.long_filled = 0;
 
-                break (PrimaryHeader::parse_with_len(&bytes)?.0, bytes);
+                break (received, bytes);
             }
 
             let buffered = &self.buffer[self.start..self.end];
             if buffered.len() >= MIN_MESSAGE_SIZE {
-                let (primary_header, len) = PrimaryHeader::parse_with_len(buffered)?;
+                let (_, len) = PrimaryHeader::parse_with_len(buffered)?;
                 if buffered.len() >= len {
+                    let received = Received::check(
+                        &buffered[..len],
+                        #[cfg(unix)]
+                        self.waiting_fds(),
+                    )?;
                     let bytes = buffered[..len].to_vec();
                     self.start += len;
                     if self.start == self.end {
@@ -254,7 +264,7 @@ where
                     }
                     self.shrink();
 
-                    break (primary_header, bytes);
+                    break (received, bytes);
                 } else if len > BUFFER_SIZE {
                     // The message gets an allocation of its own, which takes over what the buffer
                     // holds of it and has the rest read straight into it. That goes for a buffer
@@ -275,14 +285,19 @@ where
         };
 
         #[cfg(unix)]
-        let fds = self.take_fds(&bytes)?;
-        let ctxt = Context::new(Endian::from(primary_header.endian_sig()), 0);
-        #[cfg(unix)]
-        let bytes = serialized::Data::new_fds(bytes, ctxt, fds);
-        #[cfg(not(unix))]
-        let bytes = serialized::Data::new(bytes, ctxt);
+        let fds = self.take_fds(received.fds());
+        // SAFETY: `bytes` are those that were checked: the allocation of their own, or a copy of
+        // them out of the buffer.
+        let msg = unsafe {
+            received.into_message(
+                bytes,
+                #[cfg(unix)]
+                fds,
+                seq,
+            )
+        };
 
-        Message::from_raw_parts(bytes, seq)
+        Ok(msg)
     }
 
     /// Reads straight from the socket.

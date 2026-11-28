@@ -56,11 +56,11 @@ enables `core`, and `p2p` enables `core-p2p`.
 
 A program that reads messages off its own socket finds the length of each from its first bytes with
 `message::PrimaryHeader::parse_with_len`. Once a message is whole, `Message::from_parts` makes a
-`Message` of its bytes and of the file descriptors that its header counts, which
-`message::Header::parse` tells. A message goes out as the bytes and the file descriptors of
-`Message::data`. The authentication handshake comes before the messages:
-`zbus::connection::handshake::Command` parses and writes its commands.
-`fdo::ConnectionCredentials::from_socket` tells who the peer of a unix socket is, with no runtime.
+`Message` of its bytes, and takes as many of the file descriptors that came in as its header counts.
+A message goes out as the bytes and the file descriptors of `Message::data`. The authentication
+handshake comes before the messages: `zbus::connection::handshake::Command` parses and writes its
+commands. `fdo::ConnectionCredentials::from_socket` tells who the peer of a unix socket is, with no
+runtime.
 
 ## Deprecated: `bus-impl`
 

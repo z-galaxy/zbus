@@ -4,9 +4,9 @@
 //! The server reads and writes a unix socket itself, along with the file descriptors that come
 //! with the messages. It finds out who its client is with `ConnectionCredentials::from_socket`,
 //! does the authentication handshake with `connection::handshake::Command`, tells where each
-//! message ends with `PrimaryHeader::parse_with_len` and how many of the file descriptors that came
-//! in it takes with `Header::parse`, makes a message of them with `Message::from_parts`, and builds
-//! its replies with the message builders.
+//! message ends with `PrimaryHeader::parse_with_len`, makes a message of its bytes and of the file
+//! descriptors that its header counts with `Message::from_parts`, and builds its replies with the
+//! message builders.
 //!
 //! It is the bus of its one client. As a bus does, it answers `Hello` with [`UNIQUE_NAME`] and then
 //! sends `NameAcquired`, and it answers `Peer.Ping` and `GetConnectionCredentials`. It also answers
@@ -31,7 +31,7 @@ use zbus::{
     Fd, Guid,
     connection::handshake::{AuthMechanism, Command},
     fdo::ConnectionCredentials,
-    message::{Header, Message, PrimaryHeader, Type},
+    message::{Message, PrimaryHeader, Type},
 };
 
 /// Serves the client at the other end of `socket`, until it hangs up.
@@ -196,9 +196,8 @@ impl Client {
                     // is allocated when nothing follows the message.
                     let rest = self.bytes.split_off(len);
                     let bytes = mem::replace(&mut self.bytes, rest);
-                    let fds = self.take_fds(&bytes)?;
 
-                    return Message::from_parts(bytes, fds).map(Some);
+                    return Message::from_parts(bytes, &mut self.fds).map(Some);
                 }
 
                 len
@@ -217,17 +216,6 @@ impl Client {
                 return Ok(None);
             }
         }
-    }
-
-    /// The file descriptors of the message of `bytes`: as many of the first of those that came in
-    /// as its header counts. Fewer are an error of the message.
-    fn take_fds(&mut self, bytes: &[u8]) -> zbus::Result<Vec<OwnedFd>> {
-        if self.fds.is_empty() {
-            return Ok(vec![]);
-        }
-        let count = Header::parse(bytes)?.unix_fds().unwrap_or(0) as usize;
-
-        Ok(self.fds.drain(..count.min(self.fds.len())).collect())
     }
 
     /// Reads up to `max` bytes, with the file descriptors that come with them, and tells how many

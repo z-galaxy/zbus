@@ -9,8 +9,8 @@ use crate::{
     ObjectPath, Signature, Type, Variant,
     message::FieldCode,
     names::{BusName, ErrorName, InterfaceName, MemberName, UniqueName},
+    wire::as_variant,
 };
-use zbus_utils::object_path;
 
 /// A collection of [`Field`] instances.
 ///
@@ -121,47 +121,93 @@ impl<'de> Visitor<'de> for FieldsVisitor {
         V: SeqAccess<'de>,
     {
         let mut fields = Fields::new();
-        while let Some((code, value)) = visitor.next_element::<(FieldCode, Variant<'de>)>()? {
-            match code {
-                FieldCode::Path => {
-                    let path = ObjectPath::try_from(value).map_err(V::Error::custom)?;
-                    // A variant doesn't check the object path it holds, unlike the name fields.
-                    object_path::validate(path.as_bytes())
-                        .map_err(|_| V::Error::custom(crate::Error::InvalidObjectPath))?;
-                    fields.path = Some(path)
-                }
-                FieldCode::Interface => {
-                    fields.interface =
-                        Some(InterfaceName::try_from(value).map_err(V::Error::custom)?)
-                }
-                FieldCode::Member => {
-                    fields.member = Some(MemberName::try_from(value).map_err(V::Error::custom)?)
-                }
-                FieldCode::ErrorName => {
-                    fields.error_name = Some(ErrorName::try_from(value).map_err(V::Error::custom)?)
-                }
-                FieldCode::ReplySerial => {
-                    let value = u32::try_from(value)
-                        .map_err(V::Error::custom)
-                        .and_then(|v| v.try_into().map_err(V::Error::custom))?;
-                    fields.reply_serial = Some(value)
-                }
-                FieldCode::Destination => {
-                    fields.destination = Some(BusName::try_from(value).map_err(V::Error::custom)?)
-                }
-                FieldCode::Sender => {
-                    fields.sender = Some(UniqueName::try_from(value).map_err(V::Error::custom)?)
-                }
-                FieldCode::Signature => {
-                    fields.signature =
-                        Cow::Owned(Signature::try_from(value).map_err(V::Error::custom)?)
-                }
-                FieldCode::UnixFDs => {
-                    fields.unix_fds = Some(u32::try_from(value).map_err(V::Error::custom)?)
-                }
+        while let Some(field) = visitor.next_element::<Field<'de>>()? {
+            match field {
+                Field::Path(path) => fields.path = Some(path),
+                Field::Interface(interface) => fields.interface = Some(interface),
+                Field::Member(member) => fields.member = Some(member),
+                Field::ErrorName(error_name) => fields.error_name = Some(error_name),
+                Field::ReplySerial(reply_serial) => fields.reply_serial = Some(reply_serial),
+                Field::Destination(destination) => fields.destination = Some(destination),
+                Field::Sender(sender) => fields.sender = Some(sender),
+                Field::Signature(signature) => fields.signature = Cow::Owned(signature),
+                Field::UnixFds(unix_fds) => fields.unix_fds = Some(unix_fds),
             }
         }
 
         Ok(fields)
     }
+}
+
+/// A header field: a `(code, variant)` structure, whose code tells the one type that its variant
+/// can hold, and so the type of the value.
+///
+/// The value is deserialized as that type, in a variant whose signature has to be that type
+/// ([`as_variant::Deserialize`]), rather than as a [`Variant`](enum@Variant), as which it could take
+/// far more memory than its bytes, such as 64 bytes for each byte of an `ay` on 64-bit targets. In
+/// the D-Bus format, a variant of another type is so refused from its signature, before its value
+/// is read.
+enum Field<'f> {
+    Path(ObjectPath<'f>),
+    Interface(InterfaceName<'f>),
+    Member(MemberName<'f>),
+    ErrorName(ErrorName<'f>),
+    ReplySerial(NonZeroU32),
+    Destination(BusName<'f>),
+    Sender(UniqueName<'f>),
+    Signature(Signature),
+    UnixFds(u32),
+}
+
+impl<'de: 'f, 'f> Deserialize<'de> for Field<'f> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_tuple(2, FieldVisitor)
+    }
+}
+
+struct FieldVisitor;
+
+impl<'de> Visitor<'de> for FieldVisitor {
+    type Value = Field<'de>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a D-Bus message header field")
+    }
+
+    fn visit_seq<V>(self, mut visitor: V) -> Result<Field<'de>, V::Error>
+    where
+        V: SeqAccess<'de>,
+    {
+        let code = visitor
+            .next_element::<FieldCode>()?
+            .ok_or_else(|| V::Error::invalid_length(0, &self))?;
+        let field = match code {
+            FieldCode::Path => value(&mut visitor)?.map(Field::Path),
+            FieldCode::Interface => value(&mut visitor)?.map(Field::Interface),
+            FieldCode::Member => value(&mut visitor)?.map(Field::Member),
+            FieldCode::ErrorName => value(&mut visitor)?.map(Field::ErrorName),
+            FieldCode::ReplySerial => value(&mut visitor)?.map(Field::ReplySerial),
+            FieldCode::Destination => value(&mut visitor)?.map(Field::Destination),
+            FieldCode::Sender => value(&mut visitor)?.map(Field::Sender),
+            FieldCode::Signature => value(&mut visitor)?.map(Field::Signature),
+            FieldCode::UnixFDs => value(&mut visitor)?.map(Field::UnixFds),
+        };
+
+        field.ok_or_else(|| V::Error::invalid_length(1, &self))
+    }
+}
+
+/// The value of a field, of type `T`, out of the variant that holds it, which is next in
+/// `visitor`.
+fn value<'de, V, T>(visitor: &mut V) -> Result<Option<T>, V::Error>
+where
+    V: SeqAccess<'de>,
+    T: Type + Deserialize<'de> + 'de,
+{
+    let value = visitor.next_element::<as_variant::Deserialize<'de, T>>()?;
+
+    Ok(value.map(|value| value.0))
 }

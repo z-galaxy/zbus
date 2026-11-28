@@ -1438,6 +1438,55 @@ fn a_reader_that_handed_its_buffer_over_reads_into_a_new_one() {
     });
 }
 
+/// A message that is whole but can't be taken, as its header counts more file descriptors than
+/// came in, or as it is invalid, is an error that leaves it in the reader, with the descriptors
+/// that wait, whether it is in the buffer or in an allocation of its own.
+#[cfg(all(target_os = "linux", feature = "handover"))]
+#[test]
+#[timeout(15000)]
+fn a_message_that_is_an_error_stays_in_the_reader() {
+    let (read_end, _write_end) = std::io::pipe().unwrap();
+    // A short message and a long one, each of which counts two descriptors.
+    let msgs = [100, 64 * 1024].map(|len| {
+        let fd = || Fd::from(read_end.as_fd());
+        let msg = Message::method_call("/", "Test")
+            .build(&(vec![0u8; len], fd(), fd()))
+            .unwrap();
+
+        msg.data().to_vec()
+    });
+
+    under_every_runtime(|runtime| {
+        let (msgs, read_end) = (&msgs, &read_end);
+
+        async move {
+            for msg in msgs {
+                // A protocol version that doesn't exist makes the message invalid.
+                let mut invalid = msg.clone();
+                invalid[3] = 2;
+                for bytes in [msg, &invalid] {
+                    // One of the two descriptors comes in.
+                    let fds = vec![read_end.try_clone().unwrap().into()];
+                    let script = VecDeque::from([(bytes.clone(), fds)]);
+                    let (mut reader, _peer) = scripted(&runtime, Scripted(Mutex::new(script)));
+
+                    let received = reader.receive_message(0, &mut vec![], &mut vec![]).await;
+
+                    match received.unwrap_err() {
+                        crate::Error::MissingParameter(_) if bytes == msg => (),
+                        crate::Error::InvalidField if bytes != msg => (),
+                        e => panic!("{e:?}"),
+                    }
+                    let (mut unread, mut fds) = (vec![], vec![]);
+                    reader.take_unread(&mut unread, &mut fds);
+                    assert_eq!(&unread, bytes);
+                    assert_eq!(fds.len(), 1, "the descriptor was taken");
+                }
+            }
+        }
+    });
+}
+
 /// A reader that takes over many long messages, as a connection that was handed over with a
 /// backlog leaves unread, grows its buffer to hold them all, and gives that room back once it took
 /// them out, whether the last of them is whole, or comes in part and moves into an allocation of

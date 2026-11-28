@@ -17,6 +17,9 @@ use crate::Fd;
 // https://github.com/z-galaxy/zbus/issues/138
 
 /// Owned [`Variant`](enum.Variant.html)
+///
+/// Like a [`Variant`](enum@Variant), it holds each value in an array, a dictionary or a structure
+/// as a `Variant` of its own: see [`Variant`'s documentation on memory](enum@Variant#memory).
 #[derive(Debug, PartialEq, Serialize, Type)]
 pub struct OwnedVariant(pub(crate) Variant<'static>);
 
