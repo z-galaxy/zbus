@@ -1184,5 +1184,32 @@ mod tests {
 
             assert_eq!(error, expected);
         }
+
+        // A method call with nothing but its path, and one whose path holds an array of 4 bytes.
+        for (field, expected) in [
+            (
+                &b"\x01\x01o\x00\x01\x00\x00\x00/\x00"[..],
+                Error::MissingField,
+            ),
+            (
+                &b"\x01\x02ay\x00\x00\x00\x00\x04\x00\x00\x00abcd"[..],
+                Error::InvalidField,
+            ),
+        ] {
+            let mut bytes = vec![b'l', 1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0];
+            bytes.extend_from_slice(&(field.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(field);
+            // The empty body starts on an 8-byte boundary.
+            bytes.resize(bytes.len().next_multiple_of(8), 0);
+
+            let error = Message::from_parts(
+                bytes,
+                #[cfg(unix)]
+                &mut vec![],
+            )
+            .unwrap_err();
+
+            assert_eq!(error, expected);
+        }
     }
 }
