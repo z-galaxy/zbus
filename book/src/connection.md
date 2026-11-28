@@ -83,9 +83,8 @@ of `zbus` has only the part of the API that this needs:
 
 * [`PrimaryHeader::parse_with_len`] gives the length of a message from its first 16 bytes, so that
   the program can read up to its end.
-* [`Message::from_parts`] makes a message of its bytes once they are all in, with the file
-  descriptors that its header counts, the first of those that came in. [`Header::parse`] tells how
-  many, from the bytes of the message.
+* [`Message::from_parts`] makes a message of its bytes once they are all in, and takes as many of
+  the file descriptors that came in as its header counts, the first of them.
 * A message goes out as the bytes and the file descriptors of [`Message::data`].
 * [`connection::handshake::Command`] parses and writes the commands of the authentication handshake,
   which comes before the messages.
@@ -95,7 +94,7 @@ of `zbus` has only the part of the API that this needs:
 ```rust,noplayground
 # #[cfg(unix)]
 # fn main() -> zbus::Result<()> {
-use zbus::message::{Header, Message, PrimaryHeader};
+use zbus::message::{Message, PrimaryHeader};
 
 // The bytes and the file descriptors that came in on a socket, not made into messages yet: here, a
 // call.
@@ -109,11 +108,7 @@ if bytes.len() >= 16 {
         // The call takes its bytes, and as many of the file descriptors as its header counts. If
         // fewer came in, the call is an error.
         let rest = bytes.split_off(len);
-        let count = Header::parse(&bytes)?.unix_fds().unwrap_or(0) as usize;
-        let call = Message::from_parts(
-            std::mem::replace(&mut bytes, rest),
-            fds.drain(..count.min(fds.len())).collect(),
-        )?;
+        let call = Message::from_parts(std::mem::replace(&mut bytes, rest), &mut fds)?;
         let reply = Message::method_return(&call.header()).build(&())?;
         // What goes out on the socket: the bytes of `reply.data()`, and its `fds()` along with
         // them.
@@ -213,7 +208,6 @@ has how to write one.
 [`Socket`]: https://docs.rs/zbus/latest/zbus/connection/socket/trait.Socket.html
 [`PrimaryHeader::parse_with_len`]: https://docs.rs/zbus/latest/zbus/message/struct.PrimaryHeader.html#method.parse_with_len
 [`Message::from_parts`]: https://docs.rs/zbus/latest/zbus/message/struct.Message.html#method.from_parts
-[`Header::parse`]: https://docs.rs/zbus/latest/zbus/message/struct.Header.html#method.parse
 [`Message::data`]: https://docs.rs/zbus/latest/zbus/message/struct.Message.html#method.data
 [`connection::handshake::Command`]: https://docs.rs/zbus/latest/zbus/connection/handshake/enum.Command.html
 [`ConnectionCredentials::from_socket`]: https://docs.rs/zbus/latest/zbus/fdo/struct.ConnectionCredentials.html#method.from_socket

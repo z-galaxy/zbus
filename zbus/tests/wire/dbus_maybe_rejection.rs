@@ -104,7 +104,7 @@ fn dbus_message_body_rejects_header_signature_carrying_maybe() {
     let msg = Message::from_parts(
         bytes,
         #[cfg(unix)]
-        vec![],
+        &mut vec![],
     )
     .unwrap();
     let body = msg.body();

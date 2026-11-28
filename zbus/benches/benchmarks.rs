@@ -57,7 +57,7 @@ fn msg_de(c: &mut Criterion) {
                 let msg = Message::from_parts(
                     black_box(bytes),
                     #[cfg(unix)]
-                    vec![],
+                    &mut vec![],
                 )
                 .unwrap();
                 black_box(msg);

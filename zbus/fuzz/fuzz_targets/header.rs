@@ -46,7 +46,7 @@ fn check(data: &[u8], endian: Endian) {
     let received = Message::from_parts(
         data.to_vec(),
         #[cfg(unix)]
-        vec![],
+        &mut vec![],
     );
     let encoded = Data::new(data, ctxt);
     let decoded = encoded.deserialize::<Header<'_>>();
@@ -111,7 +111,7 @@ fn check(data: &[u8], endian: Endian) {
     let reread = Message::from_parts(
         new.data().to_vec(),
         #[cfg(unix)]
-        vec![],
+        &mut vec![],
     )
     .unwrap();
     for new in [&new, &reread] {
