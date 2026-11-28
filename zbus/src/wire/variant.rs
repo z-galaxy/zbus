@@ -72,7 +72,24 @@ use crate::Fd;
 /// );
 /// ```
 ///
+/// # Memory
+///
+/// A `Variant` takes 64 bytes on 64-bit targets, and 32 on 32-bit ones, whatever the type of its
+/// value, and holds each value of an array, a dictionary or a structure as a `Variant` of its own.
+/// Most D-Bus messages are small, so this rarely matters, but a large array of small values takes
+/// many times as much memory as a `Variant` as it does in a message: an array of bytes (`ay`) 64
+/// times as much. Where you know the type of a value, deserialize it as that type instead, such as
+/// an `ay` as a `&[u8]`, which borrows its bytes, or as a `Vec<u8>`.
+///
+/// The same goes for the values that a service receives: the `Set` method of the
+/// `org.freedesktop.DBus.Properties` interface, which every object that a zbus service serves has,
+/// takes the value of a property as a `Variant`, as does a method that takes a `Variant`, an
+/// [`OwnedVariant`] or a value that holds one, such as a dictionary of `OwnedVariant`s for an
+/// `a{sv}`. See [#2175] for holding such values in less memory.
+///
 /// [D-Bus specification]: https://dbus.freedesktop.org/doc/dbus-specification.html#container-types
+/// [`OwnedVariant`]: struct@OwnedVariant
+/// [#2175]: https://github.com/z-galaxy/zbus/issues/2175
 #[derive(Debug, PartialEq, PartialOrd)]
 pub enum Variant<'a> {
     // Simple types

@@ -21,6 +21,9 @@ use crate::{
 ///
 /// API is provided to convert from, and to a [`Vec`].
 ///
+/// Each of its elements is a [`Variant`] of its own, which takes at least 64 bytes on 64-bit
+/// targets whatever its type: see [`Variant`'s documentation on memory](enum@Variant#memory).
+///
 /// [`Variant`]: enum.Variant.html#variant.Array
 /// [`Vec`]: https://doc.rust-lang.org/std/vec/struct.Vec.html
 #[derive(Debug, Hash, PartialEq, PartialOrd, Eq, Ord)]
